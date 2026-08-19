@@ -2,6 +2,31 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-19 — 完成 Python wheel 交付和客户全流程指南
+
+### 修改原因
+
+- 客户需要通过 `pip install` 安装可分发 wheel，而不是依赖源码目录或手工设置 `PYTHONPATH`。
+- 原 README 只给出开发态启动命令，没有从首次安装、MASQUE 内外部配置到 SDK 函数调用的完整操作路径。
+- 原 example 只初始化并常驻，没有实际跑遍身份、能力、发现、建群、群组配置、消息和卸载流程。
+
+### 修改方式
+
+- 完善 `agent-connect-sdk` 包元数据，增加运行时版本 `agent_sdk.__version__`、`py.typed` 类型标记以及构建/测试开发依赖组。
+- wheel 新增 `agent-masque-proxy` 命令，统一读取 JSON 配置并按 token 建立唯一 `agent_ip + uesimtun + allowed_peer_cidrs` 会话策略；原服务器 example 改为该命令的兼容入口。
+- wheel 新增 `agent-sdk-self-check` 命令，以真实 `AgentSdk` 核心和内存边界适配器完整调用主要北向 API；仓库 `examples/full_flow_demo.py` 复用同一实现。
+- 重写 Python 客户指南，覆盖 wheel 构建、联网/离线安装、安装验收、UERANSIM 和 MASQUE Proxy 配置、端侧 `init` 参数、监听器、全部函数调用、A→5GC→B 数据路径和故障定位。
+- 根 README 改为交付入口，链接客户指南、全流程示例、真实端侧示例、Proxy 配置模板和 Android 说明。
+- `dist/` 加入忽略列表，构建产物保留为本地交付物，不纳入源码 commit。
+
+### 验证内容
+
+- Python 全量测试结果：`30 passed`；新增全流程 example 和 Proxy 配置/会话映射测试。
+- `python/src`、`python/examples` 和 `python/tests` 全部通过 `compileall`。
+- 在全新虚拟环境中执行普通 `pip install`，依赖自动安装完成，`pip check` 返回 `No broken requirements found`。
+- wheel 内的 `agent-sdk-self-check` 输出 `FULL FLOW DEMO PASSED`，`agent-masque-proxy --help` 和 `agent_sdk.__version__` 均验证通过。
+- 本地交付物为 `python/dist/agent_connect_sdk-0.1.0-py3-none-any.whl`，SHA-256 为 `488c0d411a9ec3cb427de69f0a50b20dcda8a785b2af21da3fee245676b3ed59`。
+
 ## 2026-08-19 — 同步本地接口文档与当前 SDK 契约
 
 ### 修改原因

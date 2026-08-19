@@ -1,31 +1,24 @@
-# Agent SDK implementation
+# Orange Agent SDK
 
-This workspace contains the V4.1 SDK implementation while preserving both
-design documents unchanged except for the already-created user-friendly V4.1
-document.
+本仓库包含 Linux/Python SDK 和 Android/RayNeoOS SDK。
 
-- `python/`: Linux Python SDK, real `/dev/net/tun`, pyroute2 routes, aioquic
-  CONNECT-IP, local REST endpoints, group cache, tests and runnable examples.
-- `android/`: Kotlin Android/RayNeoOS library, `VpnService`, dynamic peer routes,
-  group cache, JNI MASQUE boundary, unit tests and an example app.
+当前 Linux/Python 版本可以构建为 `agent-connect-sdk` wheel。客户安装 wheel 后即可导入 `agent_sdk`，端侧通过 TUN + MASQUE CONNECT-IP 接入 UERANSIM/5GC，发送消息时只需要提供 `group_id`、`target_agent_id` 和消息体。
 
-The address examples are deployment values only. SDK source code obtains all
-physical IPs, Agent TUN addresses, ports and MASQUE endpoints from initialization
-parameters. A2A target `agent_ip + tcp_port` is resolved exclusively from the
-latest accepted `acf_group_config` snapshot.
+完整的 wheel 构建、客户安装、MASQUE 服务器/端侧配置、全流程调用示例、函数清单和故障排查见：
 
-## Verify
+- [Linux/Python 客户使用指南](python/README.md)
+- [离线全流程示例](python/examples/full_flow_demo.py)
+- [真实 Linux 端侧示例](python/examples/linux_agent.py)
+- [MASQUE Proxy 配置模板](python/examples/masque-proxy.example.json)
+- [Android/RayNeoOS 使用说明](android/README.md)
+
+快速验证 Python 实现：
 
 ```bash
 cd python
 python3 -m pip install -e '.[test]'
 pytest -q
-
-cd ../android
-export ANDROID_HOME=/path/to/android-sdk
-./gradlew :agent-sdk:testDebugUnitTest :example-app:assembleDebug
+agent-sdk-self-check
 ```
 
-For Android device execution, add the ABI-specific `libmasque_core.so` described
-in `android/agent-sdk/src/main/cpp/README.md`. Compilation and JVM tests do not
-load the native library because transports are injected with test doubles.
+设计和示例中的 IP 地址均为部署参数，SDK 源码不硬编码物理地址、Agent TUN 地址、对端地址或端口。对端地址和动态路由只来自通过验证的 `acf_group_config`。
