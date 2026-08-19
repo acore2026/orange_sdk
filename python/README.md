@@ -44,6 +44,13 @@ address through deployment configuration.
 The example proof verifier is intentionally demo-only. Production deployments
 must inject a verifier backed by the configured network trust anchor.
 
+Control-plane HTTP bodies are sent to AgentRuntime with the network functions'
+original field names and nesting. Production deployments must inject a
+`ControlRequestAuthenticator` that adds the required request timestamp and
+signature/proof using the Agent's private key. AgentRuntime forwards these JSON
+bodies unchanged; SDK-side response parsing consumes fields such as `vc0`,
+`vc1`, and `result[].agent_card` directly.
+
 After a valid `acf_group_config` notification arrives, the SDK verifies and
 commits the member endpoint cache and peer routes internally. The optional
 network listener is notified after the commit; its return value does not control

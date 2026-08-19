@@ -7,6 +7,7 @@ from pathlib import Path
 from agent_sdk import AgentProfile, AgentSdk, NetworkMessageAction, NetworkMessageType
 from agent_sdk.security import (
     DemoAcceptAllProofVerifier,
+    DemoControlRequestAuthenticator,
     DemoMessageSignatureVerifier,
     DemoMessageSigner,
 )
@@ -33,6 +34,7 @@ async def main(args) -> None:
     # deployment's trusted JWS verifier before using this example in production.
     sdk = AgentSdk(
         proof_verifier=DemoAcceptAllProofVerifier(),
+        control_request_authenticator=DemoControlRequestAuthenticator(),
         message_signer=DemoMessageSigner(),
         message_signature_verifier=DemoMessageSignatureVerifier(),
     )

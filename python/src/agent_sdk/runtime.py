@@ -82,7 +82,15 @@ class HttpRuntimeTransport:
                 f"Runtime request failed: {exc}",
                 retryable=True,
             ) from exc
-        payload = response.json()
+        if not response.content:
+            return {}
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime response must be JSON or an empty success response",
+            ) from exc
         if not isinstance(payload, Mapping):
             raise AgentSdkError(
                 ErrorCode.RUNTIME_REJECTED, "Runtime response must be a JSON object"

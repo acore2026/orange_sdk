@@ -19,6 +19,12 @@ class MessageSignatureVerifier(Protocol):
     ) -> None: ...
 
 
+class ControlRequestAuthenticator(Protocol):
+    async def authenticate(
+        self, path: str, payload: Mapping[str, Any]
+    ) -> Mapping[str, Any]: ...
+
+
 class RuntimeTransport(Protocol):
     async def connect(self) -> None: ...
 

@@ -68,12 +68,44 @@ class FakeRuntime:
         self.requests.append((method, path, body))
         if path == "/idm/v1/identity-applications":
             return {
+                "result": "success",
                 "agent_id": LOCAL_ID,
-                "agent_name": "Agent A",
-                "identity_vc": {"id": "vc-a"},
+                "vc0": {
+                    "id": "vc-a",
+                    "claims": {"agent_id": LOCAL_ID, "agent_name": "Agent A"},
+                },
+            }
+        if path == "/idm/v1/network-ability":
+            return {
+                "timestamp": "2026-08-19T00:00:01Z",
+                "vc1": {
+                    "id": "vc-network-a",
+                    "valid_until": "2027-08-19T00:00:00Z",
+                    "claims": {
+                        "agent_id": LOCAL_ID,
+                        "abilities": ["compute_offloading", "agent_discovery"],
+                    },
+                },
+            }
+        if path == "/arf/v1/agent-discoveries":
+            return {
+                "task_id": "task-1",
+                "result": [
+                    {
+                        "agent_card": {
+                            "agent_id": PEER_ID,
+                            "agent_ip": "8.8.8.8",
+                            "tcp_port": "4001",
+                            "udp_port": "28443",
+                            "skills": ["camera"],
+                        },
+                        "priority": 1,
+                    }
+                ],
+                "timestamp": "2026-08-19T00:00:01Z",
             }
         if path == "/acf/v1/agents-grouping":
-            return {"group_id": "g1"}
+            return {"status": "grouped", "group_id": "g1"}
         if path == "/compute/v1/offloading-sessions":
             return {
                 "session_id": "session-1",
@@ -148,6 +180,25 @@ class FakeSignatureVerifier:
 class FakeMessageSigner:
     async def sign_a2a(self, payload):
         return {"jws": "test-message-signature"}
+
+
+class FakeControlRequestAuthenticator:
+    async def authenticate(self, path, payload):
+        del payload
+        if path in {
+            "/idm/v1/identity-applications",
+            "/acn-agent/v1/agent-deletions",
+            "/arf/v1/agent-cards",
+        }:
+            return {
+                "timestamp": "2026-08-19T00:00:00Z",
+                "signature": "test-signature",
+                "signature_encoding": "base64",
+            }
+        return {
+            "timestamp": "2026-08-19T00:00:00Z",
+            "proof": {"jws": "test-proof"},
+        }
 
 
 class FakeVideoUpload:
@@ -255,6 +306,7 @@ async def sdk_fixture():
 
     sdk = AgentSdk(
         proof_verifier=proof,
+        control_request_authenticator=FakeControlRequestAuthenticator(),
         peer_messenger=messenger,
         message_signature_verifier=signature_verifier,
         message_signer=FakeMessageSigner(),

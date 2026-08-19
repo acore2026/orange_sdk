@@ -1,8 +1,52 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from .errors import AgentSdkError, ErrorCode
+
+
+class RejectUnconfiguredControlRequestAuthenticator:
+    async def authenticate(
+        self, path: str, payload: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        del path, payload
+        raise AgentSdkError(
+            ErrorCode.SIGNATURE_ERROR,
+            "no control-plane request authenticator is configured",
+        )
+
+
+class DemoControlRequestAuthenticator:
+    """Test/example only. Production applications must use real private keys."""
+
+    _LEGACY_SIGNATURE_PATHS = {
+        "/idm/v1/identity-applications",
+        "/acn-agent/v1/agent-deletions",
+        "/arf/v1/agent-cards",
+    }
+
+    async def authenticate(
+        self, path: str, payload: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        del payload
+        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        if path in self._LEGACY_SIGNATURE_PATHS:
+            return {
+                "timestamp": timestamp,
+                "signature": "demo-only-signature",
+                "signature_encoding": "base64",
+            }
+        return {
+            "timestamp": timestamp,
+            "proof": {
+                "type": "DemoOnly",
+                "verification_method": "did:key:demo#demo",
+                "proof_purpose": "authentication",
+                "created": timestamp,
+                "jws": "demo-only-jws",
+            },
+        }
 
 
 class RejectUnconfiguredProofVerifier:

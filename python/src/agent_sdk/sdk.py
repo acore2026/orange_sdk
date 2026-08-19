@@ -11,6 +11,7 @@ from typing import Any
 from .config import SdkConfig
 from .contracts import (
     ConnectIpTransport,
+    ControlRequestAuthenticator,
     GroupMessageListener,
     LocalServer,
     MediaOffloadAdapter,
@@ -44,6 +45,7 @@ from .rest_server import AiohttpLocalServer
 from .routes import GroupRouteManager, Pyroute2RouteBackend, RouteBackend
 from .runtime import HttpPeerMessenger, HttpRuntimeTransport
 from .security import (
+    RejectUnconfiguredControlRequestAuthenticator,
     RejectUnconfiguredMessageSignatureVerifier,
     RejectUnconfiguredMessageSigner,
     RejectUnconfiguredProofVerifier,
@@ -64,6 +66,7 @@ class AgentSdk:
         self,
         *,
         proof_verifier: ProofVerifier | None = None,
+        control_request_authenticator: ControlRequestAuthenticator | None = None,
         message_signer: MessageSigner | None = None,
         message_signature_verifier: MessageSignatureVerifier | None = None,
         peer_messenger: PeerMessenger | None = None,
@@ -75,6 +78,10 @@ class AgentSdk:
         media_offload_adapter: MediaOffloadAdapter | None = None,
     ) -> None:
         self._proof_verifier = proof_verifier or RejectUnconfiguredProofVerifier()
+        self._control_request_authenticator = (
+            control_request_authenticator
+            or RejectUnconfiguredControlRequestAuthenticator()
+        )
         self._message_signer = message_signer or RejectUnconfiguredMessageSigner()
         self._message_signature_verifier = (
             message_signature_verifier or RejectUnconfiguredMessageSignatureVerifier()
@@ -387,9 +394,9 @@ class AgentSdk:
     ) -> AgentProfile:
         self._require_ready()
         assert self._runtime is not None
-        response = await self._runtime.request(
-            "POST",
-            "/idm/v1/identity-applications",
+        path = "/idm/v1/identity-applications"
+        body = await self._authenticate_control_request(
+            path,
             {
                 "owner": owner,
                 "name": name,
@@ -398,10 +405,18 @@ class AgentSdk:
                 "metadata": dict(metadata or {}),
             },
         )
+        response = await self._runtime.request("POST", path, body)
+        vc0 = self._require_response_object(response, "vc0")
+        claims = vc0.get("claims")
+        response_name = name
+        if isinstance(claims, Mapping) and isinstance(
+            claims.get("agent_name"), str
+        ):
+            response_name = str(claims["agent_name"])
         profile = AgentProfile(
             agent_id=str(response["agent_id"]),
-            agent_name=str(response.get("agent_name", name)),
-            identity_vc=dict(response.get("identity_vc", {})),
+            agent_name=response_name,
+            identity_vc=dict(vc0),
         )
         self._profile = profile
         return profile
@@ -410,14 +425,16 @@ class AgentSdk:
         """Restore a previously verified profile from secure local storage."""
         self._profile = profile
 
-    async def deregister_identity(self, agent_id: str, reason: str = "") -> OperationResult:
+    async def deregister_identity(
+        self, agent_id: str, reason: str = "retired"
+    ) -> OperationResult:
         self._require_ready()
         assert self._runtime is not None
-        response = await self._runtime.request(
-            "POST",
-            "/acn-agent/v1/agent-deletions",
-            {"agent_id": agent_id, "reason": reason},
+        path = "/acn-agent/v1/agent-deletions"
+        body = await self._authenticate_control_request(
+            path, {"agent_id": agent_id, "reason": reason}
         )
+        response = await self._runtime.request("POST", path, body)
         if self._profile and self._profile.agent_id == agent_id:
             self._profile = None
         return OperationResult(
@@ -427,26 +444,45 @@ class AgentSdk:
         )
 
     async def get_network_ability(
-        self, agent_id: str, intent: str = ""
+        self, agent_id: str, intent: str = "Get Network Ability VC"
     ) -> NetworkAbility:
         self._require_ready()
         assert self._runtime is not None
-        response = await self._runtime.request(
-            "POST", "/idm/v1/network-ability", {"agent_id": agent_id, "intent": intent}
+        path = "/idm/v1/network-ability"
+        body = await self._authenticate_control_request(
+            path, {"agent_id": agent_id, "intent": intent}
         )
+        response = await self._runtime.request("POST", path, body)
+        vc1 = self._require_response_object(response, "vc1")
+        claims = vc1.get("claims")
+        abilities: tuple[str, ...] = ()
+        if isinstance(claims, Mapping):
+            raw_abilities = claims.get("abilities")
+            if isinstance(raw_abilities, list) and all(
+                isinstance(item, str) for item in raw_abilities
+            ):
+                abilities = tuple(raw_abilities)
+            elif isinstance(claims.get("agent_attribute"), str):
+                abilities = (str(claims["agent_attribute"]),)
+        valid_until = self._parse_optional_datetime(vc1.get("valid_until"))
         return NetworkAbility(
-            ability_vc=dict(response.get("ability_vc", {})),
-            abilities=tuple(response.get("abilities", ())),
-            valid_until=None,
+            ability_vc=dict(vc1),
+            abilities=abilities,
+            valid_until=valid_until,
         )
 
     async def register_capabilities(
         self, agent_id: str, priority: int, credentials: Sequence[Mapping[str, Any]]
     ) -> OperationResult:
+        path = "/arf/v1/agent-cards"
+        body = await self._authenticate_control_request(
+            path,
+            {"agent_id": agent_id, "priority": priority, "vc_list": list(credentials)},
+        )
         return await self._operation(
             "POST",
-            "/arf/v1/agent-cards",
-            {"agent_id": agent_id, "priority": priority, "vc_list": list(credentials)},
+            path,
+            body,
         )
 
     async def update_capabilities(
@@ -455,14 +491,21 @@ class AgentSdk:
         update_items: Sequence[Mapping[str, Any]],
         credentials: Sequence[Mapping[str, Any]],
     ) -> OperationResult:
-        return await self._operation(
-            "POST",
-            "/arf/v1/agent-cards-update",
+        path = "/arf/v1/agent-cards-update"
+        body = await self._authenticate_control_request(
+            path,
             {
+                "request_id": f"urn:uuid:{uuid.uuid4()}",
+                "request_type": "agent_registration_update",
                 "agent_id": agent_id,
                 "update_items": list(update_items),
                 "credentials": list(credentials),
             },
+        )
+        return await self._operation(
+            "POST",
+            path,
+            body,
         )
 
     async def discover_agents(
@@ -476,9 +519,9 @@ class AgentSdk:
     ) -> list[DiscoveredAgent]:
         self._require_ready()
         assert self._runtime is not None
-        response = await self._runtime.request(
-            "POST",
-            "/arf/v1/agent-discoveries",
+        path = "/arf/v1/agent-discoveries"
+        body = await self._authenticate_control_request(
+            path,
             {
                 "task_id": task_id,
                 "agent_id": agent_id,
@@ -488,17 +531,33 @@ class AgentSdk:
                 "max_results": max_results,
             },
         )
-        agents = [
-            DiscoveredAgent(
-                agent_id=str(item["agent_id"]),
-                ip=str(item.get("ip", "")),
-                tcp_port=int(item.get("tcp_port", 0)),
-                udp_port=int(item.get("udp_port", 0)),
-                skills=tuple(item.get("skills", ())),
-                priority=int(item.get("priority", 0)),
+        response = await self._runtime.request("POST", path, body)
+        raw_results = response.get("result")
+        if not isinstance(raw_results, list):
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime response field result must be an array",
+                field="result",
             )
-            for item in response.get("agents", ())
-        ]
+        agents: list[DiscoveredAgent] = []
+        for index, item in enumerate(raw_results):
+            if not isinstance(item, Mapping):
+                raise AgentSdkError(
+                    ErrorCode.RUNTIME_REJECTED,
+                    f"Runtime response result[{index}] must be an object",
+                )
+            card = self._require_response_object(item, "agent_card")
+            tcp_port = card.get("tcp_port", card.get("agent_port", 0))
+            agents.append(
+                DiscoveredAgent(
+                    agent_id=str(card["agent_id"]),
+                    ip=str(card.get("agent_ip", "")),
+                    tcp_port=int(tcp_port),
+                    udp_port=int(card.get("udp_port", 0)),
+                    skills=tuple(card.get("skills", ())),
+                    priority=int(item.get("priority", 0)),
+                )
+            )
         return sorted(agents, key=lambda item: item.priority)
 
     async def create_group(
@@ -511,17 +570,20 @@ class AgentSdk:
     ) -> GroupInfo:
         self._require_ready()
         assert self._runtime is not None
-        response = await self._runtime.request(
-            "POST",
-            "/acf/v1/agents-grouping",
+        path = "/acf/v1/agents-grouping"
+        body = await self._authenticate_control_request(
+            path,
             {
                 "agent_id": agent_id,
-                "target_agent_ids": list(target_agent_ids),
-                "group_name": group_name,
-                "scope": scope,
-                "max_members": max_members,
+                "target_agents": list(target_agent_ids),
+                "group_config": {
+                    "group_name": group_name,
+                    "scope": scope,
+                    "max_members": max_members,
+                },
             },
         )
+        response = await self._runtime.request("POST", path, body)
         info = GroupInfo(str(response["group_id"]), group_name)
         self._group_info[info.group_id] = info
         return info
@@ -655,6 +717,46 @@ class AgentSdk:
             str(response.get("operation_id", "")),
             str(response.get("message", "")),
         )
+
+    async def _authenticate_control_request(
+        self, path: str, body: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        authentication = await self._control_request_authenticator.authenticate(
+            path, body
+        )
+        overlap = set(body).intersection(authentication)
+        if overlap:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "control request authenticator overwrote business fields: "
+                f"{sorted(overlap)}",
+            )
+        return {**body, **authentication}
+
+    @staticmethod
+    def _require_response_object(
+        response: Mapping[str, Any], field: str
+    ) -> Mapping[str, Any]:
+        value = response.get(field)
+        if not isinstance(value, Mapping):
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                f"Runtime response field {field} must be an object",
+                field=field,
+            )
+        return value
+
+    @staticmethod
+    def _parse_optional_datetime(value: Any) -> datetime | None:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime response contains an invalid RFC3339 timestamp",
+            ) from exc
 
     async def get_group_snapshot(self, group_id: str) -> GroupConfigSnapshot | None:
         if self._groups is None:

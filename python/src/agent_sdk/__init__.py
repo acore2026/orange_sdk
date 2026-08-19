@@ -1,5 +1,10 @@
 from .errors import AgentSdkError, ErrorCode
-from .contracts import MediaOffloadAdapter, RemoteVideoStream, VideoUploadHandle
+from .contracts import (
+    ControlRequestAuthenticator,
+    MediaOffloadAdapter,
+    RemoteVideoStream,
+    VideoUploadHandle,
+)
 from .models import (
     AgentProfile,
     DiscoveredAgent,
@@ -20,6 +25,7 @@ __all__ = [
     "AgentSdk",
     "AgentSdkError",
     "AgentProfile",
+    "ControlRequestAuthenticator",
     "DiscoveredAgent",
     "ErrorCode",
     "GroupConfigSnapshot",
