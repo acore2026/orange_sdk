@@ -2,6 +2,32 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-19 — 增加本地结构化日志和 HTTP 全链路记录
+
+### 修改原因
+
+- 原 SDK 仅在群组 listener 异常时输出一条模块日志，无法从本地文件还原函数调用、AgentRuntime/A2A 请求响应或 CONNECT-IP 协商过程。
+- 客户现场需要长期保存日志，同时必须控制文件大小并避免 token、凭证、签名和 VC 等敏感信息明文落盘。
+
+### 修改方式
+
+- `AgentSdk.init()` 增加 `log_file_path`、`log_level`、`log_max_bytes` 和 `log_backup_count`，默认写入 `./logs/agent-sdk.log`，采用 10 MiB × 5 份轮转。
+- 所有公开 SDK 函数记录 `function_enter/function_exit/function_error`，包含脱敏参数、脱敏结果、错误码、异常和耗时；初始化前注册 listener 的日志会在 `init()` 配置文件日志后补写。
+- AgentRuntime 出站请求、A2A 出站请求、本地 Runtime/A2A 入站请求及响应全部记录关联 ID、方向、方法、URL、状态码和脱敏消息体。
+- MASQUE 客户端与 Proxy 两侧记录 HTTP/3 CONNECT-IP 请求、响应状态和协商头；Proxy JSON 配置增加独立的本地日志和轮转参数。
+- 新增统一递归脱敏，覆盖 Authorization、Cookie、API key、token、password、secret、签名、proof/JWS、公私钥、DID key、VC/credentials 及 VC 标识。
+- 新增 `LOG_SETUP_FAILED`，在日志目录不可创建或文件不可写时阻止 SDK 以无日志状态启动。
+- Python 客户指南和真实 Linux example 同步增加日志配置、实时查看、错误检索、轮转和脱敏说明。
+- wheel 版本从 `0.1.0` 提升到 `0.2.0`，避免覆盖已经交付的旧版本。
+
+### 验证内容
+
+- Python 全量测试结果：`35 passed`；新增函数成功/异常、Runtime HTTP、入站 HTTP、HTTP/3 CONNECT-IP、敏感字段脱敏、非法日志级别和文件轮转测试。
+- `python/src`、`python/examples` 和 `python/tests` 全部通过 `compileall`。
+- 在隔离环境中重新安装 wheel 后，`pip check` 无依赖问题，`agent-sdk-self-check` 输出 `FULL FLOW DEMO PASSED`，并实际生成本地日志文件。
+- 安装验收日志未出现测试 token、签名、JWS、`vc0` 或 `vc1` 明文值。
+- 本地交付物为 `python/dist/agent_connect_sdk-0.2.0-py3-none-any.whl`，SHA-256 为 `e42a1557c92db4fa4dfadd535a10cf13b4e58dc48257f0f35757880025db2cd2`。
+
 ## 2026-08-19 — 完成 Python wheel 交付和客户全流程指南
 
 ### 修改原因

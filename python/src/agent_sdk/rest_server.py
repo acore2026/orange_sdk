@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+import json
+import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any, Mapping
 
 from aiohttp import web
 
 from .errors import AgentSdkError, ErrorCode
+from .logging_utils import log_event
 from .models import NetworkMessageAction
 
 
 class AiohttpLocalServer:
-    def __init__(self) -> None:
+    def __init__(self, *, logger: logging.Logger | None = None) -> None:
         self._runner: web.AppRunner | None = None
         self._sites: list[web.BaseSite] = []
         self._physical_ip = ""
         self._agent_ip = ""
+        self._logger = logger or logging.getLogger(__name__)
 
     async def start(
         self,
@@ -32,7 +37,79 @@ class AiohttpLocalServer:
         del udp_port  # UDP application transport is a separate extension point.
         self._physical_ip = physical_ip
         self._agent_ip = agent_ip
-        app = web.Application(client_max_size=1024 * 1024)
+        @web.middleware
+        async def http_logging(request: web.Request, handler):
+            request_id = uuid.uuid4().hex
+            request["sdk_log_request_id"] = request_id
+            peername = request.transport.get_extra_info("peername")
+            log_event(
+                self._logger,
+                logging.INFO,
+                "http_request",
+                request_id=request_id,
+                direction="inbound",
+                peer="AgentRuntime" if request.path.startswith("/agent/") else "Agent",
+                method=request.method,
+                url=str(request.url),
+                remote_address=peername[0] if peername else None,
+                local_address=local_address(request),
+                headers=dict(request.headers),
+            )
+            try:
+                response = await handler(request)
+            except web.HTTPException as exc:
+                log_event(
+                    self._logger,
+                    logging.WARNING,
+                    "http_response",
+                    request_id=request_id,
+                    direction="outbound",
+                    peer="AgentRuntime" if request.path.startswith("/agent/") else "Agent",
+                    method=request.method,
+                    url=str(request.url),
+                    status_code=exc.status,
+                    body=exc.text,
+                )
+                raise
+            except Exception as exc:
+                log_event(
+                    self._logger,
+                    logging.ERROR,
+                    "http_error",
+                    exc_info=True,
+                    request_id=request_id,
+                    direction="outbound",
+                    peer="AgentRuntime" if request.path.startswith("/agent/") else "Agent",
+                    method=request.method,
+                    url=str(request.url),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                raise
+            response_body: Any = None
+            if response.body:
+                try:
+                    response_body = json.loads(response.body)
+                except (TypeError, ValueError):
+                    response_body = f"<non-json-response:{len(response.body)} bytes>"
+            log_event(
+                self._logger,
+                logging.INFO if response.status < 400 else logging.WARNING,
+                "http_response",
+                request_id=request_id,
+                direction="outbound",
+                peer="AgentRuntime" if request.path.startswith("/agent/") else "Agent",
+                method=request.method,
+                url=str(request.url),
+                status_code=response.status,
+                body=response_body,
+            )
+            return response
+
+        app = web.Application(
+            client_max_size=1024 * 1024,
+            middlewares=[http_logging],
+        )
 
         async def parse(request: web.Request) -> Mapping[str, Any]:
             try:
@@ -41,6 +118,17 @@ class AiohttpLocalServer:
                 raise web.HTTPBadRequest(text="invalid JSON") from exc
             if not isinstance(payload, Mapping):
                 raise web.HTTPBadRequest(text="JSON object required")
+            log_event(
+                self._logger,
+                logging.INFO,
+                "http_request_body",
+                request_id=request.get("sdk_log_request_id"),
+                direction="inbound",
+                peer="AgentRuntime" if request.path.startswith("/agent/") else "Agent",
+                method=request.method,
+                url=str(request.url),
+                body=payload,
+            )
             return payload
 
         def local_address(request: web.Request) -> str:

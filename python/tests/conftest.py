@@ -287,7 +287,7 @@ def group_payload(
 
 
 @pytest.fixture
-async def sdk_fixture():
+async def sdk_fixture(tmp_path):
     tun = FakeTun()
     masque = FakeMasque()
     runtime = FakeRuntime()
@@ -325,6 +325,7 @@ async def sdk_fixture():
         28443,
         agent_tun_cidr="8.8.8.7/24",
         masque_server_url="https://192.168.3.10:4433",
+        log_file_path=str(tmp_path / "agent-sdk.log"),
     )
     sdk.set_local_profile_for_restore(
         AgentProfile(LOCAL_ID, "Agent A", {"id": "vc-a"})
@@ -341,5 +342,6 @@ async def sdk_fixture():
         "messenger": messenger,
         "signature_verifier": signature_verifier,
         "media": media,
+        "log_path": tmp_path / "agent-sdk.log",
     }
     await sdk.close()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 import ssl
 from collections.abc import Awaitable, Callable, Mapping
@@ -16,6 +17,7 @@ from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import ConnectionTerminated, QuicEvent
 
 from .tun import validate_ip_packet
+from .logging_utils import log_event
 
 
 class UePacketAdapter(Protocol):
@@ -120,11 +122,13 @@ class ConnectIpProxyProtocol(QuicConnectionProtocol):
         self,
         *args: Any,
         session_resolver: TokenSessionResolver,
+        logger: logging.Logger | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.http = H3Connection(self._quic, enable_webtransport=True)
         self._resolver = session_resolver
+        self._logger = logger or logging.getLogger(__name__)
         self._sessions: dict[int, ConnectIpProxySession] = {}
         self._pending_streams: set[int] = set()
 
@@ -147,6 +151,26 @@ class ConnectIpProxyProtocol(QuicConnectionProtocol):
 
     def _handle_headers(self, event: HeadersReceived) -> None:
         headers = dict(event.headers)
+        decoded_headers = {
+            name.decode("utf-8", "replace"): value.decode("utf-8", "replace")
+            for name, value in event.headers
+        }
+        log_event(
+            self._logger,
+            logging.INFO,
+            "http_request",
+            direction="inbound",
+            peer="Agent",
+            protocol="HTTP/3 CONNECT-IP",
+            stream_id=event.stream_id,
+            method=decoded_headers.get(":method"),
+            url=(
+                f"https://{decoded_headers.get(':authority', '')}"
+                f"{decoded_headers.get(':path', '')}"
+            ),
+            headers=decoded_headers,
+            body=None,
+        )
         valid_connect = (
             headers.get(b":method") == b"CONNECT"
             and headers.get(b":protocol") == b"connect-ip"
@@ -154,12 +178,14 @@ class ConnectIpProxyProtocol(QuicConnectionProtocol):
         )
         policy = self._resolver.resolve(headers) if valid_connect else None
         if policy is None or event.stream_id in self._pending_streams:
+            status = 403 if valid_connect else 400
             self.http.send_headers(
                 event.stream_id,
-                [(b":status", b"403" if valid_connect else b"400")],
+                [(b":status", str(status).encode())],
                 end_stream=True,
             )
             self.transmit()
+            self._log_http_response(event.stream_id, status)
             return
         self._pending_streams.add(event.stream_id)
         asyncio.create_task(self._open_session(event.stream_id, policy))
@@ -174,9 +200,15 @@ class ConnectIpProxyProtocol(QuicConnectionProtocol):
         )
         try:
             await session.start()
-        except Exception:
+        except Exception as exc:
             self.http.send_headers(stream_id, [(b":status", b"502")], end_stream=True)
             self.transmit()
+            self._log_http_response(
+                stream_id,
+                502,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
         else:
             self._sessions[stream_id] = session
             self.http.send_headers(
@@ -185,8 +217,37 @@ class ConnectIpProxyProtocol(QuicConnectionProtocol):
                 end_stream=False,
             )
             self.transmit()
+            self._log_http_response(
+                stream_id,
+                200,
+                headers={"capsule-protocol": "?1"},
+            )
         finally:
             self._pending_streams.discard(stream_id)
+
+    def _log_http_response(
+        self,
+        stream_id: int,
+        status_code: int,
+        *,
+        headers: Mapping[str, str] | None = None,
+        error_type: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        log_event(
+            self._logger,
+            logging.INFO if 200 <= status_code < 300 else logging.WARNING,
+            "http_response",
+            direction="outbound",
+            peer="Agent",
+            protocol="HTTP/3 CONNECT-IP",
+            stream_id=stream_id,
+            status_code=status_code,
+            headers=dict(headers or {}),
+            body=None,
+            error_type=error_type,
+            error=error,
+        )
 
     async def _deliver_uplink(
         self, session: ConnectIpProxySession, packet: bytes
@@ -297,12 +358,14 @@ class MasqueProxyServer:
         certificate_path: str,
         private_key_path: str,
         resolver: TokenSessionResolver,
+        logger: logging.Logger | None = None,
     ) -> None:
         self._host = host
         self._port = port
         self._certificate_path = certificate_path
         self._private_key_path = private_key_path
         self._resolver = resolver
+        self._logger = logger or logging.getLogger(__name__)
         self._server: Any = None
 
     @property
@@ -313,6 +376,16 @@ class MasqueProxyServer:
         return int(address[1])
 
     async def start(self) -> None:
+        log_event(
+            self._logger,
+            logging.INFO,
+            "function_enter",
+            function="MasqueProxyServer.start",
+            listen_host=self._host,
+            listen_port=self._port,
+            certificate_path=self._certificate_path,
+            private_key_path=self._private_key_path,
+        )
         configuration = QuicConfiguration(
             is_client=False,
             alpn_protocols=H3_ALPN,
@@ -327,12 +400,35 @@ class MasqueProxyServer:
             self._port,
             configuration=configuration,
             create_protocol=lambda *args, **kwargs: ConnectIpProxyProtocol(
-                *args, session_resolver=self._resolver, **kwargs
+                *args,
+                session_resolver=self._resolver,
+                logger=self._logger,
+                **kwargs,
             ),
             retry=True,
         )
+        log_event(
+            self._logger,
+            logging.INFO,
+            "function_exit",
+            function="MasqueProxyServer.start",
+            bound_host=self._host,
+            bound_port=self.bound_port,
+        )
 
     async def close(self) -> None:
+        log_event(
+            self._logger,
+            logging.INFO,
+            "function_enter",
+            function="MasqueProxyServer.close",
+        )
         if self._server is not None:
             self._server.close()
             self._server = None
+        log_event(
+            self._logger,
+            logging.INFO,
+            "function_exit",
+            function="MasqueProxyServer.close",
+        )

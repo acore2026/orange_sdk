@@ -281,7 +281,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-async def run_demo(*, verbose: bool = True) -> dict[str, Any]:
+async def run_demo(
+    *,
+    verbose: bool = True,
+    log_file_path: str = "./logs/agent-sdk-self-check.log",
+) -> dict[str, Any]:
     """Run every primary northbound API and return verification details."""
 
     tun = DemoTun()
@@ -327,6 +331,7 @@ async def run_demo(*, verbose: bool = True) -> dict[str, Any]:
             agent_tun_cidr="8.8.8.7/24",
             masque_server_url="https://192.168.3.10:4433",
             masque_authorization="Bearer demo-device-a-token",
+            log_file_path=log_file_path,
         )
         show("1 init", initialized)
 

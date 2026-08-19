@@ -12,6 +12,13 @@ from .proxy import (
     ProxySessionPolicy,
     TokenSessionResolver,
 )
+from .logging_utils import (
+    DEFAULT_LOG_BACKUP_COUNT,
+    DEFAULT_LOG_LEVEL,
+    DEFAULT_LOG_MAX_BYTES,
+    close_logger,
+    configure_local_logger,
+)
 
 
 def load_proxy_config(path: str | Path) -> Mapping[str, Any]:
@@ -44,19 +51,32 @@ def build_session_resolver(config: Mapping[str, Any]) -> TokenSessionResolver:
 
 async def run_masque_proxy(config_path: str | Path) -> None:
     config = load_proxy_config(config_path)
+    logger = configure_local_logger(
+        name="agent_sdk.masque_proxy",
+        file_path=str(config.get("log_file_path", "./logs/masque-proxy.log")),
+        level=str(config.get("log_level", DEFAULT_LOG_LEVEL)),
+        max_bytes=int(config.get("log_max_bytes", DEFAULT_LOG_MAX_BYTES)),
+        backup_count=int(
+            config.get("log_backup_count", DEFAULT_LOG_BACKUP_COUNT)
+        ),
+    )
     server = MasqueProxyServer(
         str(config["listen_host"]),
         int(config["listen_port"]),
         str(config["certificate_path"]),
         str(config["private_key_path"]),
         build_session_resolver(config),
+        logger=logger,
     )
-    await server.start()
-    print(f"MASQUE proxy listening on {config['listen_host']}:{config['listen_port']}")
     try:
-        await asyncio.Event().wait()
+        await server.start()
+        print(f"MASQUE proxy listening on {config['listen_host']}:{config['listen_port']}")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await server.close()
     finally:
-        await server.close()
+        close_logger(logger)
 
 
 def masque_proxy_main() -> None:

@@ -60,6 +60,10 @@ async def main(args) -> None:
             ),
             tun_name=args.tun_name,
             tun_mtu=args.tun_mtu,
+            log_file_path=args.log_file,
+            log_level=args.log_level,
+            log_max_bytes=args.log_max_bytes,
+            log_backup_count=args.log_backup_count,
         )
         print("SDK ready:", result)
         await asyncio.Event().wait()
@@ -83,6 +87,14 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--masque-token")
     value.add_argument("--tun-name", default="agent_tun0")
     value.add_argument("--tun-mtu", type=int, default=1280)
+    value.add_argument("--log-file", default="./logs/agent-sdk.log")
+    value.add_argument(
+        "--log-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
+        default="INFO",
+    )
+    value.add_argument("--log-max-bytes", type=int, default=10 * 1024 * 1024)
+    value.add_argument("--log-backup-count", type=int, default=5)
     return value
 
 

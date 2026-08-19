@@ -8,7 +8,7 @@ SDK 收到 AgentRuntime 透传的 `acf_group_config` 后，会自动缓存 `grou
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.1.0-py3-none-any.whl`：SDK wheel。
+- `agent_connect_sdk-0.2.0-py3-none-any.whl`：SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/masque-proxy.example.json`：服务器 MASQUE Proxy 配置模板。
@@ -40,7 +40,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.1.0-py3-none-any.whl
+dist/agent_connect_sdk-0.2.0-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -52,7 +52,7 @@ dist/agent_connect_sdk-0.1.0-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.1.0-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.2.0-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -67,14 +67,14 @@ agent-masque-proxy --help
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.1.0-py3-none-any.whl
+  ./agent_connect_sdk-0.2.0-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.1.0-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.2.0-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -90,6 +90,8 @@ agent-sdk-self-check
 ```text
 FULL FLOW DEMO PASSED
 ```
+
+自检日志保存在当前目录的 `logs/agent-sdk-self-check.log`。
 
 该示例依次调用：`init`、`apply_identity`、`get_network_ability`、`register_capabilities`、`update_capabilities`、`discover_agents`、`create_group`、群组通知处理、`send_message`、消息接收、计算/视频卸载和 `deregister_identity`。
 
@@ -159,6 +161,10 @@ sudo ufw allow 4433/udp
   "listen_port": 4433,
   "certificate_path": "/etc/agent-sdk/masque-cert.pem",
   "private_key_path": "/etc/agent-sdk/masque-key.pem",
+  "log_file_path": "/var/log/agent-sdk/masque-proxy.log",
+  "log_level": "INFO",
+  "log_max_bytes": 10485760,
+  "log_backup_count": 5,
   "clients": [
     {
       "token": "replace-with-secret-for-device-a",
@@ -188,6 +194,8 @@ sudo ufw allow 4433/udp
 | `allowed_peer_cidrs` | 允许通信的对端 Agent 地址范围 |
 | `mtu` | 内层 IP 包最大长度，必须和端侧一致 |
 
+Proxy 日志写入 `log_file_path`，默认每个文件最大 10 MiB、保留 5 个历史文件。
+
 服务器安装同一个 wheel 后启动：
 
 ```bash
@@ -216,6 +224,10 @@ result = await sdk.init(
     masque_authorization="Bearer replace-with-secret-for-device-a",
     tun_name="agent_tun0",
     tun_mtu=1280,
+    log_file_path="/var/log/agent-sdk/agent-a.log",
+    log_level="INFO",
+    log_max_bytes=10 * 1024 * 1024,
+    log_backup_count=5,
 )
 ```
 
@@ -243,6 +255,35 @@ result = await sdk.init(
 | `masque_authorization` | 否 | 推荐使用 `Bearer <device-token>` |
 | `tun_name` | 否 | 默认 `agent_tun0` |
 | `tun_mtu` | 否 | 默认 `1280`，应与 Proxy 配置一致 |
+| `log_file_path` | 否 | 本地日志文件；默认 `./logs/agent-sdk.log` |
+| `log_level` | 否 | `DEBUG/INFO/WARNING/ERROR/CRITICAL`，默认 `INFO` |
+| `log_max_bytes` | 否 | 单个日志文件最大字节数，默认 10 MiB |
+| `log_backup_count` | 否 | 轮转历史文件数量，默认 5 |
+
+### 3.5 本地日志
+
+SDK 使用 UTF-8 文本日志，每行包含时间、级别、logger 名称和一个 JSON 事件。默认记录：
+
+- 所有公开 SDK 函数的 `function_enter`、`function_exit` 和 `function_error`，包括参数、返回类型/结果、错误码和耗时。
+- SDK 发往 AgentRuntime、对端 Agent 的 HTTP 请求及其响应。
+- AgentRuntime 群组通知、邀请和对端 `/A2A/message` 的 HTTP 入站请求及响应。
+- 客户端和服务器端 HTTP/3 CONNECT-IP 请求、响应状态和协商结果。
+- MASQUE Proxy 的启动和关闭。
+
+查看实时日志：
+
+```bash
+tail -F /var/log/agent-sdk/agent-a.log
+```
+
+检索 HTTP 失败和函数异常：
+
+```bash
+grep -E '"event":"(http_error|function_error)"|"status_code":[45][0-9][0-9]' \
+  /var/log/agent-sdk/agent-a.log
+```
+
+`authorization`、token、密码、签名、`proof/jws`、公私钥、DID key、VC 和 credentials 会写成 `[REDACTED]`。业务消息结构和非敏感字段保留，便于定位问题。日志目录必须预先允许 SDK 进程写入；无法创建日志文件时，`init()` 返回 `LOG_SETUP_FAILED`。
 
 ## 4. 应用如何调用 SDK
 
@@ -419,7 +460,9 @@ sudo -E .venv/bin/python examples/linux_agent.py \
   --masque-url https://192.168.3.10:4433 \
   --masque-server-name masque.lab.example \
   --masque-token 'replace-with-secret-for-device-a' \
-  --ca-cert /etc/agent-sdk/lab-ca.pem
+  --ca-cert /etc/agent-sdk/lab-ca.pem \
+  --log-file /var/log/agent-sdk/agent-a.log \
+  --log-level INFO
 ```
 
 该脚本中的 `DemoAcceptAllProofVerifier`、`DemoControlRequestAuthenticator` 和 `DemoMessageSigner` 仅为联调占位。生产发布前必须替换成对消息规范进行规范化、签名和验签的实现。
@@ -449,6 +492,7 @@ sudo -E .venv/bin/python examples/linux_agent.py \
 | 现象 | 检查项 |
 |---|---|
 | `TUN_CREATE_FAILED` | `/dev/net/tun` 是否存在；进程是否具备 `CAP_NET_ADMIN` |
+| `LOG_SETUP_FAILED` | 日志目录是否存在或可创建；SDK 进程是否具有写权限 |
 | `RUNTIME_UNREACHABLE` | AgentRuntime IP/端口、HTTPS 证书和物理网络连通性 |
 | `MASQUE_CONNECT_FAILED` | UDP 4433、防火墙、CA、SNI 和 token |
 | `CONNECT_IP_NEGOTIATION_FAILED` | Proxy 是否支持 HTTP/3 Datagram 和 CONNECT-IP |

@@ -21,6 +21,10 @@ class SdkConfig:
     masque_authorization: str | None
     tun_name: str
     tun_mtu: int
+    log_file_path: str
+    log_level: str
+    log_max_bytes: int
+    log_backup_count: int
 
     @property
     def agent_tun_ip(self) -> str:
@@ -53,6 +57,10 @@ class SdkConfig:
         masque_authorization: str | None,
         tun_name: str,
         tun_mtu: int,
+        log_file_path: str,
+        log_level: str,
+        log_max_bytes: int,
+        log_backup_count: int,
     ) -> "SdkConfig":
         for field_name, value in (
             ("agent_runtime_ip", agent_runtime_ip),
@@ -118,4 +126,8 @@ class SdkConfig:
             masque_authorization=masque_authorization,
             tun_name=tun_name,
             tun_mtu=tun_mtu,
+            log_file_path=log_file_path,
+            log_level=log_level,
+            log_max_bytes=log_max_bytes,
+            log_backup_count=log_backup_count,
         )

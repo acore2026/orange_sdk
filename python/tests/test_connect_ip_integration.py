@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 from agent_sdk.masque import AioquicConnectIpTransport
+from agent_sdk.logging_utils import close_logger, configure_local_logger
 from agent_sdk.proxy import (
     MasqueProxyServer,
     ProxySessionPolicy,
@@ -51,6 +52,14 @@ def certificate_pair(tmp_path):
 
 async def test_real_http3_connect_ip_datagrams_round_trip(tmp_path):
     cert_path, key_path, cert_pem = certificate_pair(tmp_path)
+    log_path = tmp_path / "connect-ip.log"
+    logger = configure_local_logger(
+        name=f"test.connect_ip.{id(tmp_path)}",
+        file_path=str(log_path),
+        level="INFO",
+        max_bytes=1024 * 1024,
+        backup_count=1,
+    )
     adapter = MemoryUeAdapter()
     policy = ProxySessionPolicy(
         "8.8.8.7",
@@ -64,6 +73,7 @@ async def test_real_http3_connect_ip_datagrams_round_trip(tmp_path):
         str(cert_path),
         str(key_path),
         TokenSessionResolver({"secret-a": policy}),
+        logger=logger,
     )
     await server.start()
     downlink = asyncio.Queue()
@@ -73,6 +83,7 @@ async def test_real_http3_connect_ip_datagrams_round_trip(tmp_path):
         ca_certificate_pem=cert_pem,
         authorization="Bearer secret-a",
         local_address="127.0.0.1",
+        logger=logger,
     )
     try:
         await client.start(downlink.put)
@@ -90,3 +101,11 @@ async def test_real_http3_connect_ip_datagrams_round_trip(tmp_path):
     finally:
         await client.close()
         await server.close()
+        close_logger(logger)
+
+    text = log_path.read_text(encoding="utf-8")
+    assert text.count('"event":"http_request"') >= 2
+    assert text.count('"event":"http_response"') >= 2
+    assert '"protocol":"HTTP/3 CONNECT-IP"' in text
+    assert '"status_code":200' in text
+    assert "secret-a" not in text

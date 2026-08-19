@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import ipaddress
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timezone
@@ -27,6 +30,15 @@ from .contracts import (
 )
 from .errors import AgentSdkError, ErrorCode
 from .group_cache import GroupMemberCache
+from .logging_utils import (
+    DEFAULT_LOG_BACKUP_COUNT,
+    DEFAULT_LOG_FILE_PATH,
+    DEFAULT_LOG_LEVEL,
+    DEFAULT_LOG_MAX_BYTES,
+    close_logger,
+    configure_local_logger,
+    log_event,
+)
 from .masque import AioquicConnectIpTransport
 from .models import (
     AgentProfile,
@@ -58,7 +70,85 @@ RuntimeFactory = Callable[[SdkConfig], RuntimeTransport]
 ServerFactory = Callable[[], LocalServer]
 RouteBackendFactory = Callable[[SdkConfig, TunDevice], RouteBackend]
 
-_LOGGER = logging.getLogger(__name__)
+def _bound_arguments(function, instance, args, kwargs) -> dict[str, Any]:
+    try:
+        bound = inspect.signature(function).bind_partial(instance, *args, **kwargs)
+    except TypeError:
+        return {"positional_count": len(args), "keyword_names": sorted(kwargs)}
+    bound.arguments.pop("self", None)
+    return dict(bound.arguments)
+
+
+def logged_async(function):
+    @functools.wraps(function)
+    async def wrapper(self, *args, **kwargs):
+        started = time.perf_counter()
+        self._log(
+            logging.INFO,
+            "function_enter",
+            function=function.__name__,
+            arguments=_bound_arguments(function, self, args, kwargs),
+        )
+        try:
+            result = await function(self, *args, **kwargs)
+        except Exception as exc:
+            self._log(
+                logging.ERROR,
+                "function_error",
+                exc_info=True,
+                function=function.__name__,
+                duration_ms=round((time.perf_counter() - started) * 1000, 3),
+                error_type=type(exc).__name__,
+                error=str(exc),
+                error_code=getattr(getattr(exc, "code", None), "value", None),
+            )
+            raise
+        self._log(
+            logging.INFO,
+            "function_exit",
+            function=function.__name__,
+            duration_ms=round((time.perf_counter() - started) * 1000, 3),
+            result=result,
+        )
+        return result
+
+    return wrapper
+
+
+def logged_sync(function):
+    @functools.wraps(function)
+    def wrapper(self, *args, **kwargs):
+        started = time.perf_counter()
+        self._log(
+            logging.INFO,
+            "function_enter",
+            function=function.__name__,
+            arguments=_bound_arguments(function, self, args, kwargs),
+        )
+        try:
+            result = function(self, *args, **kwargs)
+        except Exception as exc:
+            self._log(
+                logging.ERROR,
+                "function_error",
+                exc_info=True,
+                function=function.__name__,
+                duration_ms=round((time.perf_counter() - started) * 1000, 3),
+                error_type=type(exc).__name__,
+                error=str(exc),
+                error_code=getattr(getattr(exc, "code", None), "value", None),
+            )
+            raise
+        self._log(
+            logging.INFO,
+            "function_exit",
+            function=function.__name__,
+            duration_ms=round((time.perf_counter() - started) * 1000, 3),
+            result=result,
+        )
+        return result
+
+    return wrapper
 
 
 class AgentSdk:
@@ -77,6 +167,9 @@ class AgentSdk:
         route_backend_factory: RouteBackendFactory | None = None,
         media_offload_adapter: MediaOffloadAdapter | None = None,
     ) -> None:
+        self._logger = logging.getLogger(f"agent_sdk.client.{id(self)}")
+        self._logger.propagate = False
+        self._pending_logs: list[tuple[int, str, bool, dict[str, Any]]] = []
         self._proof_verifier = proof_verifier or RejectUnconfiguredProofVerifier()
         self._control_request_authenticator = (
             control_request_authenticator
@@ -86,7 +179,7 @@ class AgentSdk:
         self._message_signature_verifier = (
             message_signature_verifier or RejectUnconfiguredMessageSignatureVerifier()
         )
-        self._peer_messenger = peer_messenger or HttpPeerMessenger()
+        self._peer_messenger = peer_messenger or HttpPeerMessenger(logger=self._logger)
         self._tun_factory = tun_factory or LinuxTunDevice.create
         self._masque_factory = masque_factory or (
             lambda config: AioquicConnectIpTransport(
@@ -95,14 +188,19 @@ class AgentSdk:
                 ca_certificate_pem=config.masque_ca_certificate_pem,
                 authorization=config.masque_authorization,
                 local_address=config.local_vlan_ip,
+                logger=self._logger,
             )
         )
         self._runtime_factory = runtime_factory or (
             lambda config: HttpRuntimeTransport(
-                config.agent_runtime_ip, config.agent_runtime_port
+                config.agent_runtime_ip,
+                config.agent_runtime_port,
+                logger=self._logger,
             )
         )
-        self._server_factory = server_factory or AiohttpLocalServer
+        self._server_factory = server_factory or (
+            lambda: AiohttpLocalServer(logger=self._logger)
+        )
         self._route_backend_factory = route_backend_factory or (
             lambda config, tun: Pyroute2RouteBackend(
                 tun.name, config.agent_tun_ip
@@ -125,6 +223,50 @@ class AgentSdk:
         self._group_info: dict[str, GroupInfo] = {}
         self._offloading_sessions: dict[str, OffloadingSession] = {}
 
+    def _log(
+        self,
+        level: int,
+        event: str,
+        *,
+        exc_info: bool = False,
+        **fields: Any,
+    ) -> None:
+        if not self._logger.handlers:
+            self._pending_logs.append((level, event, False, dict(fields)))
+            return
+        log_event(
+            self._logger,
+            level,
+            event,
+            exc_info=exc_info,
+            **fields,
+        )
+
+    def _configure_logging(
+        self,
+        *,
+        file_path: str,
+        level: str,
+        max_bytes: int,
+        backup_count: int,
+    ) -> None:
+        self._logger = configure_local_logger(
+            name=f"agent_sdk.client.{id(self)}",
+            file_path=file_path,
+            level=level,
+            max_bytes=max_bytes,
+            backup_count=backup_count,
+        )
+        pending, self._pending_logs = self._pending_logs, []
+        for pending_level, pending_event, _, pending_fields in pending:
+            log_event(
+                self._logger,
+                pending_level,
+                pending_event,
+                buffered_before_init=True,
+                **pending_fields,
+            )
+
     @property
     def state(self) -> str:
         return self._state
@@ -144,28 +286,67 @@ class AgentSdk:
         masque_authorization: str | None = None,
         tun_name: str = "agent_tun0",
         tun_mtu: int = 1280,
+        log_file_path: str = DEFAULT_LOG_FILE_PATH,
+        log_level: str = DEFAULT_LOG_LEVEL,
+        log_max_bytes: int = DEFAULT_LOG_MAX_BYTES,
+        log_backup_count: int = DEFAULT_LOG_BACKUP_COUNT,
     ) -> SdkInitResult:
-        if self._state not in {"NEW", "CLOSED"}:
-            raise AgentSdkError(
-                ErrorCode.INVALID_ARGUMENT, f"cannot init SDK in state {self._state}"
-            )
-        config = SdkConfig.validate(
-            agent_runtime_ip=agent_runtime_ip,
-            agent_runtime_port=agent_runtime_port,
-            local_vlan_ip=local_vlan_ip,
-            local_tcp_port=local_tcp_port,
-            local_udp_port=local_udp_port,
-            agent_tun_cidr=agent_tun_cidr,
-            masque_server_url=masque_server_url,
-            masque_server_name=masque_server_name,
-            masque_ca_certificate_pem=masque_ca_certificate_pem,
-            masque_authorization=masque_authorization,
-            tun_name=tun_name,
-            tun_mtu=tun_mtu,
+        self._configure_logging(
+            file_path=log_file_path,
+            level=log_level,
+            max_bytes=log_max_bytes,
+            backup_count=log_backup_count,
         )
-        self._state = "INITIALIZING"
-        self._config = config
+        started = time.perf_counter()
+        self._log(
+            logging.INFO,
+            "function_enter",
+            function="init",
+            arguments={
+                "agent_runtime_ip": agent_runtime_ip,
+                "agent_runtime_port": agent_runtime_port,
+                "local_vlan_ip": local_vlan_ip,
+                "local_tcp_port": local_tcp_port,
+                "local_udp_port": local_udp_port,
+                "agent_tun_cidr": agent_tun_cidr,
+                "masque_server_url": masque_server_url,
+                "masque_server_name": masque_server_name,
+                "masque_ca_certificate_pem": masque_ca_certificate_pem,
+                "masque_authorization": masque_authorization,
+                "tun_name": tun_name,
+                "tun_mtu": tun_mtu,
+                "log_file_path": log_file_path,
+                "log_level": log_level,
+                "log_max_bytes": log_max_bytes,
+                "log_backup_count": log_backup_count,
+            },
+        )
         try:
+            if self._state not in {"NEW", "CLOSED"}:
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"cannot init SDK in state {self._state}",
+                )
+            config = SdkConfig.validate(
+                agent_runtime_ip=agent_runtime_ip,
+                agent_runtime_port=agent_runtime_port,
+                local_vlan_ip=local_vlan_ip,
+                local_tcp_port=local_tcp_port,
+                local_udp_port=local_udp_port,
+                agent_tun_cidr=agent_tun_cidr,
+                masque_server_url=masque_server_url,
+                masque_server_name=masque_server_name,
+                masque_ca_certificate_pem=masque_ca_certificate_pem,
+                masque_authorization=masque_authorization,
+                tun_name=tun_name,
+                tun_mtu=tun_mtu,
+                log_file_path=log_file_path,
+                log_level=log_level,
+                log_max_bytes=log_max_bytes,
+                log_backup_count=log_backup_count,
+            )
+            self._state = "INITIALIZING"
+            self._config = config
             self._tun = await self._tun_factory(
                 config.tun_name, config.agent_tun_cidr, config.tun_mtu
             )
@@ -198,7 +379,7 @@ class AgentSdk:
                 self._pump_uplink(), name="agent-tun-uplink"
             )
             self._state = "READY"
-            return SdkInitResult(
+            result = SdkInitResult(
                 runtime_connected=True,
                 masque_connected=self._masque.connected,
                 registration_id=registration_id,
@@ -209,7 +390,25 @@ class AgentSdk:
                 agent_tun_cidr=config.agent_tun_cidr,
                 masque_proxy_endpoint=config.masque_server_url,
             )
-        except Exception:
+            self._log(
+                logging.INFO,
+                "function_exit",
+                function="init",
+                duration_ms=round((time.perf_counter() - started) * 1000, 3),
+                result=result,
+            )
+            return result
+        except Exception as exc:
+            self._log(
+                logging.ERROR,
+                "function_error",
+                exc_info=True,
+                function="init",
+                duration_ms=round((time.perf_counter() - started) * 1000, 3),
+                error_type=type(exc).__name__,
+                error=str(exc),
+                error_code=getattr(getattr(exc, "code", None), "value", None),
+            )
             await self.close()
             raise
 
@@ -252,6 +451,7 @@ class AgentSdk:
             return
         await self._tun.write(packet)
 
+    @logged_sync
     def register_network_message_listener(
         self, listener: NetworkMessageListener
     ) -> Callable[[], None]:
@@ -268,6 +468,7 @@ class AgentSdk:
 
         return unregister
 
+    @logged_sync
     def register_group_message_listener(
         self, listener: GroupMessageListener
     ) -> Callable[[], None]:
@@ -315,9 +516,13 @@ class AgentSdk:
                     NetworkMessageType.GROUP_CONFIG, payload
                 )
             except Exception:
-                _LOGGER.exception(
-                    "group configuration notification listener failed for group %s",
-                    candidate.group_id,
+                self._log(
+                    logging.ERROR,
+                    "listener_error",
+                    exc_info=True,
+                    listener="network_message_listener",
+                    message_type=NetworkMessageType.GROUP_CONFIG,
+                    group_id=candidate.group_id,
                 )
         return NetworkMessageAction.ACK
 
@@ -344,6 +549,7 @@ class AgentSdk:
             )
         await self._group_listener.on_group_message(group_id, sender_id, user_payload)
 
+    @logged_async
     async def send_message(
         self,
         group_id: str,
@@ -384,6 +590,7 @@ class AgentSdk:
             delivered_at=datetime.now(timezone.utc) if delivered else None,
         )
 
+    @logged_async
     async def apply_identity(
         self,
         owner: str,
@@ -421,10 +628,12 @@ class AgentSdk:
         self._profile = profile
         return profile
 
+    @logged_sync
     def set_local_profile_for_restore(self, profile: AgentProfile) -> None:
         """Restore a previously verified profile from secure local storage."""
         self._profile = profile
 
+    @logged_async
     async def deregister_identity(
         self, agent_id: str, reason: str = "retired"
     ) -> OperationResult:
@@ -443,6 +652,7 @@ class AgentSdk:
             str(response.get("message", "")),
         )
 
+    @logged_async
     async def get_network_ability(
         self, agent_id: str, intent: str = "Get Network Ability VC"
     ) -> NetworkAbility:
@@ -471,6 +681,7 @@ class AgentSdk:
             valid_until=valid_until,
         )
 
+    @logged_async
     async def register_capabilities(
         self, agent_id: str, priority: int, credentials: Sequence[Mapping[str, Any]]
     ) -> OperationResult:
@@ -485,6 +696,7 @@ class AgentSdk:
             body,
         )
 
+    @logged_async
     async def update_capabilities(
         self,
         agent_id: str,
@@ -508,6 +720,7 @@ class AgentSdk:
             body,
         )
 
+    @logged_async
     async def discover_agents(
         self,
         task_id: str,
@@ -560,6 +773,7 @@ class AgentSdk:
             )
         return sorted(agents, key=lambda item: item.priority)
 
+    @logged_async
     async def create_group(
         self,
         agent_id: str,
@@ -588,6 +802,7 @@ class AgentSdk:
         self._group_info[info.group_id] = info
         return info
 
+    @logged_async
     async def create_offloading_session(
         self,
         agent_id: str,
@@ -638,6 +853,7 @@ class AgentSdk:
         self._offloading_sessions[session.session_id] = session
         return session
 
+    @logged_async
     async def start_video_upload(
         self,
         session_id: str,
@@ -670,6 +886,7 @@ class AgentSdk:
             bitrate_kbps=bitrate_kbps,
         )
 
+    @logged_async
     async def get_processed_video_stream(
         self,
         session_id: str,
@@ -758,32 +975,65 @@ class AgentSdk:
                 "Runtime response contains an invalid RFC3339 timestamp",
             ) from exc
 
+    @logged_async
     async def get_group_snapshot(self, group_id: str) -> GroupConfigSnapshot | None:
         if self._groups is None:
             return None
         return await self._groups.snapshot(group_id)
 
     async def close(self) -> None:
+        started = time.perf_counter()
+        self._log(logging.INFO, "function_enter", function="close", arguments={})
         if self._state in {"CLOSING", "CLOSED"}:
+            self._log(
+                logging.INFO,
+                "function_exit",
+                function="close",
+                duration_ms=round((time.perf_counter() - started) * 1000, 3),
+                result=None,
+            )
             return
-        self._state = "CLOSING"
-        if self._pump_task is not None:
-            self._pump_task.cancel()
-            await asyncio.gather(self._pump_task, return_exceptions=True)
-            self._pump_task = None
-        if self._groups is not None:
-            await self._groups.close()
-        if self._routes is not None:
-            await self._routes.close()
-        if self._masque is not None:
-            await self._masque.close()
-        if self._server is not None:
-            await self._server.close()
-        if self._runtime is not None:
-            await self._runtime.close()
-        if self._tun is not None:
-            await self._tun.close()
-        if self._media_offload_adapter is not None:
-            await self._media_offload_adapter.close()
-        self._offloading_sessions.clear()
-        self._state = "CLOSED"
+        try:
+            self._state = "CLOSING"
+            if self._pump_task is not None:
+                self._pump_task.cancel()
+                await asyncio.gather(self._pump_task, return_exceptions=True)
+                self._pump_task = None
+            if self._groups is not None:
+                await self._groups.close()
+            if self._routes is not None:
+                await self._routes.close()
+            if self._masque is not None:
+                await self._masque.close()
+            if self._server is not None:
+                await self._server.close()
+            if self._runtime is not None:
+                await self._runtime.close()
+            if self._tun is not None:
+                await self._tun.close()
+            if self._media_offload_adapter is not None:
+                await self._media_offload_adapter.close()
+            self._offloading_sessions.clear()
+            self._state = "CLOSED"
+        except Exception as exc:
+            self._log(
+                logging.ERROR,
+                "function_error",
+                exc_info=True,
+                function="close",
+                duration_ms=round((time.perf_counter() - started) * 1000, 3),
+                error_type=type(exc).__name__,
+                error=str(exc),
+                error_code=getattr(getattr(exc, "code", None), "value", None),
+            )
+            raise
+        else:
+            self._log(
+                logging.INFO,
+                "function_exit",
+                function="close",
+                duration_ms=round((time.perf_counter() - started) * 1000, 3),
+                result=None,
+            )
+        finally:
+            close_logger(self._logger)

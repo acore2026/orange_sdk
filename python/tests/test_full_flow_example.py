@@ -13,10 +13,11 @@ def _load_example():
     return module
 
 
-async def test_full_flow_example_calls_every_primary_api(capsys):
+async def test_full_flow_example_calls_every_primary_api(capsys, tmp_path):
     module = _load_example()
+    log_path = tmp_path / "full-flow.log"
 
-    summary = await module.run_demo()
+    summary = await module.run_demo(log_file_path=str(log_path))
 
     assert summary["runtime_request_count"] == 8
     assert summary["peer_endpoint"] == ("8.8.8.8", 4001)
@@ -25,3 +26,7 @@ async def test_full_flow_example_calls_every_primary_api(capsys):
     assert summary["message_delivered"] is True
     assert summary["media_state"] == "STOPPED"
     assert "FULL FLOW DEMO PASSED" in capsys.readouterr().out
+    log_text = log_path.read_text(encoding="utf-8")
+    assert '"event":"function_enter","function":"init"' in log_text
+    assert '"event":"function_exit","function":"send_message"' in log_text
+    assert "demo-device-a-token" not in log_text

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 import ssl
 from contextlib import asynccontextmanager
@@ -18,6 +19,7 @@ from aioquic.quic.connection import QuicConnection
 from aioquic.quic.events import ConnectionTerminated, QuicEvent
 
 from .errors import AgentSdkError, ErrorCode
+from .logging_utils import log_event
 
 
 @asynccontextmanager
@@ -27,6 +29,7 @@ async def _connect_from_address(
     *,
     local_address: str,
     configuration: QuicConfiguration,
+    logger: logging.Logger,
 ):
     """aioquic client context with an exact physical source address."""
     loop = asyncio.get_running_loop()
@@ -42,7 +45,7 @@ async def _connect_from_address(
     try:
         sock.bind((local_address, 0) if family == socket.AF_INET else (local_address, 0, 0, 0))
         transport, protocol = await loop.create_datagram_endpoint(
-            lambda: ConnectIpQuicProtocol(quic), sock=sock
+            lambda: ConnectIpQuicProtocol(quic, logger=logger), sock=sock
         )
         completed = True
         try:
@@ -59,8 +62,14 @@ async def _connect_from_address(
 
 
 class ConnectIpQuicProtocol(QuicConnectionProtocol):
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        logger: logging.Logger | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
+        self._logger = logger or logging.getLogger(__name__)
         self.http = H3Connection(self._quic, enable_webtransport=True)
         self.response: asyncio.Future[int] = asyncio.get_running_loop().create_future()
         self.packets: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=1024)
@@ -68,6 +77,13 @@ class ConnectIpQuicProtocol(QuicConnectionProtocol):
 
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, ConnectionTerminated):
+            log_event(
+                self._logger,
+                logging.WARNING,
+                "connect_ip_connection_closed",
+                error_code=event.error_code,
+                reason_phrase=event.reason_phrase,
+            )
             if not self.response.done():
                 self.response.set_exception(
                     ConnectionError(f"QUIC closed: {event.error_code}")
@@ -79,6 +95,10 @@ class ConnectIpQuicProtocol(QuicConnectionProtocol):
             return
         for http_event in self.http.handle_event(event):
             if isinstance(http_event, HeadersReceived):
+                decoded_headers = {
+                    name.decode("utf-8", "replace"): value.decode("utf-8", "replace")
+                    for name, value in http_event.headers
+                }
                 status = next(
                     (
                         int(value)
@@ -86,6 +106,18 @@ class ConnectIpQuicProtocol(QuicConnectionProtocol):
                         if name == b":status"
                     ),
                     0,
+                )
+                log_event(
+                    self._logger,
+                    logging.INFO if 200 <= status < 300 else logging.ERROR,
+                    "http_response",
+                    direction="inbound",
+                    peer="MASQUE Proxy",
+                    protocol="HTTP/3 CONNECT-IP",
+                    stream_id=http_event.stream_id,
+                    status_code=status,
+                    headers=decoded_headers,
+                    body=None,
                 )
                 if not self.response.done():
                     self.response.set_result(status)
@@ -115,6 +147,22 @@ class ConnectIpQuicProtocol(QuicConnectionProtocol):
         ]
         if authorization:
             headers.append((b"authorization", authorization.encode()))
+        log_event(
+            self._logger,
+            logging.INFO,
+            "http_request",
+            direction="outbound",
+            peer="MASQUE Proxy",
+            protocol="HTTP/3 CONNECT-IP",
+            stream_id=stream_id,
+            method="CONNECT",
+            url=f"https://{authority}{path}",
+            headers={
+                name.decode("utf-8", "replace"): value.decode("utf-8", "replace")
+                for name, value in headers
+            },
+            body=None,
+        )
         self.http.send_headers(stream_id, headers, end_stream=False)
         self.transmit()
 
@@ -135,6 +183,7 @@ class AioquicConnectIpTransport:
         authorization: str | None = None,
         local_address: str | None = None,
         connect_timeout: float = 10.0,
+        logger: logging.Logger | None = None,
     ) -> None:
         self._url = urlparse(server_url)
         self._server_name = server_name
@@ -146,6 +195,7 @@ class AioquicConnectIpTransport:
         self._protocol: ConnectIpQuicProtocol | None = None
         self._receive_task: asyncio.Task[None] | None = None
         self._connected = False
+        self._logger = logger or logging.getLogger(__name__)
 
     @property
     def connected(self) -> bool:
@@ -175,7 +225,9 @@ class AioquicConnectIpTransport:
                     host,
                     port,
                     configuration=configuration,
-                    create_protocol=ConnectIpQuicProtocol,
+                    create_protocol=lambda *args, **kwargs: ConnectIpQuicProtocol(
+                        *args, logger=self._logger, **kwargs
+                    ),
                 )
             else:
                 self._context = _connect_from_address(
@@ -183,6 +235,7 @@ class AioquicConnectIpTransport:
                     port,
                     local_address=self._local_address,
                     configuration=configuration,
+                    logger=self._logger,
                 )
             protocol = await asyncio.wait_for(
                 self._context.__aenter__(), self._connect_timeout

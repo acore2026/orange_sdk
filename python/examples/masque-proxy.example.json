@@ -3,6 +3,10 @@
   "listen_port": 4433,
   "certificate_path": "/etc/agent-sdk/masque-cert.pem",
   "private_key_path": "/etc/agent-sdk/masque-key.pem",
+  "log_file_path": "/var/log/agent-sdk/masque-proxy.log",
+  "log_level": "INFO",
+  "log_max_bytes": 10485760,
+  "log_backup_count": 5,
   "clients": [
     {
       "token": "replace-with-secret-for-device-a",
