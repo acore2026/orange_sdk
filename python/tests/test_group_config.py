@@ -33,7 +33,25 @@ async def test_group_config_caches_by_agent_id_and_installs_route(sdk_fixture):
     assert "8.8.8.7/32" not in backend.routes
 
 
-async def test_listener_reject_does_not_commit_or_add_route(sdk_fixture):
+async def test_group_config_commits_without_listener(sdk_fixture):
+    sdk = sdk_fixture["sdk"]
+    server = sdk_fixture["server"]
+    backend = sdk_fixture["backend"]
+    messenger = sdk_fixture["messenger"]
+
+    action = await server.group_config(group_payload())
+    receipt = await sdk.send_message("g1", PEER_ID, {"command": "patrol"})
+
+    assert action is NetworkMessageAction.ACK
+    assert receipt.delivered is True
+    snapshot = await sdk.get_group_snapshot("g1")
+    assert snapshot is not None
+    assert snapshot.members_by_agent_id[PEER_ID].agent_ip == "8.8.8.8"
+    assert "8.8.8.8/32" in backend.routes
+    assert messenger.calls[0][0:2] == ("8.8.8.8", 4001)
+
+
+async def test_listener_reject_is_only_a_notification_result(sdk_fixture):
     sdk = sdk_fixture["sdk"]
     server = sdk_fixture["server"]
     backend = sdk_fixture["backend"]
@@ -43,9 +61,26 @@ async def test_listener_reject_does_not_commit_or_add_route(sdk_fixture):
 
     action = await server.group_config(group_payload())
 
-    assert action is NetworkMessageAction.REJECT
-    assert await sdk.get_group_snapshot("g1") is None
-    assert backend.routes == set()
+    assert action is NetworkMessageAction.ACK
+    assert await sdk.get_group_snapshot("g1") is not None
+    assert "8.8.8.8/32" in backend.routes
+
+
+async def test_listener_failure_does_not_roll_back_group_config(sdk_fixture):
+    class FailingListener:
+        async def on_network_message(self, message_type, payload):
+            raise RuntimeError("application callback failed")
+
+    sdk = sdk_fixture["sdk"]
+    server = sdk_fixture["server"]
+    backend = sdk_fixture["backend"]
+    sdk.register_network_message_listener(FailingListener())
+
+    action = await server.group_config(group_payload())
+
+    assert action is NetworkMessageAction.ACK
+    assert await sdk.get_group_snapshot("g1") is not None
+    assert "8.8.8.8/32" in backend.routes
 
 
 @pytest.mark.parametrize("invalid_port", ["0", "65536", "not-a-port", 4001])

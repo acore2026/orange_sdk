@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timezone
@@ -54,6 +55,8 @@ MasqueFactory = Callable[[SdkConfig], ConnectIpTransport]
 RuntimeFactory = Callable[[SdkConfig], RuntimeTransport]
 ServerFactory = Callable[[], LocalServer]
 RouteBackendFactory = Callable[[SdkConfig, TunDevice], RouteBackend]
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class AgentSdk:
@@ -286,7 +289,7 @@ class AgentSdk:
         self, payload: Mapping[str, Any]
     ) -> NetworkMessageAction:
         self._require_ready()
-        if self._profile is None or self._network_listener is None:
+        if self._profile is None:
             return NetworkMessageAction.REJECT
         assert self._groups is not None and self._config is not None
         await self._proof_verifier.verify_group_config(payload)
@@ -297,17 +300,22 @@ class AgentSdk:
             local_tcp_port=self._config.local_tcp_port,
             local_udp_port=self._config.local_udp_port,
         )
-        action = await self._network_listener.on_network_message(
-            NetworkMessageType.GROUP_CONFIG, payload
-        )
-        if action is not NetworkMessageAction.ACK:
-            return NetworkMessageAction.REJECT
         await self._groups.commit(candidate, local_agent_id=self._profile.agent_id)
         info = self._group_info.get(candidate.group_id)
         if info is None:
             info = GroupInfo(candidate.group_id, candidate.group_id)
             self._group_info[candidate.group_id] = info
         info.status = "ACTIVE"
+        if self._network_listener is not None:
+            try:
+                await self._network_listener.on_network_message(
+                    NetworkMessageType.GROUP_CONFIG, payload
+                )
+            except Exception:
+                _LOGGER.exception(
+                    "group configuration notification listener failed for group %s",
+                    candidate.group_id,
+                )
         return NetworkMessageAction.ACK
 
     async def _handle_a2a_message(self, payload: Mapping[str, Any]) -> None:

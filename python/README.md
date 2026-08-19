@@ -13,12 +13,6 @@ python3 -m pip install -e '.[test]'
 pytest -q
 ```
 
-`cache_demo.py` runs without root or network access:
-
-```bash
-PYTHONPATH=src python3 examples/cache_demo.py
-```
-
 The real Linux example requires `/dev/net/tun`, `CAP_NET_ADMIN`, a reachable
 AgentRuntime, a MASQUE proxy, and a trusted CA:
 
@@ -49,6 +43,11 @@ address through deployment configuration.
 
 The example proof verifier is intentionally demo-only. Production deployments
 must inject a verifier backed by the configured network trust anchor.
+
+After a valid `acf_group_config` notification arrives, the SDK verifies and
+commits the member endpoint cache and peer routes internally. The optional
+network listener is notified after the commit; its return value does not control
+whether the configuration is accepted.
 
 The bundled local callback/A2A server uses HTTP/1.1 inside the CONNECT-IP L3
 path and relies on signed messages. The design's final callback mTLS credential
