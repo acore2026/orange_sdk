@@ -1,0 +1,36 @@
+package com.rayneo.agent.sdk
+
+enum class ErrorCode {
+    INVALID_ARGUMENT,
+    SDK_NOT_INITIALIZED,
+    LOCAL_PORT_IN_USE,
+    VPN_PERMISSION_REQUIRED,
+    TUN_CREATE_FAILED,
+    ROUTE_CONFIG_FAILED,
+    MASQUE_CONNECT_FAILED,
+    CONNECT_IP_NEGOTIATION_FAILED,
+    MASQUE_SESSION_CLOSED,
+    AGENT_IP_MISMATCH,
+    RUNTIME_UNREACHABLE,
+    RUNTIME_REJECTED,
+    TIMEOUT,
+    SIGNATURE_ERROR,
+    CREDENTIAL_EXPIRED,
+    GROUP_CONFIG_INVALID,
+    GROUP_CONFIG_VERSION_UNSUPPORTED,
+    GROUP_CONFIG_STALE,
+    GROUP_NOT_ACTIVE,
+    TARGET_NOT_IN_GROUP,
+    LISTENER_ALREADY_REGISTERED,
+    MESSAGE_DELIVERY_FAILED,
+    CAMERA_PERMISSION_DENIED,
+    OFFLOADING_SESSION_NOT_FOUND,
+}
+
+class AgentSdkException(
+    val code: ErrorCode,
+    message: String,
+    val field: String? = null,
+    val retryable: Boolean = false,
+    cause: Throwable? = null,
+) : RuntimeException(message, cause)

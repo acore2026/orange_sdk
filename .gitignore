@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+
+.gradle/
+**/build/
+android/local.properties
+*.iml
+.idea/
+
+# Local design and reference materials
+Agent-SDK-HTTP接口文档.md
+SDK设计文档*.md
+SDK逻辑视图-简化版.html
+google.xlsx
+sdkdesign.txt
+微信图片*

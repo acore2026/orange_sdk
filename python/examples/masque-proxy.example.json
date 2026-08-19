@@ -1,0 +1,22 @@
+{
+  "listen_host": "192.168.3.10",
+  "listen_port": 4433,
+  "certificate_path": "/etc/agent-sdk/masque-cert.pem",
+  "private_key_path": "/etc/agent-sdk/masque-key.pem",
+  "clients": [
+    {
+      "token": "replace-with-secret-for-device-a",
+      "agent_ip": "8.8.8.7",
+      "ue_interface": "uesimtun0",
+      "allowed_peer_cidrs": ["8.8.8.8/32"],
+      "mtu": 1280
+    },
+    {
+      "token": "replace-with-secret-for-device-b",
+      "agent_ip": "8.8.8.8",
+      "ue_interface": "uesimtun1",
+      "allowed_peer_cidrs": ["8.8.8.7/32"],
+      "mtu": 1280
+    }
+  ]
+}

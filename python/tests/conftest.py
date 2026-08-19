@@ -1,0 +1,293 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timezone
+from typing import Any, Mapping
+
+import pytest
+
+from agent_sdk import AgentSdk, NetworkMessageAction
+from agent_sdk.models import AgentProfile, NetworkMessageType
+from agent_sdk.routes import MemoryRouteBackend
+
+
+LOCAL_ID = "did:example:agent-a"
+PEER_ID = "did:example:agent-b"
+
+
+class FakeTun:
+    name = "agent_tun0"
+    cidr = "8.8.8.7/24"
+    mtu = 1280
+
+    def __init__(self) -> None:
+        self.read_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self.writes: list[bytes] = []
+        self.closed = False
+
+    async def read(self) -> bytes:
+        return await self.read_queue.get()
+
+    async def write(self, packet: bytes) -> None:
+        self.writes.append(packet)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeMasque:
+    connected = False
+
+    def __init__(self) -> None:
+        self.sent: list[bytes] = []
+        self.on_packet = None
+
+    async def start(self, on_packet) -> None:
+        self.on_packet = on_packet
+        self.connected = True
+
+    async def send_packet(self, packet: bytes) -> None:
+        self.sent.append(packet)
+
+    async def close(self) -> None:
+        self.connected = False
+
+
+class FakeRuntime:
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, str, Mapping[str, Any]]] = []
+        self.closed = False
+
+    async def connect(self) -> None:
+        return None
+
+    async def register_endpoint(self, local_ip: str, tcp_port: int, udp_port: int) -> str:
+        return "registration-test"
+
+    async def request(self, method: str, path: str, body: Mapping[str, Any]):
+        self.requests.append((method, path, body))
+        if path == "/idm/v1/identity-applications":
+            return {
+                "agent_id": LOCAL_ID,
+                "agent_name": "Agent A",
+                "identity_vc": {"id": "vc-a"},
+            }
+        if path == "/acf/v1/agents-grouping":
+            return {"group_id": "g1"}
+        if path == "/compute/v1/offloading-sessions":
+            return {
+                "session_id": "session-1",
+                "sandbox_id": "sandbox-edge-1",
+                "state": "CONNECTING",
+                "sdp_answer": "test-answer",
+                "expires_at": "2026-08-18T12:00:00Z",
+            }
+        return {"success": True, "operation_id": "op-1"}
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeServer:
+    def __init__(self) -> None:
+        self.started = False
+        self.group_config = None
+        self.invitation = None
+        self.a2a = None
+        self.arguments = None
+
+    async def start(self, **kwargs) -> None:
+        self.started = True
+        self.arguments = kwargs
+        self.group_config = kwargs["on_group_config"]
+        self.invitation = kwargs["on_group_invitation"]
+        self.a2a = kwargs["on_a2a_message"]
+
+    async def close(self) -> None:
+        self.started = False
+
+
+class FakeProofVerifier:
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls = 0
+
+    async def verify_group_config(self, payload: Mapping[str, Any]) -> None:
+        self.calls += 1
+        if self.fail:
+            raise ValueError("bad proof")
+
+
+class AckNetworkListener:
+    def __init__(self, action: NetworkMessageAction = NetworkMessageAction.ACK) -> None:
+        self.action = action
+        self.messages: list[tuple[NetworkMessageType, Mapping[str, Any]]] = []
+
+    async def on_network_message(self, message_type, payload):
+        self.messages.append((message_type, payload))
+        return self.action
+
+
+class FakePeerMessenger:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int, Mapping[str, Any], float]] = []
+
+    async def send(self, ip, port, body, timeout):
+        self.calls.append((ip, port, body, timeout))
+        return {"ack": True}
+
+
+class FakeSignatureVerifier:
+    def __init__(self) -> None:
+        self.keys: list[str] = []
+
+    async def verify_a2a(self, payload, expected_did_key):
+        self.keys.append(expected_did_key)
+
+
+class FakeMessageSigner:
+    async def sign_a2a(self, payload):
+        return {"jws": "test-message-signature"}
+
+
+class FakeVideoUpload:
+    track_id = "camera-track-1"
+    state = "RUNNING"
+
+    async def pause(self):
+        self.state = "PAUSED"
+
+    async def resume(self):
+        self.state = "RUNNING"
+
+    async def stop(self):
+        self.state = "STOPPED"
+
+
+class FakeRemoteVideoStream:
+    async def recv(self):
+        return b"frame"
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        return await self.recv()
+
+
+class FakeMediaAdapter:
+    def __init__(self):
+        self.connected_session = None
+        self.upload_args = None
+        self.closed = False
+        self.upload = FakeVideoUpload()
+        self.stream = FakeRemoteVideoStream()
+
+    async def connect(self, session, signaling, timeout_seconds):
+        assert signaling["sdp_answer"] == "test-answer"
+        self.connected_session = session.session_id
+
+    async def start_video_upload(self, session, **kwargs):
+        self.upload_args = (session.session_id, kwargs)
+        return self.upload
+
+    async def get_processed_video_stream(self, session, timeout_seconds):
+        return self.stream
+
+    async def close(self):
+        self.closed = True
+
+
+def group_payload(
+    *,
+    timestamp: datetime | None = None,
+    peer_ip: str = "8.8.8.8",
+    peer_tcp_port: str = "4001",
+    peer_udp_port: str = "28443",
+) -> dict[str, Any]:
+    timestamp = timestamp or datetime.now(timezone.utc)
+    return {
+        "notification_type": "acf_group_config",
+        "version": "1.0.0",
+        "timestamp": timestamp.isoformat().replace("+00:00", "Z"),
+        "group_id": "g1",
+        "members": {
+            "agent1": {
+                "agent_id": LOCAL_ID,
+                "agent_name": "Agent A",
+                "capabilities": ["text"],
+                "agent_ip": "8.8.8.7",
+                "tcp_port": "4001",
+                "udp_port": "28443",
+                "did_key": "did:key:local",
+            },
+            "arbitrary-label": {
+                "agent_id": PEER_ID,
+                "agent_name": "Agent B",
+                "capabilities": ["text", "voice"],
+                "agent_ip": peer_ip,
+                "tcp_port": peer_tcp_port,
+                "udp_port": peer_udp_port,
+                "did_key": "did:key:peer",
+            },
+        },
+        "proof": {"jws": "test-proof"},
+    }
+
+
+@pytest.fixture
+async def sdk_fixture():
+    tun = FakeTun()
+    masque = FakeMasque()
+    runtime = FakeRuntime()
+    server = FakeServer()
+    backend = MemoryRouteBackend()
+    proof = FakeProofVerifier()
+    messenger = FakePeerMessenger()
+    signature_verifier = FakeSignatureVerifier()
+    media = FakeMediaAdapter()
+
+    async def tun_factory(name, cidr, mtu):
+        tun.name = name
+        tun.cidr = cidr
+        tun.mtu = mtu
+        return tun
+
+    sdk = AgentSdk(
+        proof_verifier=proof,
+        peer_messenger=messenger,
+        message_signature_verifier=signature_verifier,
+        message_signer=FakeMessageSigner(),
+        tun_factory=tun_factory,
+        masque_factory=lambda config: masque,
+        runtime_factory=lambda config: runtime,
+        server_factory=lambda: server,
+        route_backend_factory=lambda config, tun_device: backend,
+        media_offload_adapter=media,
+    )
+    result = await sdk.init(
+        "192.168.3.10",
+        8080,
+        "192.168.1.10",
+        4001,
+        28443,
+        agent_tun_cidr="8.8.8.7/24",
+        masque_server_url="https://192.168.3.10:4433",
+    )
+    sdk.set_local_profile_for_restore(
+        AgentProfile(LOCAL_ID, "Agent A", {"id": "vc-a"})
+    )
+    yield {
+        "sdk": sdk,
+        "result": result,
+        "tun": tun,
+        "masque": masque,
+        "runtime": runtime,
+        "server": server,
+        "backend": backend,
+        "proof": proof,
+        "messenger": messenger,
+        "signature_verifier": signature_verifier,
+        "media": media,
+    }
+    await sdk.close()

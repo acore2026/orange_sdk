@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+from enum import Enum
+from typing import Any
+
+
+class ErrorCode(str, Enum):
+    INVALID_ARGUMENT = "INVALID_ARGUMENT"
+    SDK_NOT_INITIALIZED = "SDK_NOT_INITIALIZED"
+    LOCAL_PORT_IN_USE = "LOCAL_PORT_IN_USE"
+    VPN_PERMISSION_REQUIRED = "VPN_PERMISSION_REQUIRED"
+    TUN_CREATE_FAILED = "TUN_CREATE_FAILED"
+    ROUTE_CONFIG_FAILED = "ROUTE_CONFIG_FAILED"
+    MASQUE_CONNECT_FAILED = "MASQUE_CONNECT_FAILED"
+    CONNECT_IP_NEGOTIATION_FAILED = "CONNECT_IP_NEGOTIATION_FAILED"
+    MASQUE_SESSION_CLOSED = "MASQUE_SESSION_CLOSED"
+    AGENT_IP_MISMATCH = "AGENT_IP_MISMATCH"
+    RUNTIME_UNREACHABLE = "RUNTIME_UNREACHABLE"
+    RUNTIME_REJECTED = "RUNTIME_REJECTED"
+    TIMEOUT = "TIMEOUT"
+    SIGNATURE_ERROR = "SIGNATURE_ERROR"
+    CREDENTIAL_EXPIRED = "CREDENTIAL_EXPIRED"
+    GROUP_CONFIG_INVALID = "GROUP_CONFIG_INVALID"
+    GROUP_CONFIG_VERSION_UNSUPPORTED = "GROUP_CONFIG_VERSION_UNSUPPORTED"
+    GROUP_CONFIG_STALE = "GROUP_CONFIG_STALE"
+    GROUP_NOT_ACTIVE = "GROUP_NOT_ACTIVE"
+    TARGET_NOT_IN_GROUP = "TARGET_NOT_IN_GROUP"
+    LISTENER_ALREADY_REGISTERED = "LISTENER_ALREADY_REGISTERED"
+    MESSAGE_DELIVERY_FAILED = "MESSAGE_DELIVERY_FAILED"
+    CAMERA_PERMISSION_DENIED = "CAMERA_PERMISSION_DENIED"
+    OFFLOADING_SESSION_NOT_FOUND = "OFFLOADING_SESSION_NOT_FOUND"
+
+
+class AgentSdkError(RuntimeError):
+    def __init__(
+        self,
+        code: ErrorCode | str,
+        message: str,
+        *,
+        field: str | None = None,
+        retryable: bool = False,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = ErrorCode(code) if not isinstance(code, ErrorCode) else code
+        self.field = field
+        self.retryable = retryable
+        self.details = details or {}
