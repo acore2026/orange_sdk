@@ -15,9 +15,8 @@ class RouteBackend(Protocol):
 
 
 class GroupRouteManager:
-    def __init__(self, backend: RouteBackend, static_routes: tuple[str, ...] = ()) -> None:
+    def __init__(self, backend: RouteBackend) -> None:
         self._backend = backend
-        self._static_routes = set(static_routes)
         self._group_peers: dict[str, set[str]] = {}
         self._refs: Counter[str] = Counter()
         self._lock = asyncio.Lock()
@@ -27,23 +26,6 @@ class GroupRouteManager:
         parsed = ip_address(ip)
         return f"{parsed}/{32 if parsed.version == 4 else 128}"
 
-    async def install_static(self) -> None:
-        installed: list[str] = []
-        try:
-            for route in sorted(self._static_routes):
-                await self._backend.add(route)
-                installed.append(route)
-        except Exception as exc:
-            for route in reversed(installed):
-                try:
-                    await self._backend.remove(route)
-                except Exception:
-                    pass
-            raise AgentSdkError(
-                ErrorCode.ROUTE_CONFIG_FAILED,
-                f"failed to install static routes: {exc}",
-            ) from exc
-
     async def replace_group_peers(self, group_id: str, peer_ips: set[str]) -> None:
         new_routes = {self._host_route(ip) for ip in peer_ips}
         async with self._lock:
@@ -51,14 +33,10 @@ class GroupRouteManager:
             to_add_refs = new_routes - old_routes
             to_drop_refs = old_routes - new_routes
             kernel_add = {
-                route
-                for route in to_add_refs
-                if self._refs[route] == 0 and route not in self._static_routes
+                route for route in to_add_refs if self._refs[route] == 0
             }
             kernel_remove = {
-                route
-                for route in to_drop_refs
-                if self._refs[route] == 1 and route not in self._static_routes
+                route for route in to_drop_refs if self._refs[route] == 1
             }
             added: list[str] = []
             removed: list[str] = []
@@ -98,8 +76,7 @@ class GroupRouteManager:
 
     async def close(self) -> None:
         async with self._lock:
-            routes = set(self._refs) | self._static_routes
-            for route in sorted(routes):
+            for route in sorted(self._refs):
                 try:
                     await self._backend.remove(route)
                 except Exception:
@@ -109,7 +86,7 @@ class GroupRouteManager:
 
     @property
     def allowed_host_routes(self) -> frozenset[str]:
-        return frozenset(self._refs) | frozenset(self._static_routes)
+        return frozenset(self._refs)
 
 
 class MemoryRouteBackend:

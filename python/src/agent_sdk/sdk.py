@@ -132,7 +132,6 @@ class AgentSdk:
         *,
         agent_tun_cidr: str,
         masque_server_url: str,
-        peer_routes: Sequence[str] = (),
         masque_server_name: str | None = None,
         masque_ca_certificate_pem: bytes | None = None,
         masque_authorization: str | None = None,
@@ -151,7 +150,6 @@ class AgentSdk:
             local_udp_port=local_udp_port,
             agent_tun_cidr=agent_tun_cidr,
             masque_server_url=masque_server_url,
-            peer_routes=tuple(peer_routes),
             masque_server_name=masque_server_name,
             masque_ca_certificate_pem=masque_ca_certificate_pem,
             masque_authorization=masque_authorization,
@@ -165,7 +163,7 @@ class AgentSdk:
                 config.tun_name, config.agent_tun_cidr, config.tun_mtu
             )
             backend = self._route_backend_factory(config, self._tun)
-            self._routes = GroupRouteManager(backend, config.peer_routes)
+            self._routes = GroupRouteManager(backend)
             self._groups = GroupMemberCache(self._routes)
 
             self._server = self._server_factory()
@@ -189,7 +187,6 @@ class AgentSdk:
 
             self._masque = self._masque_factory(config)
             await self._masque.start(self._write_downlink_packet)
-            await self._routes.install_static()
             self._pump_task = asyncio.create_task(
                 self._pump_uplink(), name="agent-tun-uplink"
             )
@@ -203,7 +200,6 @@ class AgentSdk:
                 agent_tcp_endpoint=f"{config.agent_tun_ip}:{config.local_tcp_port}",
                 agent_udp_endpoint=f"{config.agent_tun_ip}:{config.local_udp_port}",
                 agent_tun_cidr=config.agent_tun_cidr,
-                installed_routes=config.peer_routes,
                 masque_proxy_endpoint=config.masque_server_url,
             )
         except Exception:

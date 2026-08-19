@@ -56,7 +56,6 @@ async def main(args) -> None:
             masque_authorization=(
                 f"Bearer {args.masque_token}" if args.masque_token else None
             ),
-            peer_routes=args.peer_route,
             tun_name=args.tun_name,
             tun_mtu=args.tun_mtu,
         )
@@ -80,7 +79,6 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--masque-server-name")
     value.add_argument("--ca-cert")
     value.add_argument("--masque-token")
-    value.add_argument("--peer-route", action="append", default=[])
     value.add_argument("--tun-name", default="agent_tun0")
     value.add_argument("--tun-mtu", type=int, default=1280)
     return value

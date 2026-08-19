@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from ipaddress import ip_address, ip_interface, ip_network
+from ipaddress import ip_address, ip_interface
 from urllib.parse import urlparse
 
 from .errors import AgentSdkError, ErrorCode
@@ -16,7 +16,6 @@ class SdkConfig:
     local_udp_port: int
     agent_tun_cidr: str
     masque_server_url: str
-    peer_routes: tuple[str, ...]
     masque_server_name: str | None
     masque_ca_certificate_pem: bytes | None
     masque_authorization: str | None
@@ -49,7 +48,6 @@ class SdkConfig:
         local_udp_port: int,
         agent_tun_cidr: str,
         masque_server_url: str,
-        peer_routes: tuple[str, ...],
         masque_server_name: str | None,
         masque_ca_certificate_pem: bytes | None,
         masque_authorization: str | None,
@@ -100,27 +98,6 @@ class SdkConfig:
                 field="tun_mtu",
             )
 
-        normalized_routes: list[str] = []
-        proxy_ip = None
-        try:
-            proxy_ip = ip_address(parsed.hostname)
-        except ValueError:
-            pass
-        for route in peer_routes:
-            try:
-                network = ip_network(route, strict=False)
-            except ValueError as exc:
-                raise AgentSdkError(
-                    ErrorCode.INVALID_ARGUMENT, str(exc), field="peer_routes"
-                ) from exc
-            if proxy_ip is not None and proxy_ip in network:
-                raise AgentSdkError(
-                    ErrorCode.INVALID_ARGUMENT,
-                    "peer route must not contain the MASQUE proxy",
-                    field="peer_routes",
-                )
-            normalized_routes.append(str(network))
-
         if not tun_name or len(tun_name.encode()) >= 16:
             raise AgentSdkError(
                 ErrorCode.INVALID_ARGUMENT,
@@ -136,7 +113,6 @@ class SdkConfig:
             local_udp_port=local_udp_port,
             agent_tun_cidr=str(ip_interface(agent_tun_cidr)),
             masque_server_url=masque_server_url,
-            peer_routes=tuple(normalized_routes),
             masque_server_name=masque_server_name,
             masque_ca_certificate_pem=masque_ca_certificate_pem,
             masque_authorization=masque_authorization,

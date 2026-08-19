@@ -67,7 +67,6 @@ class SdkInitResult:
     agent_tcp_endpoint: str
     agent_udp_endpoint: str
     agent_tun_cidr: str
-    installed_routes: tuple[str, ...]
     masque_proxy_endpoint: str
 
 
@@ -123,4 +122,3 @@ class OffloadingSession:
     state: str
     expires_at: datetime | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-

@@ -2,6 +2,27 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-19 — 移除公开的 `peer_routes` 静态路由配置
+
+### 修改原因
+
+- 群组对端的三层路由应完全由 SDK 根据 `group-moq-info` 自动维护，不应要求 SDK 用户理解或配置具体路由。
+- 手工静态路由可能允许尚未出现在有效群组配置中的目标 IP 进入 MASQUE 隧道，破坏“仅使用已提交群组成员地址”的边界。
+
+### 修改方式
+
+- 从 `AgentSdk.init()` 和内部 `SdkConfig` 中移除 `peer_routes`。
+- 从 `SdkInitResult` 中移除 `installed_routes`，不再向用户返回底层路由信息。
+- 从 Linux example 中移除 `--peer-route` 命令行参数。
+- 删除 `GroupRouteManager` 的静态路由安装与保留逻辑，只根据有效群组快照添加、引用计数和删除对端主机路由。
+
+### 验证内容
+
+- 新增公开 API 回归测试，确认 `AgentSdk.init()` 不再包含 `peer_routes`，`SdkInitResult` 不再包含 `installed_routes`。
+- Python 全量测试结果：`21 passed`。
+- `python/src` 和 `python/examples` 均通过 `compileall` 语法检查。
+- 生产代码、README 和 example 中不存在已移除参数及静态路由逻辑的残留引用。
+
 ## 2026-08-19 — 群组配置改为 SDK 内部自动提交
 
 ### 修改原因
