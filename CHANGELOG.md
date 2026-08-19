@@ -2,6 +2,26 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-19 — 同步本地接口文档与当前 SDK 契约
+
+### 修改原因
+
+- HTTP 接口文档和用户友好版设计文档需要与当前 SDK 的封装边界保持一致，避免继续描述 AgentRuntime 字段适配、公开静态路由配置或由用户决定群组配置是否生效。
+- 原始《SDK设计文档》按要求保持不变；两份同步后的交付文档继续遵循仓库规则，仅保留在本地，不纳入 Git 推送。
+
+### 修改方式
+
+- HTTP 接口文档明确 AgentRuntime 纯透传原始消息：身份响应使用 `vc0`，网络能力响应使用 `vc1`，发现响应使用 `result[].agent_card`，建群请求使用 `target_agents` 和嵌套 `group_config`。
+- 用户友好版设计文档同步移除公开的 `peer_routes`、`peerRoutes` 和 `installed_routes`，明确对端主机路由由 SDK 根据有效 `acf_group_config` 自动维护。
+- 用户友好版设计文档同步更新控制面伪代码、Linux/Android 初始化示例、群组配置时序和生命周期：SDK 先提交合法配置，listener 仅接收提交后的可选通知。
+- 能力更新接口在两份文档中统一为 `POST /arf/v1/agent-cards-update`，并保留原始请求体字段。
+
+### 验证内容
+
+- HTTP 接口文档的 17 个 JSON 示例和用户友好版设计文档的 1 个 JSON 示例均通过标准 JSON 解析。
+- 两份文档均未发现 `peer_routes`、`peerRoutes`、`installed_routes`、旧 `PUT ...agent-cards` 或 AgentRuntime 字段改名说明残留。
+- 原始《SDK设计文档》的 SHA-256 保持为 `d2509f323338d0cdb948ceff36e32c3ae71d59c646916b687168b4c2e862947b`，确认未被修改。
+
 ## 2026-08-19 — 恢复 AgentRuntime 控制面纯透传契约
 
 ### 修改原因
