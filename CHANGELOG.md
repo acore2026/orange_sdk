@@ -2,6 +2,29 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-20 — Android AgentCard 支持内测能力 VC 即时签发
+
+### 修改原因
+
+- 上一提交只在 Linux/Python `register_capabilities()` 增加了能力字符串即时签发，Android `registerCapabilities()` 仍强制要求调用方提供预签发 VC，两端北向能力不一致。
+- Android 设备无法直接读取构建机 `~/lpx/cert/third-party`，同时三方测试私钥不能进入远端 Git 或 Agent SDK AAR，因此需要明确的测试密钥导入和应用私有存储机制。
+
+### 修改方式
+
+- Android `registerCapabilities()` 新增默认空的 `credentials`、`capabilities` 和可选 `agentName`，支持已有 VC、能力字符串或混合输入；本地身份与 `agentId` 匹配时自动使用缓存的 Agent 名称。
+- 新增 Android 测试能力 VC 签发器，每个能力生成一张与 Python 相同的 `CapabilityCredential`；签发者、claims、有效期、七字段排序紧凑 ASCII JSON、P-256 ECDSA/SHA-256 和 DER Base64 规则保持一致。
+- `AgentSdk.create()` 将测试签发器绑定到应用 `noBackupFilesDir/agent-sdk/test-capability-vc`；`importTestCapabilityIssuerPrivateKey()` 负责校验并保存 PKCS#8 P-256 PEM。私钥不进入 AAR，未导入时请求明确返回 `SIGNATURE_ERROR`。
+- Android example 可从本地且被 Git 忽略的 `raw/test_third_party_private_key.pem` 导入测试密钥，并通过 `test_capabilities` Intent extra 发布能力；不传该参数时不读取密钥，也不改变原流程。
+- Android 指南、根 README、Python 交叉说明、本地 HTTP 接口文档和用户友好版设计文档同步两端行为；原始《SDK设计文档》保持不动。
+
+### 验证内容
+
+- Android JVM 单元测试共 `23 tests / 0 skipped / 0 failures / 0 errors`；新增 5 个签发器测试和 1 个 AgentCard 测试，覆盖多能力逐项签发、混合已有 VC、自动 Agent 名称、导入缺失、重复能力、非 ASCII 规范化、签名验签和能力篡改拒绝。
+- JVM 测试直接读取真实 `/root/lpx/cert/third-party/private-key.pem` 签发 `robot-control` VC，并使用对应 `public-key.pem` 验签；本地执行未跳过且通过。
+- Android Release AAR 和 example Debug APK 构建成功；SHA-256 分别为 `d40f1c67488be6bb7d47ed3e55f39d8a96754bf595cc8251dbbd2ee608d65502` 和 `d53378a80e72dff17d0dd7fbc95a1cdbd8b0943dc188078d53d9858a64c6d43e`。
+- 对 AAR、APK 及其嵌套归档逐项扫描，均未包含真实三方私钥 PEM 或其 Base64 密钥体；测试资源路径已加入 `.gitignore`。
+- 本地 HTTP 接口文档的 19 个 JSON 示例和用户友好版设计文档的 3 个 JSON 示例均通过标准解析；原始《SDK设计文档》SHA-256 仍为 `d2509f323338d0cdb948ceff36e32c3ae71d59c646916b687168b4c2e862947b`。
+
 ## 2026-08-20 — Linux AgentCard 支持内测能力 VC 即时签发
 
 ### 修改原因

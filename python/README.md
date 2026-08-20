@@ -434,7 +434,8 @@ await sdk.register_capabilities(
 兼容现有 IDM 测试规则：只覆盖 `context/id/type/issuer/valid_from/valid_until/claims`
 七个字段，采用排序紧凑 JSON、P-256 ECDSA/SHA-256 和 DER Base64 签名。
 该私钥只从外部文件读取，不会进入 Wheel。此入口仅用于联调；正式环境应由
-独立能力认证服务签发 VC，再通过 `credentials` 发布。
+独立能力认证服务签发 VC，再通过 `credentials` 发布。Android 也支持相同的
+能力列表输入，但必须先将测试机构私钥导入应用私有目录，详见 Android 指南。
 
 AgentRuntime 随后通过已建立的 WebSocket 下发核心网请求：
 

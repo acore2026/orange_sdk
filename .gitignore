@@ -11,6 +11,7 @@ deployment/masque-tls/masque-server-key.pem
 .gradle/
 **/build/
 android/local.properties
+android/example-app/src/main/res/raw/test_third_party_private_key.pem
 *.iml
 .idea/
 

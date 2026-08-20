@@ -73,6 +73,20 @@ class MainActivity : Activity() {
             return
         }
         val value = AgentSdk.create(service)
+        if (config.testCapabilities.isNotEmpty()) {
+            val keyResource = resources.getIdentifier(
+                "test_third_party_private_key",
+                "raw",
+                packageName,
+            )
+            if (keyResource == 0) {
+                status.text = "Missing local raw/test_third_party_private_key.pem"
+                return
+            }
+            resources.openRawResource(keyResource).use { input ->
+                value.importTestCapabilityIssuerPrivateKey(input.readBytes())
+            }
+        }
         value.restoreLocalProfile(
             AgentProfile(config.agentId, config.agentName, buildJsonObject { })
         )
@@ -89,7 +103,7 @@ class MainActivity : Activity() {
         sdk = value
         scope.launch {
             runCatching {
-                value.initialize(
+                val initialized = value.initialize(
                     agentRuntimeIp = config.runtimeIp,
                     agentRuntimePort = config.runtimePort,
                     localVlanIp = config.localVlanIp,
@@ -98,7 +112,22 @@ class MainActivity : Activity() {
                     masqueServerUrl = config.masqueUrl,
                     masqueAuthorization = config.masqueToken?.let { "Bearer $it" },
                 )
-            }.onSuccess { status.text = "READY ${it.agentTcpEndpoint}" }
+                if (config.testCapabilities.isNotEmpty()) {
+                    value.registerCapabilities(
+                        agentId = config.agentId,
+                        priority = config.priority,
+                        capabilities = config.testCapabilities,
+                    )
+                }
+                initialized
+            }.onSuccess {
+                val published = if (config.testCapabilities.isEmpty()) {
+                    ""
+                } else {
+                    " capabilities=${config.testCapabilities}"
+                }
+                status.text = "READY ${it.agentTcpEndpoint}$published"
+            }
                 .onFailure { status.text = "FAILED: ${it.message}" }
         }
     }
@@ -120,6 +149,8 @@ class MainActivity : Activity() {
         val agentId: String,
         val agentName: String,
         val masqueToken: String?,
+        val testCapabilities: List<String>,
+        val priority: Int,
     ) {
         companion object {
             fun fromIntent(intent: Intent): ExampleConfig? {
@@ -138,13 +169,20 @@ class MainActivity : Activity() {
                     agentId,
                     agentName,
                     intent.getStringExtra("masque_token"),
+                    intent.getStringExtra("test_capabilities")
+                        ?.split(',')
+                        ?.map(String::trim)
+                        ?.filter(String::isNotEmpty)
+                        .orEmpty(),
+                    intent.getIntExtra("priority", 1),
                 )
             }
 
             val usage = """
                 Pass deployment values through intent extras; no IP is hardcoded:
                 runtime_ip, runtime_port, local_vlan_ip, tcp_port, udp_port,
-                masque_url, agent_id, agent_name, and optional masque_token.
+                masque_url, agent_id, agent_name, optional masque_token,
+                test_capabilities (comma separated), and priority.
             """.trimIndent()
         }
     }

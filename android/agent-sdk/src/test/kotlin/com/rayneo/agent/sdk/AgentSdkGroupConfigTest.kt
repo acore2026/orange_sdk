@@ -18,12 +18,16 @@ import com.rayneo.agent.sdk.transport.TunnelController
 import com.rayneo.agent.sdk.transport.VideoTrack
 import com.rayneo.agent.sdk.transport.VideoUploadHandle
 import com.rayneo.agent.sdk.model.OffloadingSession
+import com.rayneo.agent.sdk.security.TestCapabilityVcIssuer
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -31,6 +35,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.time.Instant
+import java.nio.file.Files
+import java.security.KeyPairGenerator
+import java.security.spec.ECGenParameterSpec
+import java.util.Base64
 
 class AgentSdkGroupConfigTest {
     private lateinit var tunnel: FakeTunnel
@@ -39,6 +47,7 @@ class AgentSdkGroupConfigTest {
     private lateinit var server: FakeServer
     private lateinit var peer: FakePeer
     private lateinit var media: FakeMedia
+    private lateinit var testCapabilityIssuer: TestCapabilityVcIssuer
     private lateinit var sdk: AgentSdk
 
     @Before
@@ -49,6 +58,11 @@ class AgentSdkGroupConfigTest {
         server = FakeServer()
         peer = FakePeer()
         media = FakeMedia()
+        testCapabilityIssuer = TestCapabilityVcIssuer(
+            Files.createTempDirectory("agent-sdk-test-capability-")
+                .resolve("issuer-private-key.pem")
+                .toFile()
+        )
         sdk = AgentSdk(
             tunnelController = tunnel,
             masqueTransport = masque,
@@ -58,7 +72,9 @@ class AgentSdkGroupConfigTest {
             runtimeFactory = { _, _ -> runtime },
             localServerFactory = { server },
             mediaOffloadAdapter = media,
+            testCapabilityVcIssuer = testCapabilityIssuer,
         )
+        sdk.importTestCapabilityIssuerPrivateKey(testPrivateKeyPem())
     }
 
     @Test
@@ -234,6 +250,36 @@ class AgentSdkGroupConfigTest {
         assertEquals(LOCAL_ID, runtime.lastBody!!["agent_id"].toString().trim('"'))
     }
 
+    @Test
+    fun `AgentCard accepts existing VCs and raw capabilities`() = runTest {
+        initializeSdk()
+        val existing = buildJsonObject { put("id", "vc0") }
+
+        sdk.registerCapabilities(
+            agentId = LOCAL_ID,
+            priority = 2,
+            credentials = listOf(existing),
+            capabilities = listOf("robot-control", "voice"),
+        )
+
+        assertEquals("POST", runtime.lastMethod)
+        assertEquals("/arf/v1/agent-cards", runtime.lastPath)
+        val vcList = runtime.lastBody!!.getValue("vc_list").jsonArray
+        assertEquals(3, vcList.size)
+        assertEquals("vc0", vcList[0].jsonObject.getValue("id").jsonPrimitive.content)
+        assertEquals(
+            listOf("robot-control", "voice"),
+            vcList.drop(1).map {
+                it.jsonObject.getValue("claims").jsonObject
+                    .getValue("capability").jsonPrimitive.content
+            },
+        )
+        assertTrue(vcList.drop(1).all {
+            it.jsonObject.getValue("proof").jsonObject
+                .getValue("signature_value").jsonPrimitive.content.isNotBlank()
+        })
+    }
+
     private suspend fun initializeSdk() {
         val result = sdk.initialize(
             agentRuntimeIp = "192.168.3.10",
@@ -279,6 +325,21 @@ class AgentSdkGroupConfigTest {
         put("tcp_port", tcpPort)
         put("udp_port", "28443")
         put("did_key", key)
+    }
+
+    private fun testPrivateKeyPem(): ByteArray {
+        val keyPair = KeyPairGenerator.getInstance("EC").run {
+            initialize(ECGenParameterSpec("secp256r1"))
+            generateKeyPair()
+        }
+        return buildString {
+            appendLine("-----BEGIN PRIVATE KEY-----")
+            appendLine(
+                Base64.getMimeEncoder(64, byteArrayOf('\n'.code.toByte()))
+                    .encodeToString(keyPair.private.encoded)
+            )
+            appendLine("-----END PRIVATE KEY-----")
+        }.toByteArray(Charsets.US_ASCII)
     }
 
     private class FakeTunnel : TunnelController {

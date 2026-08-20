@@ -18,6 +18,7 @@ import com.rayneo.agent.sdk.security.AndroidDeviceSecurity
 import com.rayneo.agent.sdk.security.RejectUnconfiguredMessageSigner
 import com.rayneo.agent.sdk.security.RejectUnconfiguredMessageSignatureVerifier
 import com.rayneo.agent.sdk.security.RejectUnconfiguredProofVerifier
+import com.rayneo.agent.sdk.security.TestCapabilityVcIssuer
 import com.rayneo.agent.sdk.server.TcpJsonLocalServer
 import com.rayneo.agent.sdk.transport.GroupMessageListener
 import com.rayneo.agent.sdk.transport.ControlRequestAuthenticator
@@ -54,6 +55,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.coroutines.withTimeout
 import java.net.URI
+import java.io.File
 import java.time.Instant
 import java.util.UUID
 
@@ -71,6 +73,7 @@ class AgentSdk internal constructor(
     },
     private val localServerFactory: () -> LocalServer = { TcpJsonLocalServer() },
     private val mediaOffloadAdapter: MediaOffloadAdapter? = null,
+    private val testCapabilityVcIssuer: TestCapabilityVcIssuer? = null,
 ) {
     private enum class State { NEW, INITIALIZING, READY, CLOSING, CLOSED }
 
@@ -379,12 +382,50 @@ class AgentSdk internal constructor(
     suspend fun registerCapabilities(
         agentId: String,
         priority: Int,
-        credentials: List<JsonObject>,
-    ): OperationResult = operation("POST", "/arf/v1/agent-cards", buildJsonObject {
-        put("agent_id", agentId)
-        put("priority", priority)
-        put("vc_list", JsonArray(credentials))
-    })
+        credentials: List<JsonObject> = emptyList(),
+        capabilities: List<String> = emptyList(),
+        agentName: String? = null,
+    ): OperationResult {
+        val vcList = credentials.toMutableList()
+        if (capabilities.isNotEmpty()) {
+            val resolvedAgentName = agentName
+                ?: profile?.takeIf { it.agentId == agentId }?.agentName
+                ?: throw AgentSdkException(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "agentName is required when raw capabilities are published " +
+                        "without a matching local profile",
+                    "agentName",
+                )
+            val issuer = testCapabilityVcIssuer ?: throw AgentSdkException(
+                ErrorCode.SIGNATURE_ERROR,
+                "Test capability VC issuer is unavailable",
+                "testCapabilityIssuerPrivateKey",
+            )
+            vcList += issuer.issue(agentId, resolvedAgentName, capabilities)
+        }
+        if (vcList.isEmpty()) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "credentials or capabilities must contain at least one item",
+                "credentials",
+            )
+        }
+        return operation("POST", "/arf/v1/agent-cards", buildJsonObject {
+            put("agent_id", agentId)
+            put("priority", priority)
+            put("vc_list", JsonArray(vcList))
+        })
+    }
+
+    /** Lab only: import the third-party capability issuer key into app-private storage. */
+    fun importTestCapabilityIssuerPrivateKey(privateKeyPem: ByteArray) {
+        val issuer = testCapabilityVcIssuer ?: throw AgentSdkException(
+            ErrorCode.SIGNATURE_ERROR,
+            "Test capability VC issuer is unavailable",
+            "testCapabilityIssuerPrivateKey",
+        )
+        issuer.importPrivateKey(privateKeyPem)
+    }
 
     suspend fun updateCapabilities(
         agentId: String,
@@ -635,6 +676,12 @@ class AgentSdk internal constructor(
                 devicePublicKeyProvider = security,
                 messageSigner = security,
                 messageSignatureVerifier = security,
+                testCapabilityVcIssuer = TestCapabilityVcIssuer(
+                    File(
+                        vpnService.noBackupFilesDir,
+                        "agent-sdk/test-capability-vc/issuer-private-key.pem",
+                    )
+                ),
                 mediaOffloadAdapter = mediaOffloadAdapter,
                 peerMessenger = peerMessenger,
                 localServerFactory = localServerFactory,

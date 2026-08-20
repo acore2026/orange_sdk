@@ -39,13 +39,55 @@ SubjectPublicKeyInfo public key; control-plane and A2A messages are signed by
 the SDK. The AAR embeds the pinned core-network P-256 public key and uses it to
 verify `acf_group_config.proof`; peer A2A messages are verified with the
 `did_key` from that verified group snapshot. Applications do not supply proof
-verifiers, authenticators, signers, public keys, or private keys.
+verifiers, authenticators, signers, public keys, or production private keys.
+The explicit lab-only capability issuer import described below is the sole
+exception.
 
 Only the MASQUE URL uses HTTPS/HTTP/3. Health checks, endpoint registration and
 all other AgentRuntime calls use HTTP. During `initialize`, the SDK opens
 `/v1/acn/downlink-websocket` on the same AgentRuntime host and port used by the
 uplink REST calls; no additional port is configured. A2A continues to use HTTP.
 The AAR manifest enables cleartext traffic for this internal deployment.
+
+## Test-only capability VC issuance
+
+`registerCapabilities` accepts either pre-issued VCs, raw capability strings,
+or both. Existing VCs remain the production path. With raw capabilities, the
+SDK creates one `CapabilityCredential` per string, signs the same seven IDM VC
+fields as the Python SDK with P-256 ECDSA/SHA-256, and appends the result to the
+existing wire-level `vc_list`. AgentRuntime and the network-side HTTP contract
+do not change.
+
+Android cannot read the build host's `~/lpx/cert` at runtime. For this lab-only
+case, import the test issuer key once from an application resource; the SDK
+persists it under the app's `noBackupFilesDir/agent-sdk/test-capability-vc`:
+
+```kotlin
+val sdk = AgentSdk.create(vpnService)
+resources.openRawResource(R.raw.test_third_party_private_key).use { input ->
+    sdk.importTestCapabilityIssuerPrivateKey(input.readBytes())
+}
+
+sdk.registerCapabilities(
+    agentId = profile.agentId,
+    priority = 1,
+    credentials = listOf(profile.identityVc),
+    capabilities = listOf("robot-control", "voice"),
+)
+```
+
+For the repository example, provision the ignored test resource before building:
+
+```bash
+mkdir -p android/example-app/src/main/res/raw
+cp ~/lpx/cert/third-party/private-key.pem \
+  android/example-app/src/main/res/raw/test_third_party_private_key.pem
+```
+
+The key is excluded from Git and the Agent SDK AAR. It is included in the local
+example APK when this test resource is present, so this flow must not be used in
+production. Production applications should publish VCs issued by an external
+capability authority through `credentials`.
 
 To rebuild the shipped ARM64 library after native source changes:
 
@@ -66,6 +108,8 @@ adb shell am start -n com.rayneo.agent.example/.MainActivity \
   --ei udp_port 28443 \
   --es agent_id 'did:example:agent-a' \
   --es agent_name 'Agent A' \
+  --es test_capabilities 'robot-control,voice' \
+  --ei priority 1 \
   --es masque_token 'replace-with-device-secret' \
   --es masque_url https://192.168.3.10:4433
 ```
