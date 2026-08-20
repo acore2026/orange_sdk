@@ -7,7 +7,7 @@ from typing import Any, Mapping
 import pytest
 
 from agent_sdk import AgentSdk, NetworkMessageAction
-from agent_sdk.models import AgentProfile, NetworkMessageType
+from agent_sdk.models import AgentProfile, EndpointRegistration, NetworkMessageType
 from agent_sdk.routes import MemoryRouteBackend
 
 
@@ -61,8 +61,10 @@ class FakeRuntime:
     async def connect(self) -> None:
         return None
 
-    async def register_endpoint(self, local_ip: str, tcp_port: int, udp_port: int) -> str:
-        return "registration-test"
+    async def register_endpoint(
+        self, local_ip: str, tcp_port: int, udp_port: int
+    ) -> EndpointRegistration:
+        return EndpointRegistration("registration-test", "8.8.8.7", 24)
 
     async def request(self, method: str, path: str, body: Mapping[str, Any]):
         self.requests.append((method, path, body))
@@ -312,7 +314,7 @@ async def sdk_fixture(tmp_path):
         message_signer=FakeMessageSigner(),
         tun_factory=tun_factory,
         masque_factory=lambda config: masque,
-        runtime_factory=lambda config: runtime,
+        runtime_factory=lambda host, port: runtime,
         server_factory=lambda: server,
         route_backend_factory=lambda config, tun_device: backend,
         media_offload_adapter=media,
@@ -323,7 +325,6 @@ async def sdk_fixture(tmp_path):
         "192.168.1.10",
         4001,
         28443,
-        agent_tun_cidr="8.8.8.7/24",
         masque_server_url="https://192.168.3.10:4433",
         log_file_path=str(tmp_path / "agent-sdk.log"),
     )

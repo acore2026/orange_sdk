@@ -3,6 +3,7 @@ package com.rayneo.agent.sdk
 import com.rayneo.agent.sdk.model.AgentProfile
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import com.rayneo.agent.sdk.transport.LocalServer
+import com.rayneo.agent.sdk.transport.EndpointRegistration
 import com.rayneo.agent.sdk.transport.MediaOffloadAdapter
 import com.rayneo.agent.sdk.transport.MessageSigner
 import com.rayneo.agent.sdk.transport.MasqueConfiguration
@@ -207,10 +208,12 @@ class AgentSdkGroupConfigTest {
             localVlanIp = "192.168.1.10",
             localTcpPort = 4001,
             localUdpPort = 28443,
-            agentTunCidr = "8.8.8.7/24",
             masqueServerUrl = "https://192.168.3.10:4433",
         )
         assertEquals("8.8.8.7:4001", result.agentTcpEndpoint)
+        assertEquals("8.8.8.7/24", result.agentTunCidr)
+        assertEquals("8.8.8.7/24", tunnel.establishedConfiguration?.agentTunCidr)
+        assertTrue(tunnel.establishedConfiguration?.routes?.isEmpty() == true)
         sdk.restoreLocalProfile(
             AgentProfile(LOCAL_ID, "Agent A", buildJsonObject { put("id", "vc-a") })
         )
@@ -247,9 +250,12 @@ class AgentSdkGroupConfigTest {
     private class FakeTunnel : TunnelController {
         override val tunFd: Int = 42
         val groupPeers = mutableMapOf<String, Set<String>>()
+        var establishedConfiguration: TunnelConfiguration? = null
         private var swapper: (suspend (Int) -> Unit)? = null
 
-        override suspend fun establish(configuration: TunnelConfiguration) = Unit
+        override suspend fun establish(configuration: TunnelConfiguration) {
+            establishedConfiguration = configuration
+        }
         override suspend fun replaceGroupPeers(groupId: String, peerIps: Set<String>) {
             if (peerIps.isEmpty()) groupPeers.remove(groupId) else groupPeers[groupId] = peerIps
         }
@@ -271,7 +277,11 @@ class AgentSdkGroupConfigTest {
         var lastBody: JsonObject? = null
 
         override suspend fun connect() = Unit
-        override suspend fun registerEndpoint(localIp: String, tcpPort: Int, udpPort: Int) = "reg-1"
+        override suspend fun registerEndpoint(
+            localIp: String,
+            tcpPort: Int,
+            udpPort: Int,
+        ) = EndpointRegistration("reg-1", "8.8.8.7", 24)
         override suspend fun request(method: String, path: String, body: JsonObject): JsonObject {
             lastMethod = method
             lastPath = path

@@ -51,7 +51,6 @@ async def main(args) -> None:
             args.local_vlan_ip,
             args.tcp_port,
             args.udp_port,
-            agent_tun_cidr=args.agent_tun_cidr,
             masque_server_url=args.masque_url,
             masque_server_name=args.masque_server_name,
             masque_ca_certificate_pem=ca,
@@ -78,7 +77,6 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--local-vlan-ip", required=True)
     value.add_argument("--tcp-port", type=int, default=4001)
     value.add_argument("--udp-port", type=int, default=28443)
-    value.add_argument("--agent-tun-cidr", required=True)
     value.add_argument("--agent-id", required=True)
     value.add_argument("--agent-name", required=True)
     value.add_argument("--masque-url", required=True)

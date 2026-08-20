@@ -14,7 +14,12 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from agent_sdk import AgentSdk, NetworkMessageAction, NetworkMessageType
+from agent_sdk import (
+    AgentSdk,
+    EndpointRegistration,
+    NetworkMessageAction,
+    NetworkMessageType,
+)
 from agent_sdk.routes import MemoryRouteBackend
 from agent_sdk.security import (
     DemoAcceptAllProofVerifier,
@@ -70,9 +75,9 @@ class DemoRuntime:
 
     async def register_endpoint(
         self, local_ip: str, tcp_port: int, udp_port: int
-    ) -> str:
+    ) -> EndpointRegistration:
         del local_ip, tcp_port, udp_port
-        return "registration-demo"
+        return EndpointRegistration("registration-demo", "8.8.8.7", 24)
 
     async def request(
         self, method: str, path: str, body: Mapping[str, Any]
@@ -309,7 +314,7 @@ async def run_demo(
         peer_messenger=peer_messenger,
         tun_factory=tun_factory,
         masque_factory=lambda config: masque,
-        runtime_factory=lambda config: runtime,
+        runtime_factory=lambda host, port: runtime,
         server_factory=lambda: local_server,
         route_backend_factory=lambda config, device: route_backend,
         media_offload_adapter=media,
@@ -328,7 +333,6 @@ async def run_demo(
             "192.168.1.10",
             4001,
             28443,
-            agent_tun_cidr="8.8.8.7/24",
             masque_server_url="https://192.168.3.10:4433",
             masque_authorization="Bearer demo-device-a-token",
             log_file_path=log_file_path,

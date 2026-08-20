@@ -89,9 +89,7 @@ class AgentSdk(
         localVlanIp: String,
         localTcpPort: Int,
         localUdpPort: Int,
-        agentTunCidr: String,
         masqueServerUrl: String,
-        peerRoutes: List<String> = emptyList(),
         masqueServerName: String? = null,
         masqueCaCertificatePem: ByteArray? = null,
         masqueAuthorization: String? = null,
@@ -120,14 +118,20 @@ class AgentSdk(
                 "masqueServerUrl",
             )
         }
-        this.agentTunCidr = agentTunCidr
-        this.agentTunIp = agentTunCidr.substringBeforeLast('/')
         this.localTcpPort = localTcpPort
         this.localUdpPort = localUdpPort
         state = State.INITIALIZING
         try {
+            runtime = runtimeFactory(agentRuntimeIp, agentRuntimePort).also { transport ->
+                transport.connect()
+            }
+            val registration = runtime!!.registerEndpoint(
+                localVlanIp, localTcpPort, localUdpPort
+            )
+            this.agentTunCidr = registration.agentTunCidr
+            this.agentTunIp = registration.ueIp
             tunnelController.establish(
-                TunnelConfiguration(agentTunCidr, peerRoutes.toSet(), tunMtu)
+                TunnelConfiguration(agentTunCidr, emptySet(), tunMtu)
             )
             groupCache = GroupMemberCache(tunnelController)
             localServer = localServerFactory().also { server ->
@@ -141,12 +145,6 @@ class AgentSdk(
                     onA2aMessage = ::handleA2aMessage,
                 )
             }
-            runtime = runtimeFactory(agentRuntimeIp, agentRuntimePort).also { transport ->
-                transport.connect()
-            }
-            val registrationId = runtime!!.registerEndpoint(
-                localVlanIp, localTcpPort, localUdpPort
-            )
             masqueTransport.start(
                 tunnelController.tunFd,
                 MasqueConfiguration(
@@ -164,13 +162,12 @@ class AgentSdk(
             return SdkInitResult(
                 runtimeConnected = true,
                 masqueConnected = masqueTransport.connected,
-                registrationId = registrationId,
+                registrationId = registration.registrationId,
                 localTcpEndpoint = "$localVlanIp:$localTcpPort",
                 localUdpEndpoint = "$localVlanIp:$localUdpPort",
                 agentTcpEndpoint = "$agentTunIp:$localTcpPort",
                 agentUdpEndpoint = "$agentTunIp:$localUdpPort",
                 agentTunCidr = agentTunCidr,
-                installedRoutes = peerRoutes,
                 masqueProxyEndpoint = masqueServerUrl,
             )
         } catch (error: Exception) {

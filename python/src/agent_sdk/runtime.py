@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 import uuid
+from ipaddress import ip_address
 from typing import Any, Mapping
 
 import httpx
 
 from .errors import AgentSdkError, ErrorCode
 from .logging_utils import log_event
+from .models import EndpointRegistration
 
 
 class HttpRuntimeTransport:
@@ -88,7 +90,7 @@ class HttpRuntimeTransport:
 
     async def register_endpoint(
         self, local_ip: str, tcp_port: int, udp_port: int
-    ) -> str:
+    ) -> EndpointRegistration:
         response = await self.request(
             "POST",
             self._registration_path,
@@ -109,7 +111,38 @@ class HttpRuntimeTransport:
                 ErrorCode.RUNTIME_REJECTED,
                 "endpoint registration response has no registration_id",
             )
-        return registration_id
+        ue_ip = response.get("ue_ip")
+        if not isinstance(ue_ip, str):
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "endpoint registration response has no valid ue_ip",
+                field="ue_ip",
+            )
+        try:
+            parsed_ue_ip = ip_address(ue_ip)
+        except ValueError as exc:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "endpoint registration response ue_ip must be an IP literal",
+                field="ue_ip",
+            ) from exc
+        prefix_length = response.get("ue_prefix_length")
+        max_prefix_length = 32 if parsed_ue_ip.version == 4 else 128
+        if (
+            isinstance(prefix_length, bool)
+            or not isinstance(prefix_length, int)
+            or not 0 <= prefix_length <= max_prefix_length
+        ):
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                f"ue_prefix_length must be an integer in 0..{max_prefix_length}",
+                field="ue_prefix_length",
+            )
+        return EndpointRegistration(
+            registration_id=registration_id,
+            ue_ip=str(parsed_ue_ip),
+            ue_prefix_length=prefix_length,
+        )
 
     async def request(
         self, method: str, path: str, body: Mapping[str, Any]

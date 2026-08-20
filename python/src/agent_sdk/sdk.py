@@ -66,7 +66,7 @@ from .tun import LinuxTunDevice, validate_ip_packet
 
 TunFactory = Callable[[str, str, int], Awaitable[TunDevice]]
 MasqueFactory = Callable[[SdkConfig], ConnectIpTransport]
-RuntimeFactory = Callable[[SdkConfig], RuntimeTransport]
+RuntimeFactory = Callable[[str, int], RuntimeTransport]
 ServerFactory = Callable[[], LocalServer]
 RouteBackendFactory = Callable[[SdkConfig, TunDevice], RouteBackend]
 
@@ -192,9 +192,9 @@ class AgentSdk:
             )
         )
         self._runtime_factory = runtime_factory or (
-            lambda config: HttpRuntimeTransport(
-                config.agent_runtime_ip,
-                config.agent_runtime_port,
+            lambda host, port: HttpRuntimeTransport(
+                host,
+                port,
                 logger=self._logger,
             )
         )
@@ -279,7 +279,6 @@ class AgentSdk:
         local_tcp_port: int,
         local_udp_port: int,
         *,
-        agent_tun_cidr: str,
         masque_server_url: str,
         masque_server_name: str | None = None,
         masque_ca_certificate_pem: bytes | None = None,
@@ -308,7 +307,6 @@ class AgentSdk:
                 "local_vlan_ip": local_vlan_ip,
                 "local_tcp_port": local_tcp_port,
                 "local_udp_port": local_udp_port,
-                "agent_tun_cidr": agent_tun_cidr,
                 "masque_server_url": masque_server_url,
                 "masque_server_name": masque_server_name,
                 "masque_ca_certificate_pem": masque_ca_certificate_pem,
@@ -327,13 +325,12 @@ class AgentSdk:
                     ErrorCode.INVALID_ARGUMENT,
                     f"cannot init SDK in state {self._state}",
                 )
-            config = SdkConfig.validate(
+            SdkConfig.validate_client_parameters(
                 agent_runtime_ip=agent_runtime_ip,
                 agent_runtime_port=agent_runtime_port,
                 local_vlan_ip=local_vlan_ip,
                 local_tcp_port=local_tcp_port,
                 local_udp_port=local_udp_port,
-                agent_tun_cidr=agent_tun_cidr,
                 masque_server_url=masque_server_url,
                 masque_server_name=masque_server_name,
                 masque_ca_certificate_pem=masque_ca_certificate_pem,
@@ -346,6 +343,34 @@ class AgentSdk:
                 log_backup_count=log_backup_count,
             )
             self._state = "INITIALIZING"
+            self._runtime = self._runtime_factory(
+                agent_runtime_ip,
+                agent_runtime_port,
+            )
+            await self._runtime.connect()
+            registration = await self._runtime.register_endpoint(
+                local_vlan_ip,
+                local_tcp_port,
+                local_udp_port,
+            )
+            config = SdkConfig.validate(
+                agent_runtime_ip=agent_runtime_ip,
+                agent_runtime_port=agent_runtime_port,
+                local_vlan_ip=local_vlan_ip,
+                local_tcp_port=local_tcp_port,
+                local_udp_port=local_udp_port,
+                agent_tun_cidr=registration.agent_tun_cidr,
+                masque_server_url=masque_server_url,
+                masque_server_name=masque_server_name,
+                masque_ca_certificate_pem=masque_ca_certificate_pem,
+                masque_authorization=masque_authorization,
+                tun_name=tun_name,
+                tun_mtu=tun_mtu,
+                log_file_path=log_file_path,
+                log_level=log_level,
+                log_max_bytes=log_max_bytes,
+                log_backup_count=log_backup_count,
+            )
             self._config = config
             self._tun = await self._tun_factory(
                 config.tun_name, config.agent_tun_cidr, config.tun_mtu
@@ -365,14 +390,6 @@ class AgentSdk:
                 on_a2a_message=self._handle_a2a_message,
             )
 
-            self._runtime = self._runtime_factory(config)
-            await self._runtime.connect()
-            registration_id = await self._runtime.register_endpoint(
-                config.local_vlan_ip,
-                config.local_tcp_port,
-                config.local_udp_port,
-            )
-
             self._masque = self._masque_factory(config)
             await self._masque.start(self._write_downlink_packet)
             self._pump_task = asyncio.create_task(
@@ -382,7 +399,7 @@ class AgentSdk:
             result = SdkInitResult(
                 runtime_connected=True,
                 masque_connected=self._masque.connected,
-                registration_id=registration_id,
+                registration_id=registration.registration_id,
                 local_tcp_endpoint=f"{config.local_vlan_ip}:{config.local_tcp_port}",
                 local_udp_endpoint=f"{config.local_vlan_ip}:{config.local_udp_port}",
                 agent_tcp_endpoint=f"{config.agent_tun_ip}:{config.local_tcp_port}",

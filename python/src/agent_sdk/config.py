@@ -42,7 +42,7 @@ class SdkConfig:
         return parsed.port or 443
 
     @classmethod
-    def validate(
+    def validate_client_parameters(
         cls,
         *,
         agent_runtime_ip: str,
@@ -50,7 +50,6 @@ class SdkConfig:
         local_vlan_ip: str,
         local_tcp_port: int,
         local_udp_port: int,
-        agent_tun_cidr: str,
         masque_server_url: str,
         masque_server_name: str | None,
         masque_ca_certificate_pem: bytes | None,
@@ -61,7 +60,7 @@ class SdkConfig:
         log_level: str,
         log_max_bytes: int,
         log_backup_count: int,
-    ) -> "SdkConfig":
+    ) -> None:
         for field_name, value in (
             ("agent_runtime_ip", agent_runtime_ip),
             ("local_vlan_ip", local_vlan_ip),
@@ -72,13 +71,6 @@ class SdkConfig:
                 raise AgentSdkError(
                     ErrorCode.INVALID_ARGUMENT, str(exc), field=field_name
                 ) from exc
-
-        try:
-            ip_interface(agent_tun_cidr)
-        except ValueError as exc:
-            raise AgentSdkError(
-                ErrorCode.INVALID_ARGUMENT, str(exc), field="agent_tun_cidr"
-            ) from exc
 
         parsed = urlparse(masque_server_url)
         if parsed.scheme != "https" or parsed.hostname is None:
@@ -113,13 +105,60 @@ class SdkConfig:
                 field="tun_name",
             )
 
+    @classmethod
+    def validate(
+        cls,
+        *,
+        agent_runtime_ip: str,
+        agent_runtime_port: int,
+        local_vlan_ip: str,
+        local_tcp_port: int,
+        local_udp_port: int,
+        agent_tun_cidr: str,
+        masque_server_url: str,
+        masque_server_name: str | None,
+        masque_ca_certificate_pem: bytes | None,
+        masque_authorization: str | None,
+        tun_name: str,
+        tun_mtu: int,
+        log_file_path: str,
+        log_level: str,
+        log_max_bytes: int,
+        log_backup_count: int,
+    ) -> "SdkConfig":
+        cls.validate_client_parameters(
+            agent_runtime_ip=agent_runtime_ip,
+            agent_runtime_port=agent_runtime_port,
+            local_vlan_ip=local_vlan_ip,
+            local_tcp_port=local_tcp_port,
+            local_udp_port=local_udp_port,
+            masque_server_url=masque_server_url,
+            masque_server_name=masque_server_name,
+            masque_ca_certificate_pem=masque_ca_certificate_pem,
+            masque_authorization=masque_authorization,
+            tun_name=tun_name,
+            tun_mtu=tun_mtu,
+            log_file_path=log_file_path,
+            log_level=log_level,
+            log_max_bytes=log_max_bytes,
+            log_backup_count=log_backup_count,
+        )
+        try:
+            normalized_tun_cidr = str(ip_interface(agent_tun_cidr))
+        except ValueError as exc:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "AgentRuntime returned an invalid UE address assignment",
+                field="ue_ip",
+            ) from exc
+
         return cls(
             agent_runtime_ip=agent_runtime_ip,
             agent_runtime_port=agent_runtime_port,
             local_vlan_ip=local_vlan_ip,
             local_tcp_port=local_tcp_port,
             local_udp_port=local_udp_port,
-            agent_tun_cidr=str(ip_interface(agent_tun_cidr)),
+            agent_tun_cidr=normalized_tun_cidr,
             masque_server_url=masque_server_url,
             masque_server_name=masque_server_name,
             masque_ca_certificate_pem=masque_ca_certificate_pem,

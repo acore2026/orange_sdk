@@ -2,6 +2,31 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-20 — SDK 初始化改为使用 AgentRuntime 分配的 UE IP
+
+### 修改原因
+
+- 端侧设备对应的 UE IP 由服务器组网和 UERANSIM 映射决定，不应由 SDK 用户在 `init` 中手工填写。
+- 手工填写可能使端侧 Agent TUN IP 与 MASQUE Proxy 中的 `agent_ip -> uesimtun*` 映射不一致，导致 CONNECT-IP 内层包被拒绝或注入错误 UE。
+
+### 修改方式
+
+- `POST /sdk/v1/endpoints` 成功响应新增必填的 `ue_ip` 和 `ue_prefix_length`；Python 和 Android 都会校验 IP 字面量、地址簇和前缀范围。
+- Python `AgentSdk.init()` 和 Android `AgentSdk.initialize()` 移除公开的 Agent TUN CIDR 参数，固定先连接 AgentRuntime 并注册端点，再用返回的 `ue_ip/prefix` 创建 Linux TUN 或 Android VPN TUN。
+- `SdkInitResult.agent_tun_cidr/agentTunCidr`、Agent IP 侧监听地址和 MASQUE 配置均来自同一份服务器分配结果，不存在硬编码默认 UE IP。
+- Android 同步清理此前遗留的公开 `peerRoutes` 和 `installedRoutes`，与 Python 及“对端路由由 `acf_group_config` 管理”的已确认契约一致。
+- Linux/Android example、Python/Android README 和本地《Agent SDK HTTP 接口文档》、《SDK 设计文档-用户友好版》同步新时序。两份交付文档继续按仓库规则仅保留在本地，不进入 Git 提交或远端。
+- Python wheel 因公开初始化签名变更从 `0.2.0` 提升到 `0.3.0`。
+
+### 验证内容
+
+- Python 全量测试结果：`40 passed`；覆盖精确 URL/请求体、UE IP 响应解析、非法 IP/前缀拒绝以及分配地址实际传入 TUN。
+- Android 单元测试结果：`11 tests, 0 failures`；`example-app` Debug APK 构建成功。
+- `python/src`、`python/examples` 和 `python/tests` 全部通过 `compileall`；HTTP 文档 17 个 JSON 示例和用户友好版文档 3 个 JSON 示例全部通过标准解析。
+- 全新虚拟环境安装 wheel 后依赖检查通过，`agent_sdk.__version__` 为 `0.3.0`，`agent-sdk-self-check` 输出 `FULL FLOW DEMO PASSED`。
+- 本地交付物为 `python/dist/agent_connect_sdk-0.3.0-py3-none-any.whl`，SHA-256 为 `4f275641f870ebbf51815ae6c44c91aaf0d5bd123c465cdc35f46773cb54c31d`。
+- 原始《SDK设计文档》的 SHA-256 保持为 `d2509f323338d0cdb948ceff36e32c3ae71d59c646916b687168b4c2e862947b`，确认未被修改。
+
 ## 2026-08-19 — 增加本地结构化日志和 HTTP 全链路记录
 
 ### 修改原因

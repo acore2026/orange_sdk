@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from ipaddress import ip_interface
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -68,6 +69,17 @@ class SdkInitResult:
     agent_udp_endpoint: str
     agent_tun_cidr: str
     masque_proxy_endpoint: str
+
+
+@dataclass(frozen=True, slots=True)
+class EndpointRegistration:
+    registration_id: str
+    ue_ip: str
+    ue_prefix_length: int
+
+    @property
+    def agent_tun_cidr(self) -> str:
+        return str(ip_interface(f"{self.ue_ip}/{self.ue_prefix_length}"))
 
 
 @dataclass(slots=True)

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import httpx
+import pytest
 
+from agent_sdk import AgentSdkError, ErrorCode
 from agent_sdk.runtime import HttpRuntimeTransport
 
 
@@ -171,3 +174,88 @@ async def test_runtime_transport_accepts_empty_success_response():
         assert await transport.request("POST", "/arf/v1/agent-cards", {}) == {}
     finally:
         await transport.close()
+
+
+async def test_endpoint_registration_returns_ue_assignment():
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "registration_id": "registration-a",
+                "ue_ip": "8.8.8.7",
+                "ue_prefix_length": 24,
+            },
+        )
+
+    transport = HttpRuntimeTransport("runtime.example", 8443)
+    await transport._client.aclose()
+    transport._client = httpx.AsyncClient(
+        base_url="https://runtime.example:8443",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        registration = await transport.register_endpoint(
+            "192.168.1.10",
+            4001,
+            28443,
+        )
+    finally:
+        await transport.close()
+
+    assert captured[0].method == "POST"
+    assert captured[0].url == "https://runtime.example:8443/sdk/v1/endpoints"
+    assert json.loads(captured[0].content) == {
+        "local_vlan_ip": "192.168.1.10",
+        "tcp_port": 4001,
+        "udp_port": 28443,
+        "callback_paths": [
+            "/agent/group-invitation",
+            "/agent/group-moq-info",
+            "/A2A/message",
+        ],
+    }
+    assert registration.registration_id == "registration-a"
+    assert registration.ue_ip == "8.8.8.7"
+    assert registration.ue_prefix_length == 24
+    assert registration.agent_tun_cidr == "8.8.8.7/24"
+
+
+@pytest.mark.parametrize(
+    "response_body, field",
+    [
+        ({"registration_id": "r1", "ue_prefix_length": 24}, "ue_ip"),
+        (
+            {"registration_id": "r1", "ue_ip": "not-an-ip", "ue_prefix_length": 24},
+            "ue_ip",
+        ),
+        (
+            {"registration_id": "r1", "ue_ip": "8.8.8.7", "ue_prefix_length": 33},
+            "ue_prefix_length",
+        ),
+    ],
+)
+async def test_endpoint_registration_rejects_invalid_ue_assignment(
+    response_body,
+    field,
+):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, json=response_body)
+
+    transport = HttpRuntimeTransport("runtime.example", 8443)
+    await transport._client.aclose()
+    transport._client = httpx.AsyncClient(
+        base_url="https://runtime.example:8443",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(AgentSdkError) as exc:
+            await transport.register_endpoint("192.168.1.10", 4001, 28443)
+    finally:
+        await transport.close()
+
+    assert exc.value.code is ErrorCode.RUNTIME_REJECTED
+    assert exc.value.field == field

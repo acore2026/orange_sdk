@@ -56,7 +56,6 @@ data class SdkInitResult(
     val agentTcpEndpoint: String,
     val agentUdpEndpoint: String,
     val agentTunCidr: String,
-    val installedRoutes: List<String>,
     val masqueProxyEndpoint: String,
 )
 
