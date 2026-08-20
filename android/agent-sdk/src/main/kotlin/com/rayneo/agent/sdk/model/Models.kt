@@ -50,7 +50,6 @@ data class GroupConfigSnapshot(
 data class SdkInitResult(
     val runtimeConnected: Boolean,
     val masqueConnected: Boolean,
-    val registrationId: String,
     val localTcpEndpoint: String,
     val localUdpEndpoint: String,
     val agentTcpEndpoint: String,

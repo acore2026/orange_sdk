@@ -4,7 +4,6 @@ import com.rayneo.agent.sdk.AgentSdkException
 import com.rayneo.agent.sdk.ErrorCode
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
@@ -25,7 +24,6 @@ class OkHttpRuntimeTransportTest {
             captured,
             """
             {
-              "registration_id": "registration-a",
               "ue_ip": "8.8.8.7",
               "ue_prefix_length": 24
             }
@@ -45,15 +43,9 @@ class OkHttpRuntimeTransportTest {
                 put("local_vlan_ip", "192.168.1.10")
                 put("tcp_port", 4001)
                 put("udp_port", 28443)
-                put("callback_paths", buildJsonArray {
-                    add(kotlinx.serialization.json.JsonPrimitive("/agent/group-invitation"))
-                    add(kotlinx.serialization.json.JsonPrimitive("/agent/group-moq-info"))
-                    add(kotlinx.serialization.json.JsonPrimitive("/A2A/message"))
-                })
             },
             requestJson(captured.single()),
         )
-        assertEquals("registration-a", registration.registrationId)
         assertEquals("8.8.8.7", registration.ueIp)
         assertEquals(24, registration.uePrefixLength)
         assertEquals("8.8.8.7/24", registration.agentTunCidr)
@@ -65,7 +57,6 @@ class OkHttpRuntimeTransportTest {
             mutableListOf(),
             """
             {
-              "registration_id": "registration-a",
               "ue_ip": "8.8.8.7",
               "ue_prefix_length": 33
             }
@@ -90,7 +81,6 @@ class OkHttpRuntimeTransportTest {
             mutableListOf(),
             """
             {
-              "registration_id": "registration-a",
               "ue_ip": "ue-a.example",
               "ue_prefix_length": 24
             }

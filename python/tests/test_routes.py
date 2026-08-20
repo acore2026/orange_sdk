@@ -10,6 +10,7 @@ def test_public_api_does_not_expose_route_configuration():
     assert "peer_routes" not in inspect.signature(AgentSdk.init).parameters
     assert "agent_tun_cidr" not in inspect.signature(AgentSdk.init).parameters
     assert "installed_routes" not in SdkInitResult.__dataclass_fields__
+    assert "registration_id" not in SdkInitResult.__dataclass_fields__
 
 
 async def test_init_uses_runtime_ue_assignment_for_tun(sdk_fixture):

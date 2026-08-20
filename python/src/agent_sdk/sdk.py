@@ -399,7 +399,6 @@ class AgentSdk:
             result = SdkInitResult(
                 runtime_connected=True,
                 masque_connected=self._masque.connected,
-                registration_id=registration.registration_id,
                 local_tcp_endpoint=f"{config.local_vlan_ip}:{config.local_tcp_port}",
                 local_udp_endpoint=f"{config.local_vlan_ip}:{config.local_udp_port}",
                 agent_tcp_endpoint=f"{config.agent_tun_ip}:{config.local_tcp_port}",

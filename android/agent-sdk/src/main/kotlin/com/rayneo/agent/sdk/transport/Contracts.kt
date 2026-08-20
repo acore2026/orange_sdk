@@ -29,7 +29,6 @@ interface RuntimeTransport {
 }
 
 data class EndpointRegistration(
-    val registrationId: String,
     val ueIp: String,
     val uePrefixLength: Int,
 ) {

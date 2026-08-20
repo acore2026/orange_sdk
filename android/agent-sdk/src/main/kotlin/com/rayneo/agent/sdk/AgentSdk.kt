@@ -162,7 +162,6 @@ class AgentSdk(
             return SdkInitResult(
                 runtimeConnected = true,
                 masqueConnected = masqueTransport.connected,
-                registrationId = registration.registrationId,
                 localTcpEndpoint = "$localVlanIp:$localTcpPort",
                 localUdpEndpoint = "$localVlanIp:$localUdpPort",
                 agentTcpEndpoint = "$agentTunIp:$localTcpPort",

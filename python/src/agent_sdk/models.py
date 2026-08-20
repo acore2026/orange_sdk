@@ -62,7 +62,6 @@ class GroupConfigSnapshot:
 class SdkInitResult:
     runtime_connected: bool
     masque_connected: bool
-    registration_id: str
     local_tcp_endpoint: str
     local_udp_endpoint: str
     agent_tcp_endpoint: str
@@ -73,7 +72,6 @@ class SdkInitResult:
 
 @dataclass(frozen=True, slots=True)
 class EndpointRegistration:
-    registration_id: str
     ue_ip: str
     ue_prefix_length: int
 

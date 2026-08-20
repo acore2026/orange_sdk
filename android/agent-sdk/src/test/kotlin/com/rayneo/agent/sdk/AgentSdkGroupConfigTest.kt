@@ -281,7 +281,7 @@ class AgentSdkGroupConfigTest {
             localIp: String,
             tcpPort: Int,
             udpPort: Int,
-        ) = EndpointRegistration("reg-1", "8.8.8.7", 24)
+        ) = EndpointRegistration("8.8.8.7", 24)
         override suspend fun request(method: String, path: String, body: JsonObject): JsonObject {
             lastMethod = method
             lastPath = path

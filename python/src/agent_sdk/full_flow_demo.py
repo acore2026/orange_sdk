@@ -77,7 +77,7 @@ class DemoRuntime:
         self, local_ip: str, tcp_port: int, udp_port: int
     ) -> EndpointRegistration:
         del local_ip, tcp_port, udp_port
-        return EndpointRegistration("registration-demo", "8.8.8.7", 24)
+        return EndpointRegistration("8.8.8.7", 24)
 
     async def request(
         self, method: str, path: str, body: Mapping[str, Any]

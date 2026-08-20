@@ -6,7 +6,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
@@ -49,18 +48,7 @@ class OkHttpRuntimeTransport(
             put("local_vlan_ip", localIp)
             put("tcp_port", tcpPort)
             put("udp_port", udpPort)
-            put("callback_paths", buildJsonArray {
-                add(kotlinx.serialization.json.JsonPrimitive("/agent/group-invitation"))
-                add(kotlinx.serialization.json.JsonPrimitive("/agent/group-moq-info"))
-                add(kotlinx.serialization.json.JsonPrimitive("/A2A/message"))
-            })
         })
-        val registrationId = response["registration_id"]?.jsonPrimitive?.contentOrNull
-            ?.takeIf { it.isNotBlank() }
-            ?: throw AgentSdkException(
-                ErrorCode.RUNTIME_REJECTED,
-                "Endpoint registration has no registration_id",
-            )
         val rawUeIp = response["ue_ip"]?.jsonPrimitive?.contentOrNull
             ?: throw AgentSdkException(
                 ErrorCode.RUNTIME_REJECTED,
@@ -76,7 +64,7 @@ class OkHttpRuntimeTransport(
                 "ue_prefix_length must be an integer in 0..$maxPrefix",
                 "ue_prefix_length",
             )
-        return EndpointRegistration(registrationId, ueIp, uePrefixLength)
+        return EndpointRegistration(ueIp, uePrefixLength)
     }
 
     private fun normalizeIpLiteral(value: String): String {

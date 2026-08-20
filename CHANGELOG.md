@@ -2,6 +2,31 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-20 — 精简 SDK 端点注册请求和响应
+
+### 修改原因
+
+- AgentRuntime 的 SDK 端点注册接口不再需要客户端声明固定回调路径，因此请求体不应继续发送 `callback_paths`。
+- 服务器不再分配或返回 `registration_id`，SDK 不应要求该字段或向用户暴露无来源的注册标识。
+
+### 修改方式
+
+- Python 和 Android 的 `POST /sdk/v1/endpoints` 请求体统一为 `local_vlan_ip`、`tcp_port`、`udp_port` 三个字段。
+- 端点注册响应模型仅保留必填的 `ue_ip` 和 `ue_prefix_length`；两端删除 `registration_id/registrationId` 解析和缺失校验。
+- Python 和 Android `SdkInitResult` 删除 `registration_id/registrationId`，example 和测试伪实现同步新模型。
+- HTTP 精确报文测试改为断言请求不包含 `callback_paths`、响应不包含 `registration_id`，但 UE IP 仍能创建正确的 Agent TUN。
+- Python/Android README 和本地《Agent SDK HTTP 接口文档》、《SDK 设计文档-用户友好版》同步精简后契约；两份交付文档按仓库规则继续仅保留在本地。
+- Python wheel 因公开返回模型变更从 `0.3.0` 提升到 `0.4.0`。
+
+### 验证内容
+
+- Python 全量测试结果：`40 passed`；`python/src`、`python/examples` 和 `python/tests` 通过 `compileall`。
+- Android 单元测试结果：`11 tests, 0 failures`；`example-app` Debug APK 构建成功。
+- HTTP 文档 17 个 JSON 示例和用户友好版文档 3 个 JSON 示例全部通过标准解析。
+- 全新虚拟环境安装 wheel 后依赖检查通过，`agent_sdk.__version__` 为 `0.4.0`，`agent-sdk-self-check` 输出 `FULL FLOW DEMO PASSED`。
+- 本地交付物为 `python/dist/agent_connect_sdk-0.4.0-py3-none-any.whl`，SHA-256 为 `4b01b31764f31deef4baa1661cf0ea430351788f68e408cf2f3cb481cdb1dc70`。
+- 原始《SDK设计文档》的 SHA-256 保持为 `d2509f323338d0cdb948ceff36e32c3ae71d59c646916b687168b4c2e862947b`，确认未被修改。
+
 ## 2026-08-20 — SDK 初始化改为使用 AgentRuntime 分配的 UE IP
 
 ### 修改原因

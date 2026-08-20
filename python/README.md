@@ -8,7 +8,7 @@ SDK 收到 AgentRuntime 透传的 `acf_group_config` 后，会自动缓存 `grou
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.3.0-py3-none-any.whl`：SDK wheel。
+- `agent_connect_sdk-0.4.0-py3-none-any.whl`：SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/masque-proxy.example.json`：服务器 MASQUE Proxy 配置模板。
@@ -40,7 +40,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.3.0-py3-none-any.whl
+dist/agent_connect_sdk-0.4.0-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -52,7 +52,7 @@ dist/agent_connect_sdk-0.3.0-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.3.0-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.4.0-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -67,14 +67,14 @@ agent-masque-proxy --help
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.3.0-py3-none-any.whl
+  ./agent_connect_sdk-0.4.0-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.3.0-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.4.0-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检

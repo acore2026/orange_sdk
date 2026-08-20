@@ -98,19 +98,8 @@ class HttpRuntimeTransport:
                 "local_vlan_ip": local_ip,
                 "tcp_port": tcp_port,
                 "udp_port": udp_port,
-                "callback_paths": [
-                    "/agent/group-invitation",
-                    "/agent/group-moq-info",
-                    "/A2A/message",
-                ],
             },
         )
-        registration_id = response.get("registration_id")
-        if not isinstance(registration_id, str) or not registration_id:
-            raise AgentSdkError(
-                ErrorCode.RUNTIME_REJECTED,
-                "endpoint registration response has no registration_id",
-            )
         ue_ip = response.get("ue_ip")
         if not isinstance(ue_ip, str):
             raise AgentSdkError(
@@ -139,7 +128,6 @@ class HttpRuntimeTransport:
                 field="ue_prefix_length",
             )
         return EndpointRegistration(
-            registration_id=registration_id,
             ue_ip=str(parsed_ue_ip),
             ue_prefix_length=prefix_length,
         )

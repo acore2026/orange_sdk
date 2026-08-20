@@ -64,7 +64,7 @@ class FakeRuntime:
     async def register_endpoint(
         self, local_ip: str, tcp_port: int, udp_port: int
     ) -> EndpointRegistration:
-        return EndpointRegistration("registration-test", "8.8.8.7", 24)
+        return EndpointRegistration("8.8.8.7", 24)
 
     async def request(self, method: str, path: str, body: Mapping[str, Any]):
         self.requests.append((method, path, body))
