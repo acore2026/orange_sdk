@@ -8,7 +8,7 @@ SDK 收到 AgentRuntime 透传的 `acf_group_config` 后，会自动缓存 `grou
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.5.0-py3-none-any.whl`：SDK wheel。
+- `agent_connect_sdk-0.6.0-py3-none-any.whl`：SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/masque-proxy.example.json`：服务器 MASQUE Proxy 配置模板。
@@ -41,7 +41,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.5.0-py3-none-any.whl
+dist/agent_connect_sdk-0.6.0-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -53,7 +53,7 @@ dist/agent_connect_sdk-0.5.0-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.5.0-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.6.0-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -68,14 +68,14 @@ agent-masque-proxy --help
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.5.0-py3-none-any.whl
+  ./agent_connect_sdk-0.6.0-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.5.0-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.6.0-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -250,8 +250,8 @@ result = await sdk.init(
 |---|---|---|
 | `agent_runtime_ip` | 是 | AgentRuntime 物理网地址 |
 | `agent_runtime_port` | 是 | AgentRuntime HTTP 端口 |
-| `local_vlan_ip` | 是 | 本设备物理网 IP；Runtime 回调从此地址进入 |
-| `local_tcp_port` | 是 | 本地回调和 `/A2A/message` TCP 监听端口 |
+| `local_vlan_ip` | 是 | 本设备物理网 IP；用于 Runtime 上行 HTTP 和 MASQUE QUIC 外层 |
+| `local_tcp_port` | 是 | 本地 `/A2A/message` TCP 监听端口 |
 | `local_udp_port` | 是 | 对外公布的 UDP 业务端口 |
 | `masque_server_url` | 是 | MASQUE Proxy 的 HTTPS URL，底层使用 HTTP/3/QUIC |
 | `masque_authorization` | 否 | 推荐使用 `Bearer <device-token>` |
@@ -270,7 +270,20 @@ result = await sdk.init(
 
 除 `masque_server_url` 必须使用 `https://` 以建立 HTTP/3/QUIC 外，SDK
 访问 AgentRuntime 的健康检查、端点注册和全部控制接口均使用 `http://`。
-AgentRuntime 主动调用 SDK，以及 Agent 之间的 `/A2A/message` 也使用 HTTP。
+核心网主动下行使用同一 HTTP 服务端口上的 WebSocket Upgrade；Agent 之间的
+`/A2A/message` 使用 HTTP。
+
+`init()` 还会主动建立以下 WebSocket，使用与上行 REST 完全相同的 Runtime
+IP 和端口，不增加新的配置参数：
+
+```text
+GET http://<agent_runtime_ip>:<agent_runtime_port>/v1/acn/downlink-websocket
+Connection: Upgrade
+Upgrade: websocket
+```
+
+只有 WebSocket 握手成功，`init()` 才返回。该长连接负责全部核心网主动下行；
+端侧不再开放 `/agent/group-invitation` 或 `/agent/group-moq-info` 回调接口。
 
 ### 3.5 本地日志
 
@@ -278,7 +291,8 @@ SDK 使用 UTF-8 文本日志，每行包含时间、级别、logger 名称和�
 
 - 所有公开 SDK 函数的 `function_enter`、`function_exit` 和 `function_error`，包括参数、返回类型/结果、错误码和耗时。
 - SDK 发往 AgentRuntime、对端 Agent 的 HTTP 请求及其响应。
-- AgentRuntime 群组通知、邀请和对端 `/A2A/message` 的 HTTP 入站请求及响应。
+- AgentRuntime WebSocket 的连接、群组通知、邀请和关联响应，以及对端
+  `/A2A/message` 的 HTTP 入站请求及响应。
 - 客户端和服务器端 HTTP/3 CONNECT-IP 请求、响应状态和协商结果。
 - MASQUE Proxy 的启动和关闭。
 
@@ -377,11 +391,24 @@ group = await sdk.create_group(
 )
 ```
 
-AgentRuntime 随后把核心网通知原样转发到本机物理地址上的：
+AgentRuntime 随后通过已建立的 WebSocket 下发核心网请求：
 
-```text
-POST /agent/group-moq-info
+```json
+{
+  "kind": "request",
+  "request_id": "delivery-123",
+  "message_type": "ACN_AGENT_GROUPING_INVITATION",
+  "transaction_id": 49,
+  "payload": {
+    "group_config": {"group_name": "task-patrol"},
+    "group_administrator": {"agent_id": "a1"}
+  }
+}
 ```
+
+SDK 按 `request_id` 并发处理并允许乱序返回。用户 listener 的结果会被封装为
+`{"kind":"response","request_id":"delivery-123","payload":{"result":"ACCEPT"}}`。
+`transaction_id` 只用于保留原始 NAS 事务语义，不作为 SDK 缓存或路由键。
 
 通知中的 `members` 键名只是标签。SDK 使用成员对象内的 `agent_id` 建立索引，并自动安装对端路由。应用可以等待群组激活：
 
@@ -501,7 +528,7 @@ sudo -E .venv/bin/python examples/linux_agent.py \
 
 | 函数 | 用途 | 关键返回值 |
 |---|---|---|
-| `init(...)` | 创建 TUN、启动回调服务、注册端点并连接 MASQUE | `SdkInitResult` |
+| `init(...)` | 注册端点、建立下行 WebSocket、创建 TUN/A2A 服务并连接 MASQUE | `SdkInitResult` |
 | `apply_identity(...)` | 申请身份，直接解析网元原始 `vc0` | `AgentProfile` |
 | `set_local_profile_for_restore(profile)` | 恢复安全存储中的既有身份 | 无 |
 | `deregister_identity(...)` | 注销身份 | `OperationResult` |

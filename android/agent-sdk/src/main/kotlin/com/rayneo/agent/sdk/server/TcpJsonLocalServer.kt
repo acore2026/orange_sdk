@@ -2,7 +2,6 @@ package com.rayneo.agent.sdk.server
 
 import com.rayneo.agent.sdk.AgentSdkException
 import com.rayneo.agent.sdk.ErrorCode
-import com.rayneo.agent.sdk.model.NetworkMessageAction
 import com.rayneo.agent.sdk.transport.LocalServer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -36,26 +35,16 @@ class TcpJsonLocalServer(
         agentIp: String,
         tcpPort: Int,
         udpPort: Int,
-        onGroupConfig: suspend (JsonObject) -> NetworkMessageAction,
-        onGroupInvitation: suspend (JsonObject) -> NetworkMessageAction,
         onA2aMessage: suspend (JsonObject) -> Unit,
     ) {
         try {
             val physical = bindTcp(physicalIp, tcpPort)
             tcpSockets += physical
-            jobs += acceptLoop(physical) { path, payload ->
-                when (path) {
-                    "/agent/group-moq-info" -> buildJsonObject {
-                        put("action", onGroupConfig(payload).name)
-                    }
-                    "/agent/group-invitation" -> buildJsonObject {
-                        put("action", onGroupInvitation(payload).name)
-                    }
-                    else -> throw AgentSdkException(
-                        ErrorCode.INVALID_ARGUMENT,
-                        "Path $path is not allowed on physical ingress",
-                    )
-                }
+            jobs += acceptLoop(physical) { path, _ ->
+                throw AgentSdkException(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "Runtime downlink uses WebSocket; path $path is not available",
+                )
             }
 
             val agent = bindTcp(agentIp, tcpPort)

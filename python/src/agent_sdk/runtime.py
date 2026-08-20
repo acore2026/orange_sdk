@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from ipaddress import ip_address
 from typing import Any, Mapping
 
 import httpx
+from aiohttp import ClientSession, ClientTimeout, ClientWebSocketResponse, WSMsgType
 
 from .errors import AgentSdkError, ErrorCode
 from .logging_utils import log_event
-from .models import EndpointRegistration
+from .models import EndpointRegistration, NetworkMessageAction
+
+
+DOWNLINK_WEBSOCKET_PATH = "/v1/acn/downlink-websocket"
 
 
 class HttpRuntimeTransport:
@@ -25,10 +32,17 @@ class HttpRuntimeTransport:
     ) -> None:
         self._base_url = f"http://{host}:{port}"
         self._registration_path = endpoint_registration_path
+        self._timeout = timeout
         self._client = httpx.AsyncClient(
             base_url=self._base_url, verify=verify, timeout=timeout
         )
         self._logger = logger or logging.getLogger(__name__)
+        self._downlink_session: ClientSession | None = None
+        self._downlink_socket: ClientWebSocketResponse | None = None
+        self._downlink_task: asyncio.Task[None] | None = None
+        self._downlink_requests: set[asyncio.Task[None]] = set()
+        self._downlink_send_lock = asyncio.Lock()
+        self._downlink_closing = False
 
     @staticmethod
     def _response_body(response: httpx.Response) -> Any:
@@ -132,6 +146,214 @@ class HttpRuntimeTransport:
             ue_prefix_length=prefix_length,
         )
 
+    async def start_downlink(
+        self,
+        handler: Callable[
+            [str, int, Mapping[str, Any]], Awaitable[NetworkMessageAction]
+        ],
+    ) -> None:
+        if self._downlink_task is not None:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "Runtime downlink WebSocket is already started",
+            )
+        self._downlink_closing = False
+        self._downlink_session = ClientSession(
+            timeout=ClientTimeout(total=None, sock_connect=self._timeout)
+        )
+        try:
+            socket = await self._open_downlink_socket()
+        except Exception:
+            await self._downlink_session.close()
+            self._downlink_session = None
+            raise
+        self._downlink_socket = socket
+        self._downlink_task = asyncio.create_task(
+            self._run_downlink(socket, handler),
+            name="agent-runtime-downlink-websocket",
+        )
+
+    async def _open_downlink_socket(self) -> ClientWebSocketResponse:
+        assert self._downlink_session is not None
+        url = f"{self._base_url}{DOWNLINK_WEBSOCKET_PATH}"
+        log_event(
+            self._logger,
+            logging.INFO,
+            "websocket_connect",
+            direction="outbound",
+            peer="AgentRuntime",
+            method="GET",
+            url=url,
+        )
+        try:
+            socket = await self._downlink_session.ws_connect(url, heartbeat=30.0)
+        except Exception as exc:
+            log_event(
+                self._logger,
+                logging.ERROR,
+                "websocket_error",
+                exc_info=True,
+                direction="outbound",
+                peer="AgentRuntime",
+                method="GET",
+                url=url,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_UNREACHABLE,
+                f"AgentRuntime downlink WebSocket is unreachable: {exc}",
+                retryable=True,
+            ) from exc
+        log_event(
+            self._logger,
+            logging.INFO,
+            "websocket_connected",
+            direction="outbound",
+            peer="AgentRuntime",
+            method="GET",
+            url=url,
+        )
+        return socket
+
+    async def _run_downlink(
+        self,
+        initial_socket: ClientWebSocketResponse,
+        handler: Callable[
+            [str, int, Mapping[str, Any]], Awaitable[NetworkMessageAction]
+        ],
+    ) -> None:
+        socket = initial_socket
+        retry_delay = 0.5
+        while not self._downlink_closing:
+            try:
+                async for message in socket:
+                    if message.type is WSMsgType.TEXT:
+                        task = asyncio.create_task(
+                            self._process_downlink_frame(socket, message.data, handler),
+                            name="agent-runtime-downlink-request",
+                        )
+                        self._downlink_requests.add(task)
+                        task.add_done_callback(self._downlink_requests.discard)
+                    elif message.type is WSMsgType.ERROR:
+                        raise socket.exception() or RuntimeError(
+                            "Runtime downlink WebSocket failed"
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log_event(
+                    self._logger,
+                    logging.WARNING,
+                    "websocket_disconnected",
+                    peer="AgentRuntime",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+            finally:
+                await socket.close()
+            if self._downlink_closing:
+                break
+            while not self._downlink_closing:
+                await asyncio.sleep(retry_delay)
+                try:
+                    socket = await self._open_downlink_socket()
+                    self._downlink_socket = socket
+                    retry_delay = 0.5
+                    break
+                except AgentSdkError:
+                    retry_delay = min(retry_delay * 2, 10.0)
+
+    async def _process_downlink_frame(
+        self,
+        socket: ClientWebSocketResponse,
+        raw_message: str,
+        handler: Callable[
+            [str, int, Mapping[str, Any]], Awaitable[NetworkMessageAction]
+        ],
+    ) -> None:
+        request_id: str | None = None
+        try:
+            message = json.loads(raw_message)
+            if not isinstance(message, Mapping):
+                raise ValueError("WebSocket message must be a JSON object")
+            raw_request_id = message.get("request_id")
+            if not isinstance(raw_request_id, str) or not raw_request_id:
+                raise ValueError("request_id must be a non-empty string")
+            request_id = raw_request_id
+            if message.get("kind") != "request":
+                raise ValueError("kind must be request")
+            message_type = message.get("message_type")
+            if not isinstance(message_type, str) or not message_type:
+                raise ValueError("message_type must be a non-empty string")
+            transaction_id = message.get("transaction_id")
+            if (
+                isinstance(transaction_id, bool)
+                or not isinstance(transaction_id, int)
+                or transaction_id < 0
+            ):
+                raise ValueError("transaction_id must be a non-negative integer")
+            payload = message.get("payload")
+            if not isinstance(payload, Mapping):
+                raise ValueError("payload must be a JSON object")
+            log_event(
+                self._logger,
+                logging.INFO,
+                "websocket_request",
+                direction="inbound",
+                peer="AgentRuntime",
+                request_id=request_id,
+                message_type=message_type,
+                transaction_id=transaction_id,
+                body=payload,
+            )
+            action = await handler(message_type, transaction_id, payload)
+            if not isinstance(action, NetworkMessageAction):
+                raise TypeError("downlink handler must return NetworkMessageAction")
+        except Exception as exc:
+            log_event(
+                self._logger,
+                logging.ERROR,
+                "websocket_request_error",
+                exc_info=True,
+                direction="inbound",
+                peer="AgentRuntime",
+                request_id=request_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            action = NetworkMessageAction.REJECT
+        if request_id is None:
+            return
+        response = {
+            "kind": "response",
+            "request_id": request_id,
+            "payload": {"result": action.value},
+        }
+        try:
+            async with self._downlink_send_lock:
+                await socket.send_json(response)
+            log_event(
+                self._logger,
+                logging.INFO,
+                "websocket_response",
+                direction="outbound",
+                peer="AgentRuntime",
+                request_id=request_id,
+                body=response,
+            )
+        except Exception as exc:
+            log_event(
+                self._logger,
+                logging.WARNING,
+                "websocket_response_error",
+                direction="outbound",
+                peer="AgentRuntime",
+                request_id=request_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
     async def request(
         self, method: str, path: str, body: Mapping[str, Any]
     ) -> Mapping[str, Any]:
@@ -233,6 +455,22 @@ class HttpRuntimeTransport:
         return payload
 
     async def close(self) -> None:
+        self._downlink_closing = True
+        if self._downlink_task is not None:
+            self._downlink_task.cancel()
+            await asyncio.gather(self._downlink_task, return_exceptions=True)
+            self._downlink_task = None
+        for task in tuple(self._downlink_requests):
+            task.cancel()
+        if self._downlink_requests:
+            await asyncio.gather(*self._downlink_requests, return_exceptions=True)
+        self._downlink_requests.clear()
+        if self._downlink_socket is not None:
+            await self._downlink_socket.close()
+            self._downlink_socket = None
+        if self._downlink_session is not None:
+            await self._downlink_session.close()
+            self._downlink_session = None
         await self._client.aclose()
 
 

@@ -19,6 +19,10 @@
 AgentRuntime、对端 Agent 的接口统一使用 HTTP。Android AAR 已包含真实的
 ARM64 `libmasque_core.so`，不再要求客户另行提供 Native Core。
 
+核心网主动下行不再反向 POST 到端侧。Linux/Android SDK 初始化时主动连接
+`/v1/acn/downlink-websocket`，WebSocket 握手与主动上行 REST 接口使用同一
+AgentRuntime IP 和端口；本地 HTTP Server 只保留 Agent 间 `/A2A/message`。
+
 快速验证 Python 实现：
 
 ```bash

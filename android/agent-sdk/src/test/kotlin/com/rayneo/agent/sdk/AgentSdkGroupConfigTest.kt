@@ -2,6 +2,7 @@ package com.rayneo.agent.sdk
 
 import com.rayneo.agent.sdk.model.AgentProfile
 import com.rayneo.agent.sdk.model.NetworkMessageAction
+import com.rayneo.agent.sdk.model.NetworkMessageType
 import com.rayneo.agent.sdk.transport.LocalServer
 import com.rayneo.agent.sdk.transport.EndpointRegistration
 import com.rayneo.agent.sdk.transport.MediaOffloadAdapter
@@ -67,7 +68,7 @@ class AgentSdkGroupConfigTest {
             NetworkMessageAction.ACK
         })
 
-        val action = server.onGroupConfig!!(groupConfig())
+        val action = runtime.deliverGroupConfig(groupConfig())
 
         assertEquals(NetworkMessageAction.ACK, action)
         val snapshot = sdk.getGroupSnapshot("g1")
@@ -80,12 +81,44 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
+    fun `NAS invitation is delivered through runtime websocket handler`() = runTest {
+        initializeSdk()
+        var receivedType: NetworkMessageType? = null
+        sdk.registerNetworkMessageListener(NetworkMessageListener { messageType, _ ->
+            receivedType = messageType
+            NetworkMessageAction.ACCEPT
+        })
+
+        val action = runtime.deliverDownlink(
+            "ACN_AGENT_GROUPING_INVITATION",
+            buildJsonObject {
+                put("group_config", buildJsonObject { put("group_name", "task-patrol") })
+                put("group_administrator", buildJsonObject { put("agent_id", "a1") })
+            },
+        )
+
+        assertEquals(NetworkMessageAction.ACCEPT, action)
+        assertEquals(NetworkMessageType.GROUP_INVITATION, receivedType)
+    }
+
+    @Test
+    fun `group config commits without a network listener`() = runTest {
+        initializeSdk()
+
+        val action = runtime.deliverGroupConfig(groupConfig())
+
+        assertEquals(NetworkMessageAction.ACK, action)
+        assertNotNull(sdk.getGroupSnapshot("g1"))
+        assertEquals(setOf("8.8.8.8"), tunnel.groupPeers["g1"])
+    }
+
+    @Test
     fun `send message uses only cached IP and TCP port`() = runTest {
         initializeSdk()
         sdk.registerNetworkMessageListener(NetworkMessageListener { _, _ ->
             NetworkMessageAction.ACK
         })
-        server.onGroupConfig!!(groupConfig(peerPort = "4567"))
+        runtime.deliverGroupConfig(groupConfig(peerPort = "4567"))
 
         val receipt = sdk.sendMessage(
             "g1",
@@ -100,17 +133,17 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
-    fun `listener reject leaves cache and routes unchanged`() = runTest {
+    fun `listener reject does not roll back committed cache and routes`() = runTest {
         initializeSdk()
         sdk.registerNetworkMessageListener(NetworkMessageListener { _, _ ->
             NetworkMessageAction.REJECT
         })
 
-        val action = server.onGroupConfig!!(groupConfig())
+        val action = runtime.deliverGroupConfig(groupConfig())
 
-        assertEquals(NetworkMessageAction.REJECT, action)
-        assertEquals(null, sdk.getGroupSnapshot("g1"))
-        assertTrue(tunnel.groupPeers.isEmpty())
+        assertEquals(NetworkMessageAction.ACK, action)
+        assertNotNull(sdk.getGroupSnapshot("g1"))
+        assertEquals(setOf("8.8.8.8"), tunnel.groupPeers["g1"])
     }
 
     @Test
@@ -121,7 +154,7 @@ class AgentSdkGroupConfigTest {
         })
 
         val error = runCatching {
-            server.onGroupConfig!!(groupConfig(peerPort = "65536"))
+            runtime.deliverGroupConfig(groupConfig(peerPort = "65536"))
         }.exceptionOrNull() as AgentSdkException
 
         assertEquals(ErrorCode.GROUP_CONFIG_INVALID, error.code)
@@ -140,7 +173,7 @@ class AgentSdkGroupConfigTest {
             }
         }
 
-        val error = runCatching { server.onGroupConfig!!(invalid) }
+        val error = runCatching { runtime.deliverGroupConfig(invalid) }
             .exceptionOrNull() as AgentSdkException
 
         assertEquals(ErrorCode.GROUP_CONFIG_INVALID, error.code)
@@ -281,8 +314,19 @@ class AgentSdkGroupConfigTest {
         var lastMethod = ""
         var lastPath = ""
         var lastBody: JsonObject? = null
+        var downlinkHandler: (suspend (String, Int, JsonObject) -> NetworkMessageAction)? = null
 
         override suspend fun connect() = Unit
+        override suspend fun startDownlink(
+            handler: suspend (String, Int, JsonObject) -> NetworkMessageAction,
+        ) { downlinkHandler = handler }
+        suspend fun deliverDownlink(
+            messageType: String,
+            payload: JsonObject,
+            transactionId: Int = 49,
+        ): NetworkMessageAction = downlinkHandler!!(messageType, transactionId, payload)
+        suspend fun deliverGroupConfig(payload: JsonObject): NetworkMessageAction =
+            deliverDownlink("ACN_AGENT_GROUP_CONFIG", payload)
         override suspend fun registerEndpoint(
             localIp: String,
             tcpPort: Int,
@@ -308,16 +352,13 @@ class AgentSdkGroupConfigTest {
     }
 
     private class FakeServer : LocalServer {
-        var onGroupConfig: (suspend (JsonObject) -> NetworkMessageAction)? = null
         override suspend fun start(
             physicalIp: String,
             agentIp: String,
             tcpPort: Int,
             udpPort: Int,
-            onGroupConfig: suspend (JsonObject) -> NetworkMessageAction,
-            onGroupInvitation: suspend (JsonObject) -> NetworkMessageAction,
             onA2aMessage: suspend (JsonObject) -> Unit,
-        ) { this.onGroupConfig = onGroupConfig }
+        ) = Unit
         override suspend fun close() = Unit
     }
 

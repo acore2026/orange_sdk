@@ -19,6 +19,9 @@ interface MessageSignatureVerifier {
 
 interface RuntimeTransport {
     suspend fun connect()
+    suspend fun startDownlink(
+        handler: suspend (String, Int, JsonObject) -> NetworkMessageAction,
+    )
     suspend fun registerEndpoint(
         localIp: String,
         tcpPort: Int,
@@ -73,8 +76,6 @@ interface LocalServer {
         agentIp: String,
         tcpPort: Int,
         udpPort: Int,
-        onGroupConfig: suspend (JsonObject) -> NetworkMessageAction,
-        onGroupInvitation: suspend (JsonObject) -> NetworkMessageAction,
         onA2aMessage: suspend (JsonObject) -> Unit,
     )
     suspend fun close()

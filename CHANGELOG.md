@@ -2,6 +2,32 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-20 — 核心网主动下行改为同端口 WebSocket
+
+### 修改原因
+
+- 核心网主动下行不再由 AgentRuntime 反向 POST 端侧 `/agent/group-invitation` 和 `/agent/group-moq-info`，而是要求 Agent Application 主动连接基带 SDK 的固定 WebSocket。
+- WebSocket 必须复用主动上行 REST 服务的 AgentRuntime IP 和端口；`request_id` 允许多个 NAS 请求并发处理和乱序响应，`transaction_id` 必须随请求保留给基带侧构造原始 NAS 响应。
+
+### 修改方式
+
+- Python 与 Android Runtime Transport 新增内部 `start_downlink/startDownlink`：固定 GET `/v1/acn/downlink-websocket` 并完成 WebSocket Upgrade，不增加北向初始化参数；`init/initialize` 只有在握手成功后才返回。
+- 下行帧严格解析 `kind=request`、非空 `request_id/message_type`、非负整数 `transaction_id` 和对象 `payload`。每个请求使用独立 task/coroutine 处理，响应固定为 `kind=response + request_id + payload.result`，允许乱序返回。
+- `ACN_AGENT_GROUPING_INVITATION` 映射为北向 `GROUP_INVITATION`；`acf_group_config` payload 继续走既有验签、成员缓存和动态路由提交逻辑。未知消息映射为 `UNKNOWN`，无 listener 或处理异常时返回 `REJECT`。
+- Android 群组配置语义与 Python 对齐：有效快照提交成功即返回 `ACK`，用户 listener 只作提交后通知，其 `REJECT` 或异常不回滚缓存与路由；群组邀请仍由 listener 返回 `ACCEPT/REJECT`。
+- 真实本地 HTTP Server 删除两个 Runtime 下行 POST 路由，仅保留 Agent TUN 上的 `/A2A/message`；WebSocket 和所有主动上行 REST 请求共享 `agent_runtime_ip:agent_runtime_port`。
+- Python 支持 WebSocket 断开后的有界指数退避重连；两端关闭 SDK 时主动关闭连接并清理并发处理任务。Python wheel 因线协议非兼容变更从 `0.5.0` 升级为 `0.6.0`。
+- 根 README、Python/Android 客户说明以及本地《Agent SDK HTTP 接口文档》《SDK 设计文档-用户友好版》同步新通道；两份本地文档继续按规则忽略、不推送，原始《SDK设计文档》保持不动。
+
+### 验证内容
+
+- Python 真实 WebSocket 测试验证 Upgrade 路径、并发请求、乱序响应、字段透传、非法关联请求返回 `REJECT`、旧 POST 路由不可用和邀请消息北向映射。
+- Android 使用真实 OkHttp WebSocket/MockWebServer 验证相同 Runtime 端口、固定路径以及并发乱序响应；Fake Runtime 验证邀请和群组配置均通过 WebSocket handler 进入 SDK。
+- Python `compileall` 与全量测试通过（`53 passed`）；Android JVM 单元测试 `14 tests / 0 failures / 0 errors`，Release AAR 和 example Debug APK 构建成功。
+- `agent_connect_sdk-0.6.0-py3-none-any.whl` 通过 `twine check`，独立安装后版本为 `0.6.0`，`agent-sdk-self-check` 输出 `FULL FLOW DEMO PASSED`。
+- 本地接口文档 19 个 JSON 示例、用户友好版设计文档 3 个 JSON 示例全部通过标准解析。交付物 SHA-256：Wheel `19c3f6aba2ff354e0d2c1cf255bd284e69dfc9e517f008e0989d2b49ca02eabc`，Release AAR `b7c52d2034a127ea70b591e6545de78a811c489fcf0907306f34c856e9d78a9b`，example APK `dd246ffcbb6265e9b55daa9218c3af12f2add1ceed2422326be823bbed67d76a`。
+- 原始《SDK设计文档》SHA-256 仍为 `d2509f323338d0cdb948ceff36e32c3ae71d59c646916b687168b4c2e862947b`，确认未修改。
+
 ## 2026-08-20 — 内测网络关闭 MASQUE 服务端证书校验并统一 Runtime HTTP
 
 ### 修改原因

@@ -57,9 +57,27 @@ class FakeRuntime:
     def __init__(self) -> None:
         self.requests: list[tuple[str, str, Mapping[str, Any]]] = []
         self.closed = False
+        self.downlink_handler = None
 
     async def connect(self) -> None:
         return None
+
+    async def start_downlink(self, handler) -> None:
+        self.downlink_handler = handler
+
+    async def deliver_downlink(
+        self,
+        message_type: str,
+        payload: Mapping[str, Any],
+        transaction_id: int = 49,
+    ) -> NetworkMessageAction:
+        assert self.downlink_handler is not None
+        return await self.downlink_handler(message_type, transaction_id, payload)
+
+    async def deliver_group_config(
+        self, payload: Mapping[str, Any]
+    ) -> NetworkMessageAction:
+        return await self.deliver_downlink("ACN_AGENT_GROUP_CONFIG", payload)
 
     async def register_endpoint(
         self, local_ip: str, tcp_port: int, udp_port: int
@@ -125,16 +143,12 @@ class FakeRuntime:
 class FakeServer:
     def __init__(self) -> None:
         self.started = False
-        self.group_config = None
-        self.invitation = None
         self.a2a = None
         self.arguments = None
 
     async def start(self, **kwargs) -> None:
         self.started = True
         self.arguments = kwargs
-        self.group_config = kwargs["on_group_config"]
-        self.invitation = kwargs["on_group_invitation"]
         self.a2a = kwargs["on_a2a_message"]
 
     async def close(self) -> None:

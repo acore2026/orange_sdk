@@ -5,7 +5,7 @@ import logging
 import httpx
 import pytest
 
-from agent_sdk import AgentSdkError, ErrorCode, NetworkMessageAction
+from agent_sdk import AgentSdkError, ErrorCode
 from agent_sdk.logging_utils import close_logger, configure_local_logger, log_event
 from agent_sdk.rest_server import AiohttpLocalServer
 from agent_sdk.runtime import HttpRuntimeTransport
@@ -99,16 +99,8 @@ async def test_local_http_ingress_and_response_are_logged(tmp_path):
     )
     server = AiohttpLocalServer(logger=logger)
 
-    async def on_group_config(payload):
-        assert payload["group_id"] == "g1"
-        return NetworkMessageAction.ACK
-
-    async def on_invitation(payload):
-        del payload
-        return NetworkMessageAction.ACCEPT
-
     async def on_a2a(payload):
-        del payload
+        assert payload["group_id"] == "g1"
 
     try:
         await server.start(
@@ -116,14 +108,13 @@ async def test_local_http_ingress_and_response_are_logged(tmp_path):
             agent_ip="127.0.0.2",
             tcp_port=0,
             udp_port=28443,
-            on_group_config=on_group_config,
-            on_group_invitation=on_invitation,
             on_a2a_message=on_a2a,
         )
-        socket_address = server._sites[0]._server.sockets[0].getsockname()
+        socket_address = server._sites[1]._server.sockets[0].getsockname()
+        physical_socket_address = server._sites[0]._server.sockets[0].getsockname()
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"http://127.0.0.1:{socket_address[1]}/agent/group-moq-info",
+                f"http://127.0.0.2:{socket_address[1]}/A2A/message",
                 headers={
                     "Authorization": "Bearer inbound-token",
                     "Cookie": "session=inbound-cookie",
@@ -134,8 +125,13 @@ async def test_local_http_ingress_and_response_are_logged(tmp_path):
                     "proof": {"jws": "inbound-secret-proof"},
                 },
             )
+            removed_callback = await client.post(
+                f"http://127.0.0.1:{physical_socket_address[1]}/agent/group-moq-info",
+                json={"group_id": "g1"},
+            )
         assert response.status_code == 200
-        assert response.json() == {"action": "ACK"}
+        assert response.json() == {"ack": True}
+        assert removed_callback.status_code == 404
     finally:
         await server.close()
         close_logger(logger)
@@ -145,7 +141,7 @@ async def test_local_http_ingress_and_response_are_logged(tmp_path):
     assert '"event":"http_request_body"' in text
     assert '"event":"http_response"' in text
     assert '"status_code":200' in text
-    assert '"body":{"action":"ACK"}' in text
+    assert '"body":{"ack":true}' in text
     assert "inbound-secret-proof" not in text
     assert "inbound-token" not in text
     assert "inbound-cookie" not in text

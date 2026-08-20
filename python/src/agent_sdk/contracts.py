@@ -33,6 +33,13 @@ class ControlRequestAuthenticator(Protocol):
 class RuntimeTransport(Protocol):
     async def connect(self) -> None: ...
 
+    async def start_downlink(
+        self,
+        handler: Callable[
+            [str, int, Mapping[str, Any]], Awaitable[NetworkMessageAction]
+        ],
+    ) -> None: ...
+
     async def register_endpoint(
         self, local_ip: str, tcp_port: int, udp_port: int
     ) -> EndpointRegistration: ...
@@ -78,10 +85,6 @@ class LocalServer(Protocol):
         agent_ip: str,
         tcp_port: int,
         udp_port: int,
-        on_group_config: Callable[[Mapping[str, Any]], Awaitable[NetworkMessageAction]],
-        on_group_invitation: Callable[
-            [Mapping[str, Any]], Awaitable[NetworkMessageAction]
-        ],
         on_a2a_message: Callable[[Mapping[str, Any]], Awaitable[None]],
     ) -> None: ...
 

@@ -10,7 +10,6 @@ from aiohttp import web
 
 from .errors import AgentSdkError, ErrorCode
 from .logging_utils import log_event
-from .models import NetworkMessageAction
 
 
 class AiohttpLocalServer:
@@ -28,10 +27,6 @@ class AiohttpLocalServer:
         agent_ip: str,
         tcp_port: int,
         udp_port: int,
-        on_group_config: Callable[[Mapping[str, Any]], Awaitable[NetworkMessageAction]],
-        on_group_invitation: Callable[
-            [Mapping[str, Any]], Awaitable[NetworkMessageAction]
-        ],
         on_a2a_message: Callable[[Mapping[str, Any]], Awaitable[None]],
     ) -> None:
         del udp_port  # UDP application transport is a separate extension point.
@@ -48,7 +43,7 @@ class AiohttpLocalServer:
                 "http_request",
                 request_id=request_id,
                 direction="inbound",
-                peer="AgentRuntime" if request.path.startswith("/agent/") else "Agent",
+                peer="Agent",
                 method=request.method,
                 url=str(request.url),
                 remote_address=peername[0] if peername else None,
@@ -64,7 +59,7 @@ class AiohttpLocalServer:
                     "http_response",
                     request_id=request_id,
                     direction="outbound",
-                    peer="AgentRuntime" if request.path.startswith("/agent/") else "Agent",
+                    peer="Agent",
                     method=request.method,
                     url=str(request.url),
                     status_code=exc.status,
@@ -79,7 +74,7 @@ class AiohttpLocalServer:
                     exc_info=True,
                     request_id=request_id,
                     direction="outbound",
-                    peer="AgentRuntime" if request.path.startswith("/agent/") else "Agent",
+                    peer="Agent",
                     method=request.method,
                     url=str(request.url),
                     error_type=type(exc).__name__,
@@ -98,7 +93,7 @@ class AiohttpLocalServer:
                 "http_response",
                 request_id=request_id,
                 direction="outbound",
-                peer="AgentRuntime" if request.path.startswith("/agent/") else "Agent",
+                peer="Agent",
                 method=request.method,
                 url=str(request.url),
                 status_code=response.status,
@@ -124,7 +119,7 @@ class AiohttpLocalServer:
                 "http_request_body",
                 request_id=request.get("sdk_log_request_id"),
                 direction="inbound",
-                peer="AgentRuntime" if request.path.startswith("/agent/") else "Agent",
+                peer="Agent",
                 method=request.method,
                 url=str(request.url),
                 body=payload,
@@ -134,32 +129,6 @@ class AiohttpLocalServer:
         def local_address(request: web.Request) -> str:
             sockname = request.transport.get_extra_info("sockname")
             return str(sockname[0]) if sockname else ""
-
-        async def group_config(request: web.Request) -> web.Response:
-            if local_address(request) != self._physical_ip:
-                raise web.HTTPForbidden(text="Runtime callback must use physical ingress")
-            try:
-                action = await on_group_config(await parse(request))
-                return web.json_response({"action": action.value})
-            except AgentSdkError as exc:
-                return web.json_response(
-                    {"action": "REJECT", "code": exc.code.value}, status=400
-                )
-            except Exception:
-                return web.json_response(
-                    {"action": "REJECT", "code": "CALLBACK_FAILED"}, status=500
-                )
-
-        async def invitation(request: web.Request) -> web.Response:
-            if local_address(request) != self._physical_ip:
-                raise web.HTTPForbidden(text="Runtime callback must use physical ingress")
-            try:
-                action = await on_group_invitation(await parse(request))
-                return web.json_response({"action": action.value})
-            except Exception:
-                return web.json_response(
-                    {"action": "REJECT", "code": "CALLBACK_FAILED"}, status=500
-                )
 
         async def a2a(request: web.Request) -> web.Response:
             if local_address(request) != self._agent_ip:
@@ -176,8 +145,6 @@ class AiohttpLocalServer:
                     {"ack": False, "code": "CALLBACK_FAILED"}, status=500
                 )
 
-        app.router.add_post("/agent/group-moq-info", group_config)
-        app.router.add_post("/agent/group-invitation", invitation)
         app.router.add_post("/A2A/message", a2a)
         self._runner = web.AppRunner(app)
         await self._runner.setup()

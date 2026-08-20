@@ -375,8 +375,6 @@ class AgentSdk:
                 agent_ip=config.agent_tun_ip,
                 tcp_port=config.local_tcp_port,
                 udp_port=config.local_udp_port,
-                on_group_config=self._handle_group_config,
-                on_group_invitation=self._handle_group_invitation,
                 on_a2a_message=self._handle_a2a_message,
             )
 
@@ -386,6 +384,7 @@ class AgentSdk:
                 self._pump_uplink(), name="agent-tun-uplink"
             )
             self._state = "READY"
+            await self._runtime.start_downlink(self._handle_runtime_downlink)
             result = SdkInitResult(
                 runtime_connected=True,
                 masque_connected=self._masque.connected,
@@ -493,6 +492,31 @@ class AgentSdk:
             return NetworkMessageAction.REJECT
         return await self._network_listener.on_network_message(
             NetworkMessageType.GROUP_INVITATION, payload
+        )
+
+    async def _handle_runtime_downlink(
+        self,
+        message_type: str,
+        transaction_id: int,
+        payload: Mapping[str, Any],
+    ) -> NetworkMessageAction:
+        self._log(
+            logging.INFO,
+            "runtime_downlink_dispatch",
+            message_type=message_type,
+            transaction_id=transaction_id,
+        )
+        if message_type == "ACN_AGENT_GROUPING_INVITATION":
+            return await self._handle_group_invitation(payload)
+        if (
+            message_type in {"ACN_AGENT_GROUP_CONFIG", "ACF_GROUP_CONFIG"}
+            or payload.get("notification_type") == "acf_group_config"
+        ):
+            return await self._handle_group_config(payload)
+        if self._network_listener is None:
+            return NetworkMessageAction.REJECT
+        return await self._network_listener.on_network_message(
+            NetworkMessageType.UNKNOWN, payload
         )
 
     async def _handle_group_config(

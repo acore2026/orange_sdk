@@ -138,8 +138,6 @@ class AgentSdk(
                     agentIp = agentTunIp,
                     tcpPort = localTcpPort,
                     udpPort = localUdpPort,
-                    onGroupConfig = ::handleGroupConfig,
-                    onGroupInvitation = ::handleGroupInvitation,
                     onA2aMessage = ::handleA2aMessage,
                 )
             }
@@ -156,6 +154,7 @@ class AgentSdk(
             )
             tunnelController.setTunFdSwapper(masqueTransport::replaceTunFd)
             state = State.READY
+            runtime!!.startDownlink(::handleRuntimeDownlink)
             return SdkInitResult(
                 runtimeConnected = true,
                 masqueConnected = masqueTransport.connected,
@@ -191,7 +190,6 @@ class AgentSdk(
     suspend fun handleGroupConfig(payload: JsonObject): NetworkMessageAction {
         requireReady()
         val localProfile = profile ?: return NetworkMessageAction.REJECT
-        val listener = networkListener ?: return NetworkMessageAction.REJECT
         proofVerifier.verifyGroupConfig(payload)
         val cache = groupCache ?: throw AgentSdkException(
             ErrorCode.SDK_NOT_INITIALIZED,
@@ -204,18 +202,41 @@ class AgentSdk(
             localTcpPort = localTcpPort,
             localUdpPort = localUdpPort,
         )
-        if (listener.onNetworkMessage(NetworkMessageType.GROUP_CONFIG, payload) != NetworkMessageAction.ACK) {
-            return NetworkMessageAction.REJECT
-        }
         cache.commit(candidate, localProfile.agentId)
         groups.getOrPut(candidate.groupId) { GroupInfo(candidate.groupId, candidate.groupId) }
             .status = "ACTIVE"
+        try {
+            networkListener?.onNetworkMessage(NetworkMessageType.GROUP_CONFIG, payload)
+        } catch (_: Exception) {
+            // The verified snapshot is already committed; application notification
+            // cannot roll back cache and route state.
+        }
         return NetworkMessageAction.ACK
     }
 
     private suspend fun handleGroupInvitation(payload: JsonObject): NetworkMessageAction {
         val listener = networkListener ?: return NetworkMessageAction.REJECT
         return listener.onNetworkMessage(NetworkMessageType.GROUP_INVITATION, payload)
+    }
+
+    private suspend fun handleRuntimeDownlink(
+        messageType: String,
+        transactionId: Int,
+        payload: JsonObject,
+    ): NetworkMessageAction {
+        if (transactionId < 0) return NetworkMessageAction.REJECT
+        return when {
+            messageType == "ACN_AGENT_GROUPING_INVITATION" ->
+                handleGroupInvitation(payload)
+            messageType == "ACN_AGENT_GROUP_CONFIG" ||
+                messageType == "ACF_GROUP_CONFIG" ||
+                payload["notification_type"]?.jsonPrimitive?.contentOrNull ==
+                "acf_group_config" -> handleGroupConfig(payload)
+            else -> networkListener?.onNetworkMessage(
+                NetworkMessageType.UNKNOWN,
+                payload,
+            ) ?: NetworkMessageAction.REJECT
+        }
     }
 
     suspend fun handleA2aMessage(payload: JsonObject) {

@@ -69,9 +69,55 @@ class DemoRuntime:
 
     def __init__(self) -> None:
         self.requests: list[tuple[str, str, Mapping[str, Any]]] = []
+        self.downlink_handler = None
 
     async def connect(self) -> None:
         return None
+
+    async def start_downlink(self, handler) -> None:
+        self.downlink_handler = handler
+
+    async def push_invitation(self) -> NetworkMessageAction:
+        assert self.downlink_handler is not None
+        return await self.downlink_handler(
+            "ACN_AGENT_GROUPING_INVITATION",
+            48,
+            {"notification_type": "group_invitation", "group_id": "g-demo"},
+        )
+
+    async def push_group_config(self) -> NetworkMessageAction:
+        assert self.downlink_handler is not None
+        return await self.downlink_handler(
+            "ACN_AGENT_GROUP_CONFIG",
+            49,
+            {
+                "notification_type": "acf_group_config",
+                "version": "1.0.0",
+                "timestamp": _now(),
+                "group_id": "g-demo",
+                "members": {
+                    "agent1": {
+                        "agent_id": LOCAL_AGENT_ID,
+                        "agent_name": "Agent A",
+                        "capabilities": ["text", "camera"],
+                        "agent_ip": "8.8.8.7",
+                        "tcp_port": "4001",
+                        "udp_port": "28443",
+                        "did_key": "did:key:local-demo",
+                    },
+                    "agent2": {
+                        "agent_id": PEER_AGENT_ID,
+                        "agent_name": "Agent B",
+                        "capabilities": ["text", "camera"],
+                        "agent_ip": "8.8.8.8",
+                        "tcp_port": "4001",
+                        "udp_port": "28443",
+                        "did_key": "did:key:peer-demo",
+                    },
+                },
+                "proof": {"jws": "demo-group-proof"},
+            },
+        )
 
     async def register_endpoint(
         self, local_ip: str, tcp_port: int, udp_port: int
@@ -146,52 +192,10 @@ class DemoRuntime:
 
 class DemoLocalServer:
     def __init__(self) -> None:
-        self.group_config_handler = None
-        self.invitation_handler = None
         self.a2a_handler = None
 
     async def start(self, **kwargs) -> None:
-        self.group_config_handler = kwargs["on_group_config"]
-        self.invitation_handler = kwargs["on_group_invitation"]
         self.a2a_handler = kwargs["on_a2a_message"]
-
-    async def push_invitation(self) -> NetworkMessageAction:
-        assert self.invitation_handler is not None
-        return await self.invitation_handler(
-            {"notification_type": "group_invitation", "group_id": "g-demo"}
-        )
-
-    async def push_group_config(self) -> NetworkMessageAction:
-        assert self.group_config_handler is not None
-        return await self.group_config_handler(
-            {
-                "notification_type": "acf_group_config",
-                "version": "1.0.0",
-                "timestamp": _now(),
-                "group_id": "g-demo",
-                "members": {
-                    "agent1": {
-                        "agent_id": LOCAL_AGENT_ID,
-                        "agent_name": "Agent A",
-                        "capabilities": ["text", "camera"],
-                        "agent_ip": "8.8.8.7",
-                        "tcp_port": "4001",
-                        "udp_port": "28443",
-                        "did_key": "did:key:local-demo",
-                    },
-                    "agent2": {
-                        "agent_id": PEER_AGENT_ID,
-                        "agent_name": "Agent B",
-                        "capabilities": ["text", "camera"],
-                        "agent_ip": "8.8.8.8",
-                        "tcp_port": "4001",
-                        "udp_port": "28443",
-                        "did_key": "did:key:peer-demo",
-                    },
-                },
-                "proof": {"jws": "demo-group-proof"},
-            }
-        )
 
     async def push_a2a_message(self) -> None:
         assert self.a2a_handler is not None
@@ -388,8 +392,8 @@ async def run_demo(
         )
         show("7 create_group", group.group_id)
 
-        invitation_action = await local_server.push_invitation()
-        config_action = await local_server.push_group_config()
+        invitation_action = await runtime.push_invitation()
+        config_action = await runtime.push_group_config()
         snapshot = await sdk.get_group_snapshot(group.group_id)
         assert snapshot is not None
         show("8 group callback", f"{config_action.value}, generation={snapshot.generation}")

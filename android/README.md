@@ -8,7 +8,7 @@ The Android library mirrors the Python SDK's group-cache and endpoint rules:
 - A2A TCP always uses cached `agent_ip + tcp_port`.
 - Group changes rebuild VPN routes and atomically swap the TUN fd in the native
   MASQUE core.
-- Runtime callbacks use the physical listener; A2A uses the Agent TUN listener.
+- Runtime downlink uses a client WebSocket; A2A uses the Agent TUN HTTP listener.
 
 ## Build and test
 
@@ -33,7 +33,9 @@ the directory uses `0700` and key files use `0600`. Applications never pass
 certificate or key parameters to `initialize`.
 
 Only the MASQUE URL uses HTTPS/HTTP/3. Health checks, endpoint registration and
-all other AgentRuntime calls use HTTP; callback and A2A listeners also use HTTP.
+all other AgentRuntime calls use HTTP. During `initialize`, the SDK opens
+`/v1/acn/downlink-websocket` on the same AgentRuntime host and port used by the
+uplink REST calls; no additional port is configured. A2A continues to use HTTP.
 The AAR manifest enables cleartext traffic for this internal deployment.
 
 To rebuild the shipped ARM64 library after native source changes:
@@ -66,11 +68,11 @@ VPN TUN. The returned CIDR is available as `SdkInitResult.agentTunCidr`.
 
 The included demo proof verifier is not suitable for production.
 
-The bundled callback/A2A listener is HTTP/1.1 inside the CONNECT-IP path and
-validates signed messages. Once the deployment's callback mTLS credential format
-is fixed, replace `LocalServer`/`PeerMessenger` with the corresponding TLS
-implementations; the control-plane Runtime client and MASQUE connection already
-use TLS.
+Core-network downlink frames use `kind + request_id + message_type +
+transaction_id + payload`. Each frame is handled in its own coroutine, so
+responses may be returned out of order and are correlated only by `request_id`.
+The local HTTP/1.1 listener now exposes only `/A2A/message` inside the CONNECT-IP
+path; the former Runtime callback paths are not available.
 
 Camera/WebRTC calls use the `MediaOffloadAdapter` SPI. The application supplies
 an adapter backed by its chosen Android WebRTC distribution; this repository's

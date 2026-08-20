@@ -16,10 +16,14 @@ class RecordingGroupListener:
 async def test_a2a_signature_key_comes_from_committed_member(sdk_fixture):
     sdk = sdk_fixture["sdk"]
     server = sdk_fixture["server"]
+    runtime = sdk_fixture["runtime"]
     sdk.register_network_message_listener(AckNetworkListener())
     listener = RecordingGroupListener()
     sdk.register_group_message_listener(listener)
-    assert await server.group_config(group_payload()) is NetworkMessageAction.ACK
+    assert (
+        await runtime.deliver_group_config(group_payload())
+        is NetworkMessageAction.ACK
+    )
 
     await server.a2a(
         {
@@ -34,4 +38,3 @@ async def test_a2a_signature_key_comes_from_committed_member(sdk_fixture):
 
     assert sdk_fixture["signature_verifier"].keys == ["did:key:peer"]
     assert listener.messages == [("g1", PEER_ID, {"hello": "world"})]
-
