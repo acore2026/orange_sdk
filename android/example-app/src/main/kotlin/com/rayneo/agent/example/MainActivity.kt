@@ -106,7 +106,6 @@ class MainActivity : Activity() {
                     localTcpPort = config.tcpPort,
                     localUdpPort = config.udpPort,
                     masqueServerUrl = config.masqueUrl,
-                    masqueServerName = config.masqueServerName,
                     masqueAuthorization = config.masqueToken?.let { "Bearer $it" },
                 )
             }.onSuccess { status.text = "READY ${it.agentTcpEndpoint}" }
@@ -128,7 +127,6 @@ class MainActivity : Activity() {
         val tcpPort: Int,
         val udpPort: Int,
         val masqueUrl: String,
-        val masqueServerName: String?,
         val agentId: String,
         val agentName: String,
         val masqueToken: String?,
@@ -147,7 +145,6 @@ class MainActivity : Activity() {
                     intent.getIntExtra("tcp_port", 4001),
                     intent.getIntExtra("udp_port", 28443),
                     masqueUrl,
-                    intent.getStringExtra("masque_server_name"),
                     agentId,
                     agentName,
                     intent.getStringExtra("masque_token"),
@@ -157,8 +154,7 @@ class MainActivity : Activity() {
             val usage = """
                 Pass deployment values through intent extras; no IP is hardcoded:
                 runtime_ip, runtime_port, local_vlan_ip, tcp_port, udp_port,
-                masque_url, masque_server_name, agent_id, agent_name,
-                and optional masque_token.
+                masque_url, agent_id, agent_name, and optional masque_token.
             """.trimIndent()
         }
     }

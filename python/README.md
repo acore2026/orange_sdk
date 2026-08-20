@@ -8,10 +8,11 @@ SDK 收到 AgentRuntime 透传的 `acf_group_config` 后，会自动缓存 `grou
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.4.0-py3-none-any.whl`：SDK wheel。
+- `agent_connect_sdk-0.5.0-py3-none-any.whl`：SDK wheel（内含服务端根 CA 公钥证书）。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/masque-proxy.example.json`：服务器 MASQUE Proxy 配置模板。
+- `../deployment/masque-tls/`：现有 MASQUE Server 可直接加载的 POC 服务端证书与私钥；私钥不进入 wheel。
 
 运行环境：
 
@@ -40,7 +41,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.4.0-py3-none-any.whl
+dist/agent_connect_sdk-0.5.0-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -52,7 +53,7 @@ dist/agent_connect_sdk-0.4.0-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.4.0-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.5.0-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -67,14 +68,14 @@ agent-masque-proxy --help
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.4.0-py3-none-any.whl
+  ./agent_connect_sdk-0.5.0-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.4.0-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.5.0-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -133,15 +134,21 @@ ip -br address show uesimtun1
 
 预期分别包含设备 A、B 的 UE IP。不要在服务器上为两个 `uesimtun` 创建 Linux bridge、跨接口直连路由或 NAT 规则，否则报文可能绕过核心网 U 面。
 
-### 3.2 SDK 外：准备 MASQUE TLS 证书
+### 3.2 SDK 外：部署预置的 MASQUE TLS 证书
 
-证书的 SAN 必须包含客户端使用的 `masque_server_name`，客户端必须信任签发该证书的 CA。示例：
+SDK 已固定信任 ACore MASQUE 根 CA，并固定校验 TLS 名称
+`masque.agent.internal`。服务器使用仓库 `deployment/masque-tls/` 中的
+证书和私钥；不需要修改服务器代码，只需填入它已有的证书路径配置：
 
-```text
-/etc/agent-sdk/masque-cert.pem
-/etc/agent-sdk/masque-key.pem
-/etc/agent-sdk/lab-ca.pem
+```yaml
+connectIP:
+  tlsCertFile: '/etc/agent-sdk/masque-server-cert.pem'
+  tlsKeyFile: '/etc/agent-sdk/masque-server-key.pem'
 ```
+
+这是封闭实验网 POC 证书。服务端私钥只部署在服务器，不包含在客户 Wheel
+或 Android AAR。生产换组织 CA 时，应由 SDK 发布方在构建制品前同步替换
+内置根 CA，而不是让每个 SDK 用户在 `init` 时传 PEM。
 
 服务器防火墙需要放行 QUIC 使用的 UDP 端口：
 
@@ -209,8 +216,6 @@ sudo -E agent-masque-proxy --config /etc/agent-sdk/masque-proxy.json
 设备 A 的初始化示例：
 
 ```python
-from pathlib import Path
-
 result = await sdk.init(
     agent_runtime_ip="192.168.3.10",
     agent_runtime_port=8080,
@@ -218,8 +223,6 @@ result = await sdk.init(
     local_tcp_port=4001,
     local_udp_port=28443,
     masque_server_url="https://192.168.3.10:4433",
-    masque_server_name="masque.lab.example",
-    masque_ca_certificate_pem=Path("/etc/agent-sdk/lab-ca.pem").read_bytes(),
     masque_authorization="Bearer replace-with-secret-for-device-a",
     tun_name="agent_tun0",
     tun_mtu=1280,
@@ -249,8 +252,6 @@ result = await sdk.init(
 | `local_tcp_port` | 是 | 本地回调和 `/A2A/message` TCP 监听端口 |
 | `local_udp_port` | 是 | 对外公布的 UDP 业务端口 |
 | `masque_server_url` | 是 | MASQUE Proxy 的 HTTPS URL，底层使用 HTTP/3/QUIC |
-| `masque_server_name` | 否 | TLS SNI/证书名称；省略时使用 URL 主机名 |
-| `masque_ca_certificate_pem` | 否 | 私有 CA PEM；生产环境不能关闭证书校验 |
 | `masque_authorization` | 否 | 推荐使用 `Bearer <device-token>` |
 | `tun_name` | 否 | 默认 `agent_tun0` |
 | `tun_mtu` | 否 | 默认 `1280`，应与 Proxy 配置一致 |
@@ -258,6 +259,12 @@ result = await sdk.init(
 | `log_level` | 否 | `DEBUG/INFO/WARNING/ERROR/CRITICAL`，默认 `INFO` |
 | `log_max_bytes` | 否 | 单个日志文件最大字节数，默认 10 MiB |
 | `log_backup_count` | 否 | 轮转历史文件数量，默认 5 |
+
+首次建立 MASQUE 连接时，SDK 自动生成 Ed25519 客户端证书和私钥，后续启动
+复用同一身份。Linux 默认保存在
+`$XDG_STATE_HOME/agent-sdk/tls/`，未设置 `XDG_STATE_HOME` 时保存在
+`~/.local/state/agent-sdk/tls/`；目录权限为 `0700`，证书和私钥权限为
+`0600`。应用不传密钥路径，也不应读取或复制该私钥。
 
 ### 3.5 本地日志
 
@@ -456,9 +463,7 @@ sudo -E .venv/bin/python examples/linux_agent.py \
   --agent-id 'did:example:agent-a' \
   --agent-name 'Agent A' \
   --masque-url https://192.168.3.10:4433 \
-  --masque-server-name masque.lab.example \
   --masque-token 'replace-with-secret-for-device-a' \
-  --ca-cert /etc/agent-sdk/lab-ca.pem \
   --log-file /var/log/agent-sdk/agent-a.log \
   --log-level INFO
 ```
@@ -492,12 +497,12 @@ sudo -E .venv/bin/python examples/linux_agent.py \
 | `TUN_CREATE_FAILED` | `/dev/net/tun` 是否存在；进程是否具备 `CAP_NET_ADMIN` |
 | `LOG_SETUP_FAILED` | 日志目录是否存在或可创建；SDK 进程是否具有写权限 |
 | `RUNTIME_UNREACHABLE` | AgentRuntime IP/端口、HTTPS 证书和物理网络连通性 |
-| `MASQUE_CONNECT_FAILED` | UDP 4433、防火墙、CA、SNI 和 token |
+| `MASQUE_CONNECT_FAILED` | UDP 4433、防火墙、服务端是否加载预置证书、客户端密钥目录权限和 token |
 | `CONNECT_IP_NEGOTIATION_FAILED` | Proxy 是否支持 HTTP/3 Datagram 和 CONNECT-IP |
 | `GROUP_NOT_ACTIVE` | 是否已收到并成功验签 `acf_group_config` |
 | `TARGET_NOT_IN_GROUP` | `target_agent_id` 是否存在于该群组最新快照 |
 | 消息未经过 5GC | token 到 `uesimtun` 映射是否正确；服务器是否存在 bridge/NAT/短路路由 |
-| TLS 名称错误 | `masque_server_name` 是否出现在服务器证书 SAN 中 |
+| TLS 名称错误 | 服务端是否加载 `deployment/masque-tls` 的证书；SDK 固定校验 `masque.agent.internal` |
 
 开发者运行测试：
 

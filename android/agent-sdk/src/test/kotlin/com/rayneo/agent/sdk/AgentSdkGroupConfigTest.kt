@@ -214,6 +214,7 @@ class AgentSdkGroupConfigTest {
         assertEquals("8.8.8.7/24", result.agentTunCidr)
         assertEquals("8.8.8.7/24", tunnel.establishedConfiguration?.agentTunCidr)
         assertTrue(tunnel.establishedConfiguration?.routes?.isEmpty() == true)
+        assertEquals(tunnel.clientIdentityDirectory, masque.configuration?.identityDirectory)
         sdk.restoreLocalProfile(
             AgentProfile(LOCAL_ID, "Agent A", buildJsonObject { put("id", "vc-a") })
         )
@@ -249,6 +250,7 @@ class AgentSdkGroupConfigTest {
 
     private class FakeTunnel : TunnelController {
         override val tunFd: Int = 42
+        override val clientIdentityDirectory: String = "/tmp/agent-sdk-test-identity"
         val groupPeers = mutableMapOf<String, Set<String>>()
         var establishedConfiguration: TunnelConfiguration? = null
         private var swapper: (suspend (Int) -> Unit)? = null
@@ -266,7 +268,11 @@ class AgentSdkGroupConfigTest {
 
     private class FakeMasque : MasqueTransport {
         override var connected: Boolean = false
-        override suspend fun start(tunFd: Int, configuration: MasqueConfiguration) { connected = true }
+        var configuration: MasqueConfiguration? = null
+        override suspend fun start(tunFd: Int, configuration: MasqueConfiguration) {
+            this.configuration = configuration
+            connected = true
+        }
         override suspend fun replaceTunFd(tunFd: Int) = Unit
         override suspend fun close() { connected = false }
     }

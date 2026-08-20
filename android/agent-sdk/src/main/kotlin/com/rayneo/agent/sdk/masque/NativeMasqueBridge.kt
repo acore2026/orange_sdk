@@ -19,12 +19,11 @@ class NativeMasqueBridge(
     external fun nativeStart(
         tunFd: Int,
         serverUrl: String,
-        serverName: String?,
-        caCertificatePem: ByteArray?,
         authorization: String?,
         localVlanIp: String,
         agentTunCidr: String,
         mtu: Int,
+        identityDirectory: String,
     ): Long
 
     external fun nativeReplaceTunFd(handle: Long, tunFd: Int): Boolean
@@ -33,12 +32,11 @@ class NativeMasqueBridge(
     fun start(
         tunFd: Int,
         serverUrl: String,
-        serverName: String?,
-        caCertificatePem: ByteArray?,
         authorization: String?,
         localVlanIp: String,
         agentTunCidr: String,
         mtu: Int,
+        identityDirectory: String,
     ): Long {
         libraryLoadError?.let { error ->
             throw AgentSdkException(
@@ -50,12 +48,11 @@ class NativeMasqueBridge(
         return nativeStart(
             tunFd,
             serverUrl,
-            serverName,
-            caCertificatePem,
             authorization,
             localVlanIp,
             agentTunCidr,
             mtu,
+            identityDirectory,
         )
     }
 
@@ -74,12 +71,11 @@ class NativeMasqueTransport(
         handle = bridge.start(
             tunFd = tunFd,
             serverUrl = configuration.serverUrl,
-            serverName = configuration.serverName,
-            caCertificatePem = configuration.caCertificatePem,
             authorization = configuration.authorization,
             localVlanIp = configuration.localVlanIp,
             agentTunCidr = configuration.agentTunCidr,
             mtu = configuration.mtu,
+            identityDirectory = configuration.identityDirectory,
         )
         if (handle == 0L) {
             throw AgentSdkException(

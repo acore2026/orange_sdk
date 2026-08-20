@@ -19,6 +19,11 @@ from aioquic.quic.connection import QuicConnection
 from aioquic.quic.events import ConnectionTerminated, QuicEvent
 
 from .errors import AgentSdkError, ErrorCode
+from .identity import (
+    EMBEDDED_MASQUE_SERVER_NAME,
+    ClientTlsIdentityStore,
+    embedded_masque_root_ca_pem,
+)
 from .logging_utils import log_event
 
 
@@ -184,6 +189,7 @@ class AioquicConnectIpTransport:
         local_address: str | None = None,
         connect_timeout: float = 10.0,
         logger: logging.Logger | None = None,
+        identity_store: ClientTlsIdentityStore | None = None,
     ) -> None:
         self._url = urlparse(server_url)
         self._server_name = server_name
@@ -196,6 +202,7 @@ class AioquicConnectIpTransport:
         self._receive_task: asyncio.Task[None] | None = None
         self._connected = False
         self._logger = logger or logging.getLogger(__name__)
+        self._identity_store = identity_store or ClientTlsIdentityStore()
 
     @property
     def connected(self) -> bool:
@@ -210,15 +217,28 @@ class AioquicConnectIpTransport:
                 ErrorCode.INVALID_ARGUMENT, "MASQUE URL has no hostname"
             )
         port = self._url.port or 443
+        identity = self._identity_store.ensure()
         configuration = QuicConfiguration(
             is_client=True,
             alpn_protocols=H3_ALPN,
-            server_name=self._server_name or host,
+            server_name=self._server_name or EMBEDDED_MASQUE_SERVER_NAME,
             max_datagram_frame_size=65536,
             verify_mode=ssl.CERT_REQUIRED,
         )
-        if self._ca:
-            configuration.load_verify_locations(cadata=self._ca)
+        configuration.load_verify_locations(
+            cadata=self._ca or embedded_masque_root_ca_pem()
+        )
+        configuration.load_cert_chain(
+            str(identity.certificate_path), str(identity.private_key_path)
+        )
+        log_event(
+            self._logger,
+            logging.INFO,
+            "masque_tls_identity_ready",
+            client_public_key_sha256=identity.public_key_sha256,
+            server_name=self._server_name or EMBEDDED_MASQUE_SERVER_NAME,
+            trust_source="override" if self._ca else "sdk-embedded",
+        )
         try:
             if self._local_address is None:
                 self._context = connect(

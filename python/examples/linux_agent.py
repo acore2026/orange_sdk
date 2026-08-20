@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from pathlib import Path
 
 from agent_sdk import AgentProfile, AgentSdk, NetworkMessageAction, NetworkMessageType
 from agent_sdk.security import (
@@ -43,7 +42,6 @@ async def main(args) -> None:
     )
     sdk.register_network_message_listener(NetworkListener())
     sdk.register_group_message_listener(GroupListener())
-    ca = Path(args.ca_cert).read_bytes() if args.ca_cert else None
     try:
         result = await sdk.init(
             args.runtime_ip,
@@ -52,8 +50,6 @@ async def main(args) -> None:
             args.tcp_port,
             args.udp_port,
             masque_server_url=args.masque_url,
-            masque_server_name=args.masque_server_name,
-            masque_ca_certificate_pem=ca,
             masque_authorization=(
                 f"Bearer {args.masque_token}" if args.masque_token else None
             ),
@@ -80,8 +76,6 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--agent-id", required=True)
     value.add_argument("--agent-name", required=True)
     value.add_argument("--masque-url", required=True)
-    value.add_argument("--masque-server-name")
-    value.add_argument("--ca-cert")
     value.add_argument("--masque-token")
     value.add_argument("--tun-name", default="agent_tun0")
     value.add_argument("--tun-mtu", type=int, default=1280)

@@ -2,6 +2,33 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-20 — 内置 MASQUE 服务端信任并补齐 Android Native Core
+
+### 修改原因
+
+- 客户不应在 `sdk.init`/`initialize` 中理解或传入 MASQUE CA、服务端证书名称、客户端证书或私钥路径；这些属于 SDK 与部署方的传输安全边界。
+- Android 先前只有 `NativeMasqueBridge` 的 JNI 声明和 Fake 测试实现，AAR 没有 `libmasque_core.so`，真实设备无法建立 CONNECT-IP 隧道。
+- SDK 需要在首次运行生成自己的公私钥对并稳定复用；服务端公钥信任与端侧私钥必须分离，服务端私钥不得进入客户 Wheel/AAR。
+
+### 修改方式
+
+- Python Wheel 和 Android Native Core 内置相同的 ACore MASQUE 根 CA，TLS 名称固定为 `masque.agent.internal`；Python/Android 初始化接口删除运行时 CA 和 Server Name 参数。
+- Python 首次连接时在 `$XDG_STATE_HOME/agent-sdk/tls` 或 `~/.local/state/agent-sdk/tls` 生成 Ed25519 客户端证书/私钥；Android 在应用 `noBackupFilesDir/agent-sdk/tls` 生成。目录和文件权限分别固定为 `0700/0600`，不完整或不匹配的已有身份会 fail closed。
+- 在 SDK 仓库的 `deployment/masque-tls/` 提供封闭实验网 POC 服务端证书和部署说明；对应私钥仅保留在当前安全工作区并由 `.gitignore` 排除，通过受控渠道交给服务器运维。现有 Server 只需使用已有 `tlsCertFile/tlsKeyFile` 配置加载，无需修改服务端代码。远端源码、Wheel 和 AAR 均不包含服务端私钥。
+- 新增 Go/NDK ARM64 Native Core，实际完成受 `VpnService.protect()` 保护并绑定 `localVlanIp` 的 QUIC socket、HTTP/3 CONNECT-IP、`ADDRESS_ASSIGN` 地址校验、`ROUTE_ADVERTISEMENT` 等待、TUN 双向包泵、MTU 限制、关闭清理和 TUN fd 热替换。
+- AAR 直接打包 `jni/arm64-v8a/libmasque_core.so`；保留可复现构建脚本。固定的 `connect-ip-go v0.2.0` MIT 源码仅增加 `DialWithHeaders`，保证 Android 的可选 `masqueAuthorization` 真正进入扩展 CONNECT 请求而非被静默忽略。
+- Python wheel 公开初始化签名和安全默认值发生变化，版本从 `0.4.0` 提升到 `0.5.0`；Linux/Android example、README、Native ABI 说明和本地《SDK 设计文档-用户友好版》同步更新。原始《SDK设计文档》和 HTTP 消息契约不变。
+- `/root/proj/go/free6gc/free6gc-ueransim-go` 未产生任何代码或配置改动。
+
+### 验证内容
+
+- Python 全量测试 `45 passed`，覆盖内置 CA、密钥首次生成/稳定复用、权限、残缺身份拒绝和真实 HTTP/3 CONNECT-IP；Wheel 独立安装后版本为 `0.5.0`、`pip check` 无错误，`agent-sdk-self-check` 输出 `FULL FLOW DEMO PASSED`。
+- Native Core 的 3 个 Go 测试通过；真实 HTTP/3 测试验证 `ADDRESS_ASSIGN`、路由 Capsule、双向 IP 包、客户端证书出示和 Authorization 请求头。
+- Android 11 个 JVM 单元测试零失败；Release AAR 和 example Debug APK 构建成功。ARM64 ELF 中存在 `nativeStart/nativeReplaceTunFd/nativeStop` JNI 导出符号，AAR/APK 均包含该 `.so`。
+- 已按已知服务端私钥内容扫描 Wheel 和 AAR，均未发现服务端私钥；Wheel 仅包含 `certs/masque-root-ca.pem`。
+- 本地交付物：`agent_connect_sdk-0.5.0-py3-none-any.whl` SHA-256 `ab44eabaffbbc5491be64ff4144961bc7b0acc6e32893bf502480cde81b3ae15`；`libmasque_core.so` SHA-256 `544bad09b0233888271424e2ea89f4aeafbf7322d33675a02b1bcbff742261e3`；Release AAR SHA-256 `afe43e3994d6c6255d0308d0ee78faf082f781c1d1bf4814920e16d06147c4d8`。
+- 原始《SDK设计文档》的 SHA-256 仍为 `d2509f323338d0cdb948ceff36e32c3ae71d59c646916b687168b4c2e862947b`，确认未被修改。
+
 ## 2026-08-20 — 精简 SDK 端点注册请求和响应
 
 ### 修改原因

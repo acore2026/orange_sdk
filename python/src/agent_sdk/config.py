@@ -16,8 +16,6 @@ class SdkConfig:
     local_udp_port: int
     agent_tun_cidr: str
     masque_server_url: str
-    masque_server_name: str | None
-    masque_ca_certificate_pem: bytes | None
     masque_authorization: str | None
     tun_name: str
     tun_mtu: int
@@ -51,8 +49,6 @@ class SdkConfig:
         local_tcp_port: int,
         local_udp_port: int,
         masque_server_url: str,
-        masque_server_name: str | None,
-        masque_ca_certificate_pem: bytes | None,
         masque_authorization: str | None,
         tun_name: str,
         tun_mtu: int,
@@ -116,8 +112,6 @@ class SdkConfig:
         local_udp_port: int,
         agent_tun_cidr: str,
         masque_server_url: str,
-        masque_server_name: str | None,
-        masque_ca_certificate_pem: bytes | None,
         masque_authorization: str | None,
         tun_name: str,
         tun_mtu: int,
@@ -133,8 +127,6 @@ class SdkConfig:
             local_tcp_port=local_tcp_port,
             local_udp_port=local_udp_port,
             masque_server_url=masque_server_url,
-            masque_server_name=masque_server_name,
-            masque_ca_certificate_pem=masque_ca_certificate_pem,
             masque_authorization=masque_authorization,
             tun_name=tun_name,
             tun_mtu=tun_mtu,
@@ -160,8 +152,6 @@ class SdkConfig:
             local_udp_port=local_udp_port,
             agent_tun_cidr=normalized_tun_cidr,
             masque_server_url=masque_server_url,
-            masque_server_name=masque_server_name,
-            masque_ca_certificate_pem=masque_ca_certificate_pem,
             masque_authorization=masque_authorization,
             tun_name=tun_name,
             tun_mtu=tun_mtu,

@@ -86,6 +86,8 @@ class VpnTunnelController(
     private var nativeOwnsTunFd = false
     override var tunFd: Int = -1
         private set
+    override val clientIdentityDirectory: String
+        get() = service.noBackupFilesDir.resolve("agent-sdk/tls").absolutePath
 
     override suspend fun establish(configuration: TunnelConfiguration) {
         baseConfiguration = configuration

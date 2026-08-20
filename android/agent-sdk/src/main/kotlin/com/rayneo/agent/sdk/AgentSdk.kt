@@ -90,8 +90,6 @@ class AgentSdk(
         localTcpPort: Int,
         localUdpPort: Int,
         masqueServerUrl: String,
-        masqueServerName: String? = null,
-        masqueCaCertificatePem: ByteArray? = null,
         masqueAuthorization: String? = null,
         tunMtu: Int = 1280,
     ): SdkInitResult {
@@ -149,12 +147,11 @@ class AgentSdk(
                 tunnelController.tunFd,
                 MasqueConfiguration(
                     serverUrl = masqueServerUrl,
-                    serverName = masqueServerName,
-                    caCertificatePem = masqueCaCertificatePem,
                     authorization = masqueAuthorization,
                     localVlanIp = localVlanIp,
                     agentTunCidr = agentTunCidr,
                     mtu = tunMtu,
+                    identityDirectory = tunnelController.clientIdentityDirectory,
                 ),
             )
             tunnelController.setTunFdSwapper(masqueTransport::replaceTunFd)

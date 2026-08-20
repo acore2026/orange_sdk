@@ -14,14 +14,30 @@ The Android library mirrors the Python SDK's group-cache and endpoint rules:
 
 ```bash
 cd android
-./gradlew :agent-sdk:testDebugUnitTest
-./gradlew :example-app:assembleDebug
+ANDROID_HOME=/opt/android-sdk ./gradlew :agent-sdk:testDebugUnitTest
+ANDROID_HOME=/opt/android-sdk ./gradlew :agent-sdk:assembleRelease
+ANDROID_HOME=/opt/android-sdk ./gradlew :example-app:assembleDebug
 ```
 
-The library expects an Android ARM64 `libmasque_core.so` implementing the JNI
-ABI in `NativeMasqueBridge`. This is required because Android's public Kotlin
-HTTP APIs do not expose CONNECT-IP HTTP Datagrams. The native socket must call
-`AgentVpnService.protectQuicSocket(fd)` before connecting.
+The AAR already packages the Android ARM64 `libmasque_core.so`; applications do
+not supply a native library. The core implements HTTP/3 CONNECT-IP, ADDRESS_ASSIGN
+and ROUTE_ADVERTISEMENT capsule handling, bidirectional packet pumps, and TUN fd
+replacement. It binds the QUIC UDP socket to `localVlanIp` and calls
+`AgentVpnService.protectQuicSocket(fd)` before connecting, preventing VPN recursion.
+
+The server root CA and TLS name `masque.agent.internal` are compiled into the
+native core. On first connection it creates an Ed25519 client certificate and
+private key under the app's `noBackupFilesDir/agent-sdk/tls`; the directory uses
+`0700` and key files use `0600`. Applications never pass certificate or key
+parameters to `initialize`.
+
+To rebuild the shipped ARM64 library after native source changes:
+
+```bash
+cd android/native/masque_core
+ANDROID_NDK_ROOT=/opt/android-sdk/ndk/27.0.12077973 ./build-android-arm64.sh
+go test ./...
+```
 
 The example takes all network values from intent extras. Example ADB launch:
 
@@ -35,8 +51,7 @@ adb shell am start -n com.rayneo.agent.example/.MainActivity \
   --es agent_id 'did:example:agent-a' \
   --es agent_name 'Agent A' \
   --es masque_token 'replace-with-device-secret' \
-  --es masque_url https://192.168.3.10:4433 \
-  --es masque_server_name masque.lab.example
+  --es masque_url https://192.168.3.10:4433
 ```
 
 The application does not provide an Agent TUN IP. During `initialize`, the SDK

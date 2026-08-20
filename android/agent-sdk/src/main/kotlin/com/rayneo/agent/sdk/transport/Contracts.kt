@@ -43,6 +43,7 @@ data class TunnelConfiguration(
 
 interface TunnelController {
     val tunFd: Int
+    val clientIdentityDirectory: String
     suspend fun establish(configuration: TunnelConfiguration)
     suspend fun replaceGroupPeers(groupId: String, peerIps: Set<String>)
     fun currentAllowedPeerIps(): Set<String>
@@ -52,12 +53,11 @@ interface TunnelController {
 
 data class MasqueConfiguration(
     val serverUrl: String,
-    val serverName: String?,
-    val caCertificatePem: ByteArray?,
     val authorization: String?,
     val localVlanIp: String,
     val agentTunCidr: String,
     val mtu: Int,
+    val identityDirectory: String,
 )
 
 interface MasqueTransport {

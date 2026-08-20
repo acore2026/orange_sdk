@@ -11,6 +11,12 @@
 - [真实 Linux 端侧示例](python/examples/linux_agent.py)
 - [MASQUE Proxy 配置模板](python/examples/masque-proxy.example.json)
 - [Android/RayNeoOS 使用说明](android/README.md)
+- [MASQUE 服务端证书部署材料](deployment/masque-tls/README.md)
+
+Linux Wheel 和 Android AAR 已内置 MASQUE 服务端根 CA 和固定 TLS 名称，
+`init` 不再让客户传证书、私钥或 Server Name。SDK 首次启动会在端侧私有
+目录生成并复用自己的 Ed25519 客户端证书/私钥。Android AAR 已包含真实的
+ARM64 `libmasque_core.so`，不再要求客户另行提供 Native Core。
 
 快速验证 Python 实现：
 
