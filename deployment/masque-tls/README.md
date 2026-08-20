@@ -18,9 +18,10 @@ connectIP:
   tlsKeyFile: '/absolute/path/to/masque-server-key.pem'
 ```
 
-证书的 TLS 名称固定为 `masque.agent.internal`，SDK 已内置该名称和签发 CA，
-客户调用 `sdk.init`/`initialize` 时不再传证书、私钥或 Server Name。
+证书的 TLS 名称为 `masque.agent.internal`。当前封闭内测版 SDK 已关闭 MASQUE
+服务端证书链和名称校验，因此它也能连接其他自签名服务端证书；客户调用
+`sdk.init`/`initialize` 时不传证书、私钥或 Server Name。
 
 本证书用于 POC/封闭测试。新克隆的源码仓库不会取得私钥，缺少安全交付的
-`masque-server-key.pem` 时不能启用该证书。生产部署应由组织 CA 重新签发，
-并在发布 Wheel、AAR 和 `libmasque_core.so` 前替换内置根 CA。
+`masque-server-key.pem` 时不能启用该证书。关闭校验仅用于内部测试；生产部署
+必须恢复证书验证，并使用组织 CA 签发的服务端证书。

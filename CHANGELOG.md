@@ -2,6 +2,28 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-20 — 内测网络关闭 MASQUE 服务端证书校验并统一 Runtime HTTP
+
+### 修改原因
+
+- 当前部署仅用于封闭内部联调，需要允许 Linux 和 Android SDK 连接自签名、名称不匹配或未纳入 SDK 信任库的 MASQUE 服务端证书。
+- 除 MASQUE CONNECT-IP 必须使用 HTTPS/HTTP/3 外，SDK 与 AgentRuntime 的健康检查、端点注册和全部控制接口均要求改用普通 HTTP。
+
+### 修改方式
+
+- Python MASQUE 客户端改为 `ssl.CERT_NONE`，Android Native Core 改为 `InsecureSkipVerify=true`；两端仍限定 TLS 1.3、继续携带 Authorization，并继续生成和出示端侧客户端证书。
+- Linux 每次连接记录结构化 `masque_server_certificate_verification_disabled` 警告，Android Native Core 输出同义警告，明确标记 `internal-test-only` 安全配置。
+- Python `HttpRuntimeTransport` 与 Android `OkHttpRuntimeTransport` 的基础 URL 从 `https://` 改为 `http://`；Android AAR Manifest 启用 cleartext traffic。AgentRuntime 主动回调和 Agent 间消息原本已经使用 HTTP，不改变消息体和 URL 路径。
+- 根 README、Linux 客户指南、Android 说明和 MASQUE TLS 部署说明同步当前内测安全边界；本地《Agent SDK HTTP 接口文档》和用户友好版设计文档同步 HTTP 协议与证书策略，但按仓库规则继续忽略、不推送。服务端程序及配置未修改，原始《SDK设计文档》保持不动。
+
+### 验证内容
+
+- Python 真实 HTTP/3 CONNECT-IP 测试不再向客户端提供 CA 或匹配的 Server Name，以覆盖不受信任且名称不匹配的证书仍能完成双向数据报转发，并断言安全警告已写入本地日志。
+- Android Native Core 真实 CONNECT-IP 测试使用同样不受信任且名称不匹配的服务端证书，同时继续验证客户端证书、Authorization、ADDRESS_ASSIGN、路由 Capsule 和双向 IP 包。
+- Python `compileall` 和全量测试通过（`50 passed`），其中新增断言确认 Runtime 基础地址固定为 `http://`；Go Native Core 全量测试通过；Android JVM 单元测试 `11 tests / 0 failures / 0 errors`，Release AAR 与 example Debug APK 构建成功。
+- 重建 Wheel 后 `twine check` 通过，独立安装运行 `agent-sdk-self-check` 输出 `FULL FLOW DEMO PASSED`。交付物 SHA-256：Wheel `2d40e3a39a3abf5b243df94f973adb2b6b674bbdf2c9c70f8c3bab15ea089528`，ARM64 Native Core `b9696c524fb14d9ca2899129ab348359e5534bd88f475a30bcfd90dd303942c1`，Release AAR `732fab5454e8354347da3581fc65be389db9072a4acfb185cf1d280769b8dccc`。
+- 原始《SDK设计文档》SHA-256 仍为 `d2509f323338d0cdb948ceff36e32c3ae71d59c646916b687168b4c2e862947b`，确认未修改。
+
 ## 2026-08-20 — Linux 真实示例覆盖全部 SDK 北向函数
 
 ### 修改原因

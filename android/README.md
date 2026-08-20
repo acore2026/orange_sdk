@@ -25,11 +25,16 @@ and ROUTE_ADVERTISEMENT capsule handling, bidirectional packet pumps, and TUN fd
 replacement. It binds the QUIC UDP socket to `localVlanIp` and calls
 `AgentVpnService.protectQuicSocket(fd)` before connecting, preventing VPN recursion.
 
-The server root CA and TLS name `masque.agent.internal` are compiled into the
-native core. On first connection it creates an Ed25519 client certificate and
-private key under the app's `noBackupFilesDir/agent-sdk/tls`; the directory uses
-`0700` and key files use `0600`. Applications never pass certificate or key
-parameters to `initialize`.
+This internal-test build keeps TLS 1.3 encryption but does not verify the MASQUE
+server certificate chain, validity, or name. The native core logs an explicit
+warning on every connection. On first connection it creates an Ed25519 client
+certificate and private key under the app's `noBackupFilesDir/agent-sdk/tls`;
+the directory uses `0700` and key files use `0600`. Applications never pass
+certificate or key parameters to `initialize`.
+
+Only the MASQUE URL uses HTTPS/HTTP/3. Health checks, endpoint registration and
+all other AgentRuntime calls use HTTP; callback and A2A listeners also use HTTP.
+The AAR manifest enables cleartext traffic for this internal deployment.
 
 To rebuild the shipped ARM64 library after native source changes:
 

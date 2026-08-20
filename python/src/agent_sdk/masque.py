@@ -22,7 +22,6 @@ from .errors import AgentSdkError, ErrorCode
 from .identity import (
     EMBEDDED_MASQUE_SERVER_NAME,
     ClientTlsIdentityStore,
-    embedded_masque_root_ca_pem,
 )
 from .logging_utils import log_event
 
@@ -223,13 +222,17 @@ class AioquicConnectIpTransport:
             alpn_protocols=H3_ALPN,
             server_name=self._server_name or EMBEDDED_MASQUE_SERVER_NAME,
             max_datagram_frame_size=65536,
-            verify_mode=ssl.CERT_REQUIRED,
-        )
-        configuration.load_verify_locations(
-            cadata=self._ca or embedded_masque_root_ca_pem()
+            verify_mode=ssl.CERT_NONE,
         )
         configuration.load_cert_chain(
             str(identity.certificate_path), str(identity.private_key_path)
+        )
+        log_event(
+            self._logger,
+            logging.WARNING,
+            "masque_server_certificate_verification_disabled",
+            security_profile="internal-test-only",
+            supplied_ca_ignored=self._ca is not None,
         )
         log_event(
             self._logger,
@@ -237,7 +240,7 @@ class AioquicConnectIpTransport:
             "masque_tls_identity_ready",
             client_public_key_sha256=identity.public_key_sha256,
             server_name=self._server_name or EMBEDDED_MASQUE_SERVER_NAME,
-            trust_source="override" if self._ca else "sdk-embedded",
+            server_certificate_verification="disabled",
         )
         try:
             if self._local_address is None:

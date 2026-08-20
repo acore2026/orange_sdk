@@ -58,7 +58,7 @@ async def test_runtime_http_request_response_are_logged_and_redacted(tmp_path):
     transport = HttpRuntimeTransport("runtime.example", 443, logger=logger)
     await transport._client.aclose()
     transport._client = httpx.AsyncClient(
-        base_url="https://runtime.example:443",
+        base_url="http://runtime.example:443",
         transport=httpx.MockTransport(handler),
     )
     try:

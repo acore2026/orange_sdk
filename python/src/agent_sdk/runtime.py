@@ -23,7 +23,7 @@ class HttpRuntimeTransport:
         timeout: float = 10.0,
         logger: logging.Logger | None = None,
     ) -> None:
-        self._base_url = f"https://{host}:{port}"
+        self._base_url = f"http://{host}:{port}"
         self._registration_path = endpoint_registration_path
         self._client = httpx.AsyncClient(
             base_url=self._base_url, verify=verify, timeout=timeout

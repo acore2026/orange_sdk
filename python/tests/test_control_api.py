@@ -167,11 +167,20 @@ async def test_runtime_transport_accepts_empty_success_response():
     transport = HttpRuntimeTransport("runtime.example", 443)
     await transport._client.aclose()
     transport._client = httpx.AsyncClient(
-        base_url="https://runtime.example:443",
+        base_url="http://runtime.example:443",
         transport=httpx.MockTransport(handler),
     )
     try:
         assert await transport.request("POST", "/arf/v1/agent-cards", {}) == {}
+    finally:
+        await transport.close()
+
+
+async def test_runtime_transport_uses_plain_http_base_url():
+    transport = HttpRuntimeTransport("runtime.example", 8080)
+    try:
+        assert transport._base_url == "http://runtime.example:8080"
+        assert str(transport._client.base_url) == "http://runtime.example:8080"
     finally:
         await transport.close()
 
@@ -193,7 +202,7 @@ async def test_endpoint_registration_returns_ue_assignment():
     transport = HttpRuntimeTransport("runtime.example", 8443)
     await transport._client.aclose()
     transport._client = httpx.AsyncClient(
-        base_url="https://runtime.example:8443",
+        base_url="http://runtime.example:8443",
         transport=httpx.MockTransport(handler),
     )
     try:
@@ -206,7 +215,7 @@ async def test_endpoint_registration_returns_ue_assignment():
         await transport.close()
 
     assert captured[0].method == "POST"
-    assert captured[0].url == "https://runtime.example:8443/sdk/v1/endpoints"
+    assert captured[0].url == "http://runtime.example:8443/sdk/v1/endpoints"
     assert json.loads(captured[0].content) == {
         "local_vlan_ip": "192.168.1.10",
         "tcp_port": 4001,
@@ -241,7 +250,7 @@ async def test_endpoint_registration_rejects_invalid_ue_assignment(
     transport = HttpRuntimeTransport("runtime.example", 8443)
     await transport._client.aclose()
     transport._client = httpx.AsyncClient(
-        base_url="https://runtime.example:8443",
+        base_url="http://runtime.example:8443",
         transport=httpx.MockTransport(handler),
     )
     try:

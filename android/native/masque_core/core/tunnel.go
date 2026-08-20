@@ -3,11 +3,10 @@ package core
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
-	_ "embed"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/netip"
@@ -25,9 +24,6 @@ import (
 
 const EmbeddedServerName = "masque.agent.internal"
 
-//go:embed certs/masque-root-ca.pem
-var embeddedRootCAPEM []byte
-
 type Configuration struct {
 	ServerURL         string
 	Authorization     string
@@ -35,8 +31,6 @@ type Configuration struct {
 	MTU               int
 	IdentityDirectory string
 	ConnectTimeout    time.Duration
-	serverName        string
-	rootCAPEM         []byte
 }
 
 type Tunnel struct {
@@ -91,24 +85,13 @@ func Start(tunFD, udpFD int, cfg Configuration) (*Tunnel, error) {
 	if err != nil {
 		return nil, err
 	}
-	roots := x509.NewCertPool()
-	rootCAPEM := cfg.rootCAPEM
-	if len(rootCAPEM) == 0 {
-		rootCAPEM = embeddedRootCAPEM
-	}
-	if !roots.AppendCertsFromPEM(rootCAPEM) {
-		return nil, errors.New("embedded MASQUE root CA is invalid")
-	}
-	serverName := cfg.serverName
-	if serverName == "" {
-		serverName = EmbeddedServerName
-	}
+	log.Printf("WARNING: MASQUE server certificate verification is disabled (internal-test-only)")
 	tlsConfig := &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		ServerName:   serverName,
-		RootCAs:      roots,
-		Certificates: []tls.Certificate{identity.Certificate},
-		NextProtos:   []string{http3.NextProtoH3},
+		MinVersion:         tls.VersionTLS13,
+		ServerName:         EmbeddedServerName,
+		InsecureSkipVerify: true, // Internal test profile: accept any server certificate.
+		Certificates:       []tls.Certificate{identity.Certificate},
+		NextProtos:         []string{http3.NextProtoH3},
 	}
 
 	port := parsedURL.Port()

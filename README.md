@@ -13,9 +13,10 @@
 - [Android/RayNeoOS 使用说明](android/README.md)
 - [MASQUE 服务端证书部署材料](deployment/masque-tls/README.md)
 
-Linux Wheel 和 Android AAR 已内置 MASQUE 服务端根 CA 和固定 TLS 名称，
-`init` 不再让客户传证书、私钥或 Server Name。SDK 首次启动会在端侧私有
-目录生成并复用自己的 Ed25519 客户端证书/私钥。Android AAR 已包含真实的
+当前封闭内测构建保留 MASQUE TLS 1.3 加密，但关闭服务端证书链和名称校验；
+连接时会记录明确的安全警告。SDK 首次启动仍会在端侧私有目录生成并复用
+自己的 Ed25519 客户端证书/私钥。除 MASQUE 的 HTTPS/HTTP/3 外，SDK 与
+AgentRuntime、对端 Agent 的接口统一使用 HTTP。Android AAR 已包含真实的
 ARM64 `libmasque_core.so`，不再要求客户另行提供 Native Core。
 
 快速验证 Python 实现：

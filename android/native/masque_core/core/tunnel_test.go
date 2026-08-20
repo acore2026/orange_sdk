@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
-	"encoding/pem"
 	"fmt"
 	"math/big"
 	"net"
@@ -64,7 +63,7 @@ func TestConnectIPTunnelRoundTrip(t *testing.T) {
 		serverConnection <- connection
 		<-request.Context().Done()
 	})
-	certificate, rootCAPEM := ephemeralServerIdentity(t, "test.masque.internal")
+	certificate := ephemeralServerIdentity(t, "test.masque.internal")
 	server := &http3.Server{
 		Handler: mux, EnableDatagrams: true,
 		TLSConfig: &tls.Config{
@@ -96,7 +95,6 @@ func TestConnectIPTunnelRoundTrip(t *testing.T) {
 		ServerURL: endpoint, AgentTunCIDR: "8.8.8.7/24", MTU: 1280,
 		Authorization:     "Bearer native-test-token",
 		IdentityDirectory: t.TempDir(), ConnectTimeout: 3 * time.Second,
-		serverName: "test.masque.internal", rootCAPEM: rootCAPEM,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +149,7 @@ func TestConnectIPTunnelRoundTrip(t *testing.T) {
 	}
 }
 
-func ephemeralServerIdentity(t *testing.T, serverName string) (tls.Certificate, []byte) {
+func ephemeralServerIdentity(t *testing.T, serverName string) tls.Certificate {
 	t.Helper()
 	now := time.Now()
 	rootPublic, rootPrivate, err := ed25519.GenerateKey(rand.Reader)
@@ -194,7 +192,7 @@ func ephemeralServerIdentity(t *testing.T, serverName string) (tls.Certificate, 
 	}
 	return tls.Certificate{
 		Certificate: [][]byte{serverDER, rootDER}, PrivateKey: serverPrivate,
-	}, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER})
+	}
 }
 
 func receiveWithin[T any](t *testing.T, values <-chan T) T {

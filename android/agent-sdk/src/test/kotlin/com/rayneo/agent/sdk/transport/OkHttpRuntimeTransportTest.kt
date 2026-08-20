@@ -35,7 +35,7 @@ class OkHttpRuntimeTransportTest {
 
         assertEquals("POST", captured.single().method)
         assertEquals(
-            "https://runtime.example:8443/sdk/v1/endpoints",
+            "http://runtime.example:8443/sdk/v1/endpoints",
             captured.single().url.toString(),
         )
         assertEquals(

@@ -24,7 +24,7 @@ class OkHttpRuntimeTransport(
     private val client: OkHttpClient = OkHttpClient(),
     private val json: Json = Json,
 ) : RuntimeTransport {
-    private val baseUrl = "https://$host:$port"
+    private val baseUrl = "http://$host:$port"
 
     override suspend fun connect() = withContext(Dispatchers.IO) {
         try {

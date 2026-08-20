@@ -8,7 +8,7 @@ SDK 收到 AgentRuntime 透传的 `acf_group_config` 后，会自动缓存 `grou
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.5.0-py3-none-any.whl`：SDK wheel（内含服务端根 CA 公钥证书）。
+- `agent_connect_sdk-0.5.0-py3-none-any.whl`：SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/masque-proxy.example.json`：服务器 MASQUE Proxy 配置模板。
@@ -20,7 +20,7 @@ SDK 收到 AgentRuntime 透传的 `acf_group_config` 后，会自动缓存 `grou
 - 端侧具备 `/dev/net/tun`，进程具有 root 或 `CAP_NET_ADMIN` 权限。
 - 服务器侧已启动 UERANSIM，能够看到对应的 `uesimtun` 接口。
 - 端侧可以通过 UDP 访问 MASQUE Proxy，默认示例端口为 `4433`。
-- 端侧可以通过 HTTPS 访问 AgentRuntime。
+- 端侧可以通过 HTTP 访问 AgentRuntime。
 
 Android/RayNeoOS 使用 AAR 和 `VpnService`，不使用本 wheel，参见仓库 `android/README.md`。
 
@@ -134,11 +134,11 @@ ip -br address show uesimtun1
 
 预期分别包含设备 A、B 的 UE IP。不要在服务器上为两个 `uesimtun` 创建 Linux bridge、跨接口直连路由或 NAT 规则，否则报文可能绕过核心网 U 面。
 
-### 3.2 SDK 外：部署预置的 MASQUE TLS 证书
+### 3.2 SDK 外：配置 MASQUE TLS 证书
 
-SDK 已固定信任 ACore MASQUE 根 CA，并固定校验 TLS 名称
-`masque.agent.internal`。服务器使用仓库 `deployment/masque-tls/` 中的
-证书和私钥；不需要修改服务器代码，只需填入它已有的证书路径配置：
+MASQUE 服务端仍需配置证书和私钥才能建立 TLS 1.3/HTTP/3 连接。服务器可
+继续使用仓库 `deployment/masque-tls/` 中的测试证书和私钥；不需要修改
+服务器代码，只需填入它已有的证书路径配置：
 
 ```yaml
 connectIP:
@@ -146,9 +146,11 @@ connectIP:
   tlsKeyFile: '/etc/agent-sdk/masque-server-key.pem'
 ```
 
-这是封闭实验网 POC 证书。服务端私钥只部署在服务器，不包含在客户 Wheel
-或 Android AAR。生产换组织 CA 时，应由 SDK 发布方在构建制品前同步替换
-内置根 CA，而不是让每个 SDK 用户在 `init` 时传 PEM。
+当前封闭内测构建不校验 MASQUE 服务端证书链、有效期或名称，因此也可以
+对接其他自签名证书；TLS 流量仍会加密，端侧仍会出示自动生成的客户端证书。
+该配置不适用于生产环境，连接时日志会记录
+`masque_server_certificate_verification_disabled`。服务端私钥只部署在
+服务器，不包含在客户 Wheel 或 Android AAR。
 
 服务器防火墙需要放行 QUIC 使用的 UDP 端口：
 
@@ -247,7 +249,7 @@ result = await sdk.init(
 | 参数 | 必填 | 说明 |
 |---|---|---|
 | `agent_runtime_ip` | 是 | AgentRuntime 物理网地址 |
-| `agent_runtime_port` | 是 | AgentRuntime HTTPS 端口 |
+| `agent_runtime_port` | 是 | AgentRuntime HTTP 端口 |
 | `local_vlan_ip` | 是 | 本设备物理网 IP；Runtime 回调从此地址进入 |
 | `local_tcp_port` | 是 | 本地回调和 `/A2A/message` TCP 监听端口 |
 | `local_udp_port` | 是 | 对外公布的 UDP 业务端口 |
@@ -265,6 +267,10 @@ result = await sdk.init(
 `$XDG_STATE_HOME/agent-sdk/tls/`，未设置 `XDG_STATE_HOME` 时保存在
 `~/.local/state/agent-sdk/tls/`；目录权限为 `0700`，证书和私钥权限为
 `0600`。应用不传密钥路径，也不应读取或复制该私钥。
+
+除 `masque_server_url` 必须使用 `https://` 以建立 HTTP/3/QUIC 外，SDK
+访问 AgentRuntime 的健康检查、端点注册和全部控制接口均使用 `http://`。
+AgentRuntime 主动调用 SDK，以及 Agent 之间的 `/A2A/message` 也使用 HTTP。
 
 ### 3.5 本地日志
 
@@ -517,13 +523,13 @@ sudo -E .venv/bin/python examples/linux_agent.py \
 |---|---|
 | `TUN_CREATE_FAILED` | `/dev/net/tun` 是否存在；进程是否具备 `CAP_NET_ADMIN` |
 | `LOG_SETUP_FAILED` | 日志目录是否存在或可创建；SDK 进程是否具有写权限 |
-| `RUNTIME_UNREACHABLE` | AgentRuntime IP/端口、HTTPS 证书和物理网络连通性 |
-| `MASQUE_CONNECT_FAILED` | UDP 4433、防火墙、服务端是否加载预置证书、客户端密钥目录权限和 token |
+| `RUNTIME_UNREACHABLE` | AgentRuntime HTTP IP/端口和物理网络连通性 |
+| `MASQUE_CONNECT_FAILED` | UDP 4433、防火墙、服务端 TLS 配置、客户端密钥目录权限和 token |
 | `CONNECT_IP_NEGOTIATION_FAILED` | Proxy 是否支持 HTTP/3 Datagram 和 CONNECT-IP |
 | `GROUP_NOT_ACTIVE` | 是否已收到并成功验签 `acf_group_config` |
 | `TARGET_NOT_IN_GROUP` | `target_agent_id` 是否存在于该群组最新快照 |
 | 消息未经过 5GC | token 到 `uesimtun` 映射是否正确；服务器是否存在 bridge/NAT/短路路由 |
-| TLS 名称错误 | 服务端是否加载 `deployment/masque-tls` 的证书；SDK 固定校验 `masque.agent.internal` |
+| 日志出现证书校验关闭警告 | 当前为封闭内测安全配置；不得将该构建用于生产网络 |
 
 开发者运行测试：
 

@@ -51,7 +51,7 @@ def certificate_pair(tmp_path):
 
 
 async def test_real_http3_connect_ip_datagrams_round_trip(tmp_path):
-    cert_path, key_path, cert_pem = certificate_pair(tmp_path)
+    cert_path, key_path, _ = certificate_pair(tmp_path)
     log_path = tmp_path / "connect-ip.log"
     logger = configure_local_logger(
         name=f"test.connect_ip.{id(tmp_path)}",
@@ -79,8 +79,6 @@ async def test_real_http3_connect_ip_datagrams_round_trip(tmp_path):
     downlink = asyncio.Queue()
     client = AioquicConnectIpTransport(
         server_url=f"https://127.0.0.1:{server.bound_port}",
-        server_name="localhost",
-        ca_certificate_pem=cert_pem,
         authorization="Bearer secret-a",
         local_address="127.0.0.1",
         logger=logger,
@@ -108,4 +106,6 @@ async def test_real_http3_connect_ip_datagrams_round_trip(tmp_path):
     assert text.count('"event":"http_response"') >= 2
     assert '"protocol":"HTTP/3 CONNECT-IP"' in text
     assert '"status_code":200' in text
+    assert '"event":"masque_server_certificate_verification_disabled"' in text
+    assert '"security_profile":"internal-test-only"' in text
     assert "secret-a" not in text
