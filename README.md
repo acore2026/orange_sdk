@@ -8,7 +8,7 @@
 
 - [Linux/Python 客户使用指南](python/README.md)
 - [离线全流程示例](python/examples/full_flow_demo.py)
-- [真实 Linux 端侧示例](python/examples/linux_agent.py)
+- [真实 Linux 全接口调用示例](python/examples/linux_agent.py)
 - [MASQUE Proxy 配置模板](python/examples/masque-proxy.example.json)
 - [Android/RayNeoOS 使用说明](android/README.md)
 - [MASQUE 服务端证书部署材料](deployment/masque-tls/README.md)

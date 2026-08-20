@@ -453,22 +453,43 @@ await sdk.deregister_identity(profile.agent_id, reason="retired")
 
 ## 5. 可直接运行的真实端侧示例
 
-`examples/linux_agent.py` 用于真实网络联调。它会创建 TUN、连接 AgentRuntime 和 MASQUE Proxy，并保持本地消息服务运行：
+`examples/linux_agent.py` 是连接真实 AgentRuntime、MASQUE 和对端 Agent 的
+全流程示例，不再只执行 `init` 后常驻。它依次调用初始化、身份申请/恢复、
+网络能力、能力注册/更新、发现、建群、等待群组快照、消息发送、计算卸载、
+视频上传、处理后视频流、身份注销和关闭接口：
 
 ```bash
 sudo -E .venv/bin/python examples/linux_agent.py \
   --runtime-ip 192.168.3.10 \
   --runtime-port 8080 \
   --local-vlan-ip 192.168.1.10 \
-  --agent-id 'did:example:agent-a' \
   --agent-name 'Agent A' \
-  --masque-url https://192.168.3.10:4433 \
+  --owner 'customer-a' \
+  --identity-public-key 'did:key:z6Mk...' \
+  --masque-url https://192.168.3.10:4433/.well-known/masque/ip \
   --masque-token 'replace-with-secret-for-device-a' \
+  --required-skill text \
+  --group-name customer-demo \
+  --message '{"type":"text","content":"hello"}' \
+  --sandbox-id sandbox-edge-1 \
   --log-file /var/log/agent-sdk/agent-a.log \
   --log-level INFO
 ```
 
-该脚本中的 `DemoAcceptAllProofVerifier`、`DemoControlRequestAuthenticator` 和 `DemoMessageSigner` 仅为联调占位。生产发布前必须替换成对消息规范进行规范化、签名和验签的实现。
+`--identity-public-key` 是身份申请接口使用的 DID/消息签名公钥，与 SDK 自动
+生成的 MASQUE TLS 客户端密钥不是同一用途。`--target-agent-id` 省略时使用
+发现结果的第一项；建群后脚本会等待 AgentRuntime 下发 `acf_group_config`，
+不会让用户填写对端 IP 或端口。
+
+为保证示例能够实际执行所有媒体函数，文件内置了明确标记为 example-only
+的 `ExampleMediaOffloadAdapter`；它不读取真实摄像头，也不代表真实 WebRTC
+上传。生产联调必须替换成平台媒体适配器。
+
+该全流程默认注销本次申请的身份。需要保留身份时传 `--keep-identity`，并把
+验证后的 `AgentProfile` 安全持久化；传 `--stay-running` 可在流程完成后继续
+接收消息。脚本中的 `DemoAcceptAllProofVerifier`、
+`DemoControlRequestAuthenticator` 和 `DemoMessageSigner` 也仅为联调占位，
+生产发布前必须替换为真实签名和验签实现。
 
 ## 6. 函数清单
 

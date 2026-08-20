@@ -2,6 +2,28 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-20 — Linux 真实示例覆盖全部 SDK 北向函数
+
+### 修改原因
+
+- `examples/linux_agent.py` 原先只恢复一份调用方传入的 `AgentProfile`、执行 `init` 后无限等待，没有展示客户拿到 SDK 后如何完成身份、能力、发现、建群、消息和计算卸载全流程。
+- 客户需要在同一份真实网络示例中看到所有北向函数的调用关系，同时仍由 SDK 隐藏群组成员 IP、端口和路由。
+
+### 修改方式
+
+- `linux_agent.py` 依次调用 `init`、`apply_identity`、`set_local_profile_for_restore`、`get_network_ability`、`register_capabilities`、`update_capabilities`、`discover_agents`、`create_group`、`get_group_snapshot`、`send_message`、`create_offloading_session`、`start_video_upload`、`get_processed_video_stream`、`deregister_identity` 和 `close`。
+- 同一文件注册网络消息和群组消息 listener；建群后轮询群组快照，必须等到已校验的 `acf_group_config` 包含目标 Agent 才发送消息，应用仍不传 URL、IP、端口或路由。
+- 新增完整 CLI 参数，身份申请公钥、发现条件、目标 Agent、群组、消息、卸载、视频和超时均可配置；`--target-agent-id` 为空时使用发现结果第一项。
+- 示例默认注销本次申请的身份以真实覆盖注销接口；`--keep-identity` 可显式保留，`--stay-running` 可在全流程后继续接收消息。
+- 提供明确标记为 example-only 的媒体适配器，使视频上传句柄、暂停/恢复/停止和处理后视频流函数均能被调用；文档明确它不读取摄像头、不代表真实 WebRTC 实现。
+- Python 客户 README 和根 README 同步完整启动命令、函数顺序、身份公钥与 MASQUE TLS 密钥的区别及安全注意事项。SDK 实现和公开 API 未变化，因此 wheel 版本保持 `0.5.0`。
+
+### 验证内容
+
+- 新增 AST 调用覆盖测试，逐项确认 `linux_agent.py` 包含 17 个 SDK 公共入口；新增可执行的 mock 全流程测试，确认全部业务异步函数、视频句柄和视频流实际被调用。
+- CLI 参数、JSON 消息解析和非法非对象消息均有测试；`linux_agent.py --help` 可正常输出完整参数。
+- Python 全量测试结果：`49 passed`；`src`、`examples` 和 `tests` 全部通过 `compileall`。
+
 ## 2026-08-20 — 内置 MASQUE 服务端信任并补齐 Android Native Core
 
 ### 修改原因
