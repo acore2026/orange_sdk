@@ -8,7 +8,7 @@ SDK 收到 AgentRuntime 透传的 `acf_group_config` 后，会自动缓存 `grou
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.7.0-py3-none-any.whl`：SDK wheel。
+- `agent_connect_sdk-0.8.0-py3-none-any.whl`：SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/masque-proxy.example.json`：服务器 MASQUE Proxy 配置模板。
@@ -41,7 +41,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.7.0-py3-none-any.whl
+dist/agent_connect_sdk-0.8.0-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -53,7 +53,7 @@ dist/agent_connect_sdk-0.7.0-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.7.0-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.8.0-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -68,14 +68,14 @@ agent-masque-proxy --help
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.7.0-py3-none-any.whl
+  ./agent_connect_sdk-0.8.0-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.7.0-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.8.0-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -413,6 +413,29 @@ group = await sdk.create_group(
 )
 ```
 
+`credentials` 是正式用法：调用方传入已经由运营商或能力认证组织签发的 VC，
+SDK 将其原样放入 `vc_list`。封闭实验环境还可直接传能力字符串；SDK 会使用
+测试三方机构的 P-256 私钥为每个能力生成一张 `CapabilityCredential`，再追加
+到同一个 `vc_list`：
+
+```python
+await sdk.register_capabilities(
+    profile.agent_id,
+    priority=1,
+    credentials=[profile.identity_vc],
+    capabilities=["robot-control", "voice"],
+    # 省略时默认读取 ~/lpx/cert/third-party/private-key.pem
+    test_vc_private_key_path="/root/lpx/cert/third-party/private-key.pem",
+)
+```
+
+生成的测试 VC 使用
+`did:thirdpartyissuer@6gc.mnc015.mcc234.3gppnetwork` 作为 `issuer`，签名原文
+兼容现有 IDM 测试规则：只覆盖 `context/id/type/issuer/valid_from/valid_until/claims`
+七个字段，采用排序紧凑 JSON、P-256 ECDSA/SHA-256 和 DER Base64 签名。
+该私钥只从外部文件读取，不会进入 Wheel。此入口仅用于联调；正式环境应由
+独立能力认证服务签发 VC，再通过 `credentials` 发布。
+
 AgentRuntime 随后通过已建立的 WebSocket 下发核心网请求：
 
 ```json
@@ -552,7 +575,7 @@ AgentRuntime 下发 `acf_group_config`，不会让用户填写对端 IP 或端�
 | `set_local_profile_for_restore(profile)` | 恢复安全存储中的既有身份 | 无 |
 | `deregister_identity(...)` | 注销身份 | `OperationResult` |
 | `get_network_ability(...)` | 获取网络能力，直接解析原始 `vc1` | `NetworkAbility` |
-| `register_capabilities(...)` | 注册 Agent Card/能力 | `OperationResult` |
+| `register_capabilities(...)` | 发布已有 VC；内测时也可将能力字符串签成三方 VC 后发布 | `OperationResult` |
 | `update_capabilities(...)` | `POST /arf/v1/agent-cards-update` 更新能力 | `OperationResult` |
 | `discover_agents(...)` | 从原始 `result[].agent_card` 发现 Agent | `list[DiscoveredAgent]` |
 | `create_group(...)` | 使用 `target_agents + group_config` 请求建群 | `GroupInfo` |

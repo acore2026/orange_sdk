@@ -2,6 +2,30 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-20 — Linux AgentCard 支持内测能力 VC 即时签发
+
+### 修改原因
+
+- 原 `register_capabilities()` 只能接收已经签发好的 VC 并原样写入 `vc_list`，封闭测试用例无法直接用能力字符串构造 AgentCard。
+- `/root/lpx/cert/third-party` 已提供三方能力认证组织的 P-256 测试私钥和公钥，需要复用现有 IDM 签名规则生成可验签的能力 VC，同时不能要求 AgentRuntime 或服务端增加新的 HTTP 字段。
+
+### 修改方式
+
+- Python `register_capabilities()` 保留 `credentials` 正式入口，并新增可选的 `capabilities`、`agent_name` 和 `test_vc_private_key_path`；两类输入可以单独使用或混合使用。
+- 每个能力字符串生成一张 `VerifiableCredential + CapabilityCredential`，包含 `agent_id`、`agent_name`、`capability` 和 `authorization_mode`；签发者固定为测试三方 DID。
+- 测试 VC 按 IDM 现有规则只签 `context/id/type/issuer/valid_from/valid_until/claims` 七个字段，使用排序紧凑 ASCII JSON、P-256 ECDSA/SHA-256、ASN.1 DER 标准 Base64。默认私钥路径为 `~/lpx/cert/third-party/private-key.pem`，可显式覆盖。
+- 生成后的 VC 追加到现有 `vc_list`，HTTP URL 和请求体外层字段不变，AgentRuntime 仍纯透传；测试私钥只从 Wheel 外部读取，不复制到源码或交付物。Android 和正式生产入口继续接收预签发 VC。
+- `linux_agent.py` 新增可重复的 `--test-capability` 和外部测试私钥路径参数；Python 客户指南、根 README、本地 HTTP 接口文档和用户友好版设计文档同步说明。原始《SDK设计文档》保持不动。
+- Python Wheel 版本从 `0.7.0` 升级为 `0.8.0`。
+
+### 验证内容
+
+- Python `compileall` 和全量测试通过（`62 passed`）；新增测试覆盖多能力逐项签发、混合已有 VC 与即时 VC、自动读取本地 Agent 名称、参数校验、签名验签及能力篡改拒绝。
+- 使用真实 `/root/lpx/cert/third-party/private-key.pem` 生成 `robot-control` VC，并用对应 `public-key.pem` 成功验签；`certificate_signing.py demo` 的三方能力 IDM VC 验签同时通过。
+- `agent_connect_sdk-0.8.0-py3-none-any.whl` 通过 `twine check`，独立虚拟环境安装显示版本 `0.8.0`，`agent-sdk-self-check` 输出 `FULL FLOW DEMO PASSED`。
+- Wheel 逐文件扫描确认不包含三方私钥或任何 PEM 私钥边界；交付 Wheel SHA-256 为 `49025fab35b4ac18507b311c050adb58790bb3a6c58718e31ea7b4620c62e32d`。
+- 本地 HTTP 接口文档的 19 个 JSON 示例和用户友好版设计文档的 3 个 JSON 示例均通过标准解析；原始《SDK设计文档》SHA-256 仍为 `d2509f323338d0cdb948ceff36e32c3ae71d59c646916b687168b4c2e862947b`。
+
 ## 2026-08-20 — 将设备签名和核心网验签收敛为 SDK 内建能力
 
 ### 修改原因

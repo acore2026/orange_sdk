@@ -22,6 +22,12 @@ HTTPS/HTTP/3 外，SDK 与 AgentRuntime、对端 Agent 的接口统一使用 HTT
 Android AAR 已包含真实的 ARM64 `libmasque_core.so`，不再要求客户另行提供
 Native Core。
 
+Linux/Python 的 `register_capabilities()` 默认接收已经签发的 VC。封闭联调时
+也可传 `capabilities=[...]`，SDK 会从外部
+`~/lpx/cert/third-party/private-key.pem` 读取测试机构 P-256 私钥，为每个能力
+生成一张 IDM 兼容的 `CapabilityCredential` 后放入既有 `vc_list`。测试机构
+私钥不会打包进 Wheel；正式环境仍应传入外部认证机构签发好的 VC。
+
 核心网主动下行不再反向 POST 到端侧。Linux/Android SDK 初始化时主动连接
 `/v1/acn/downlink-websocket`，WebSocket 握手与主动上行 REST 接口使用同一
 AgentRuntime IP 和端口；本地 HTTP Server 只保留 Agent 间 `/A2A/message`。

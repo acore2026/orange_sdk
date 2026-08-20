@@ -9,8 +9,10 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+from .capability_vc import issue_test_capability_vcs
 from .config import SdkConfig
 from .contracts import (
     ConnectIpTransport,
@@ -719,12 +721,49 @@ class AgentSdk:
 
     @logged_async
     async def register_capabilities(
-        self, agent_id: str, priority: int, credentials: Sequence[Mapping[str, Any]]
+        self,
+        agent_id: str,
+        priority: int,
+        credentials: Sequence[Mapping[str, Any]] | None = None,
+        *,
+        capabilities: Sequence[str] | None = None,
+        agent_name: str | None = None,
+        test_vc_private_key_path: str | Path | None = None,
     ) -> OperationResult:
+        vc_list = list(credentials or ())
+        if capabilities is not None:
+            resolved_agent_name = agent_name
+            if (
+                resolved_agent_name is None
+                and self._profile is not None
+                and self._profile.agent_id == agent_id
+            ):
+                resolved_agent_name = self._profile.agent_name
+            if resolved_agent_name is None:
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "agent_name is required when raw capabilities are published "
+                    "without a matching local profile",
+                    field="agent_name",
+                )
+            vc_list.extend(
+                issue_test_capability_vcs(
+                    agent_id=agent_id,
+                    agent_name=resolved_agent_name,
+                    capabilities=capabilities,
+                    private_key_path=test_vc_private_key_path,
+                )
+            )
+        if not vc_list:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "credentials or capabilities must contain at least one item",
+                field="credentials",
+            )
         path = "/arf/v1/agent-cards"
         body = await self._authenticate_control_request(
             path,
-            {"agent_id": agent_id, "priority": priority, "vc_list": list(credentials)},
+            {"agent_id": agent_id, "priority": priority, "vc_list": vc_list},
         )
         return await self._operation(
             "POST",

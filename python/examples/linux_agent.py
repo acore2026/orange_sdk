@@ -163,6 +163,8 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
         profile.agent_id,
         priority=args.priority,
         credentials=[profile.identity_vc, ability.ability_vc],
+        capabilities=args.test_capability,
+        test_vc_private_key_path=args.test_third_party_private_key,
     )
     print("[5 register_capabilities]", registered.success)
 
@@ -300,6 +302,22 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--tun-name", default="agent_tun0")
     value.add_argument("--tun-mtu", type=int, default=1280)
     value.add_argument("--priority", type=int, default=1)
+    value.add_argument(
+        "--test-capability",
+        action="append",
+        help=(
+            "lab only: issue and publish one third-party VC for this raw "
+            "capability; repeat the option for multiple capabilities"
+        ),
+    )
+    value.add_argument(
+        "--test-third-party-private-key",
+        default="~/lpx/cert/third-party/private-key.pem",
+        help=(
+            "lab-only P-256 issuer private key; read only when "
+            "--test-capability is present"
+        ),
+    )
     value.add_argument("--update-skill", default="camera")
     value.add_argument("--task-id", default="linux-sdk-full-flow")
     value.add_argument("--task-description", default="find a text-capable peer")

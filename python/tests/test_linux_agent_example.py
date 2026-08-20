@@ -65,9 +65,14 @@ def test_linux_agent_parser_accepts_full_flow_values():
             "https://192.168.3.10:4433/.well-known/masque/ip",
             "--message",
             '{"type":"text","content":"hello"}',
+            "--test-capability",
+            "robot-control",
+            "--test-capability",
+            "voice",
         ]
     )
     assert arguments.message == {"type": "text", "content": "hello"}
+    assert arguments.test_capability == ["robot-control", "voice"]
     assert arguments.keep_identity is False
 
 
@@ -91,6 +96,8 @@ async def test_linux_agent_full_flow_executes_every_business_api():
             "owner-a",
             "--masque-url",
             "https://192.168.3.10:4433/.well-known/masque/ip",
+            "--test-capability",
+            "robot-control",
         ]
     )
     profile = SimpleNamespace(
@@ -134,6 +141,12 @@ async def test_linux_agent_full_flow_executes_every_business_api():
     await module.run_full_flow(sdk, args)
 
     sdk.set_local_profile_for_restore.assert_called_once_with(profile)
+    assert sdk.register_capabilities.await_args.kwargs == {
+        "priority": 1,
+        "credentials": [profile.identity_vc, ability.ability_vc],
+        "capabilities": ["robot-control"],
+        "test_vc_private_key_path": "~/lpx/cert/third-party/private-key.pem",
+    }
     for method_name in (
         "init",
         "apply_identity",
