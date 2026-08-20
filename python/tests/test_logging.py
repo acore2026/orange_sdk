@@ -18,7 +18,7 @@ async def test_public_function_entry_exit_error_and_redaction(sdk_fixture):
     await sdk.apply_identity(
         "Alice",
         "Agent A",
-        "sensitive-public-key",
+        description="ordinary-description",
         metadata={"access_token": "nested-secret-token"},
     )
     try:
@@ -31,9 +31,10 @@ async def test_public_function_entry_exit_error_and_redaction(sdk_fixture):
     assert '"event":"function_exit","function":"apply_identity"' in text
     assert '"event":"function_error","function":"send_message"' in text
     assert '"duration_ms":' in text
-    assert '"public_key":"[REDACTED]"' in text
+    # The SDK-generated public key is added below the northbound function
+    # boundary and is never accepted from or logged as an application argument.
+    assert '"public_key"' not in text
     assert '"access_token":"[REDACTED]"' in text
-    assert "sensitive-public-key" not in text
     assert "nested-secret-token" not in text
     assert "vc-a" not in text
 

@@ -61,8 +61,6 @@ def test_linux_agent_parser_accepts_full_flow_values():
             "Agent A",
             "--owner",
             "owner-a",
-            "--identity-public-key",
-            "did:key:test",
             "--masque-url",
             "https://192.168.3.10:4433/.well-known/masque/ip",
             "--message",
@@ -91,8 +89,6 @@ async def test_linux_agent_full_flow_executes_every_business_api():
             "Agent A",
             "--owner",
             "owner-a",
-            "--identity-public-key",
-            "did:key:test",
             "--masque-url",
             "https://192.168.3.10:4433/.well-known/masque/ip",
         ]

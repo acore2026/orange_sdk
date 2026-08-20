@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
 import json
 import httpx
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from agent_sdk import AgentSdkError, ErrorCode
 from agent_sdk.runtime import HttpRuntimeTransport
@@ -15,17 +18,19 @@ async def test_identity_uses_raw_request_and_vc0_response(sdk_fixture):
     profile = await sdk.apply_identity(
         "Alice",
         "AliceAgent",
-        "public-key",
         "AgentModel-X",
         {"os": "Linux"},
     )
 
     method, path, body = runtime.requests[-1]
     assert (method, path) == ("POST", "/idm/v1/identity-applications")
+    public_key = serialization.load_der_public_key(base64.b64decode(body["public_key"]))
+    assert isinstance(public_key, ec.EllipticCurvePublicKey)
+    assert isinstance(public_key.curve, ec.SECP256R1)
     assert body == {
         "owner": "Alice",
         "name": "AliceAgent",
-        "public_key": "public-key",
+        "public_key": body["public_key"],
         "description": "AgentModel-X",
         "metadata": {"os": "Linux"},
         "timestamp": "2026-08-19T00:00:00Z",

@@ -124,6 +124,10 @@ class OkHttpRuntimeTransportTest {
             override fun onMessage(webSocket: WebSocket, text: String) {
                 responses.put(text)
             }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                webSocket.close(code, reason)
+            }
         }))
         server.start()
         val transport = OkHttpRuntimeTransport(server.hostName, server.port)

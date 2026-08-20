@@ -32,6 +32,15 @@ certificate and private key under the app's `noBackupFilesDir/agent-sdk/tls`;
 the directory uses `0700` and key files use `0600`. Applications never pass
 certificate or key parameters to `initialize`.
 
+On the first `initialize`, the SDK also creates a separate P-256 message-signing
+key in Android Keystore under alias `agent-sdk-device-signing-v1`. The private
+key is non-exportable. Identity registration automatically sends its Base64
+SubjectPublicKeyInfo public key; control-plane and A2A messages are signed by
+the SDK. The AAR embeds the pinned core-network P-256 public key and uses it to
+verify `acf_group_config.proof`; peer A2A messages are verified with the
+`did_key` from that verified group snapshot. Applications do not supply proof
+verifiers, authenticators, signers, public keys, or private keys.
+
 Only the MASQUE URL uses HTTPS/HTTP/3. Health checks, endpoint registration and
 all other AgentRuntime calls use HTTP. During `initialize`, the SDK opens
 `/v1/acn/downlink-websocket` on the same AgentRuntime host and port used by the
@@ -65,8 +74,6 @@ The application does not provide an Agent TUN IP. During `initialize`, the SDK
 calls `POST /sdk/v1/endpoints`; AgentRuntime returns `ue_ip` and
 `ue_prefix_length`, and the SDK validates that assignment before creating the
 VPN TUN. The returned CIDR is available as `SdkInitResult.agentTunCidr`.
-
-The included demo proof verifier is not suitable for production.
 
 Core-network downlink frames use `kind + request_id + message_type +
 transaction_id + payload`. Each frame is handled in its own coroutine, so

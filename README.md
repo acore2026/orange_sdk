@@ -15,9 +15,12 @@
 
 当前封闭内测构建保留 MASQUE TLS 1.3 加密，但关闭服务端证书链和名称校验；
 连接时会记录明确的安全警告。SDK 首次启动仍会在端侧私有目录生成并复用
-自己的 Ed25519 客户端证书/私钥。除 MASQUE 的 HTTPS/HTTP/3 外，SDK 与
-AgentRuntime、对端 Agent 的接口统一使用 HTTP。Android AAR 已包含真实的
-ARM64 `libmasque_core.so`，不再要求客户另行提供 Native Core。
+自己的 Ed25519 MASQUE 客户端证书/私钥；同时生成独立的 P-256 消息签名
+密钥。控制面和 A2A 消息由 SDK 自动签名，核心网群组配置使用 AAR/Wheel
+内预置的核心网 P-256 公钥验签，应用不配置密钥或安全回调。除 MASQUE 的
+HTTPS/HTTP/3 外，SDK 与 AgentRuntime、对端 Agent 的接口统一使用 HTTP。
+Android AAR 已包含真实的 ARM64 `libmasque_core.so`，不再要求客户另行提供
+Native Core。
 
 核心网主动下行不再反向 POST 到端侧。Linux/Android SDK 初始化时主动连接
 `/v1/acn/downlink-websocket`，WebSocket 握手与主动上行 REST 接口使用同一

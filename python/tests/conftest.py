@@ -321,11 +321,11 @@ async def sdk_fixture(tmp_path):
         return tun
 
     sdk = AgentSdk(
-        proof_verifier=proof,
-        control_request_authenticator=FakeControlRequestAuthenticator(),
+        _proof_verifier=proof,
+        _control_request_authenticator=FakeControlRequestAuthenticator(),
         peer_messenger=messenger,
-        message_signature_verifier=signature_verifier,
-        message_signer=FakeMessageSigner(),
+        _message_signature_verifier=signature_verifier,
+        _message_signer=FakeMessageSigner(),
         tun_factory=tun_factory,
         masque_factory=lambda config: masque,
         runtime_factory=lambda host, port: runtime,

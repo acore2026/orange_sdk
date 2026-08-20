@@ -7,12 +7,6 @@ from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 from agent_sdk import AgentSdk, NetworkMessageAction, NetworkMessageType
-from agent_sdk.security import (
-    DemoAcceptAllProofVerifier,
-    DemoControlRequestAuthenticator,
-    DemoMessageSignatureVerifier,
-    DemoMessageSigner,
-)
 
 
 class NetworkListener:
@@ -148,7 +142,6 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
     profile = await sdk.apply_identity(
         owner=args.owner,
         name=args.agent_name,
-        public_key=args.identity_public_key,
         description=args.description,
         metadata={"platform": "Linux", "example": "linux_agent.py"},
     )
@@ -274,15 +267,8 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
 
 
 async def main(args) -> None:
-    print(
-        "WARNING: Demo proof/signature and media implementations are for API "
-        "integration only; replace them before production."
-    )
+    print("SDK uses its persistent device key and embedded core-network public key.")
     sdk = AgentSdk(
-        proof_verifier=DemoAcceptAllProofVerifier(),
-        control_request_authenticator=DemoControlRequestAuthenticator(),
-        message_signer=DemoMessageSigner(),
-        message_signature_verifier=DemoMessageSignatureVerifier(),
         media_offload_adapter=ExampleMediaOffloadAdapter(),
     )
     unregister_network = sdk.register_network_message_listener(NetworkListener())
@@ -308,7 +294,6 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--agent-id", help="optional expected ID returned by apply_identity")
     value.add_argument("--agent-name", required=True)
     value.add_argument("--owner", required=True)
-    value.add_argument("--identity-public-key", required=True)
     value.add_argument("--description", default="Linux Agent SDK full-flow example")
     value.add_argument("--masque-url", required=True)
     value.add_argument("--masque-token")

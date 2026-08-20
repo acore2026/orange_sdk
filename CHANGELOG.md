@@ -2,6 +2,33 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-20 — 将设备签名和核心网验签收敛为 SDK 内建能力
+
+### 修改原因
+
+- Python 真实示例要求用户传入 `proof_verifier`、`control_request_authenticator`、`message_signer` 和 `message_signature_verifier`，其中 Demo 实现只检查字段存在或返回假签名，既不安全也不符合“SDK 封装消息防篡改”的北向目标。
+- 身份申请还要求用户传公钥，但设备公私钥应由 SDK 第一次启动时生成并稳定复用；核心网下发群组配置应直接使用固定核心网公钥验签，不应要求客户自行接安全插件。
+- Android 原实现同样依赖 Demo 安全对象，而且控制面请求尚未统一补真实时间戳和签名。
+
+### 修改方式
+
+- Python 首次 `init()` 在 `$XDG_STATE_HOME/agent-sdk/security` 或 `~/.local/state/agent-sdk/security` 生成 P-256 设备公私钥，目录和密钥文件权限固定为 `0700/0600`；后续启动复用并校验公私钥匹配。Android 在不可导出的 Android Keystore 条目 `agent-sdk-device-signing-v1` 中生成并复用 P-256 私钥。
+- Python Wheel 和 Android AAR 预置 `/root/lpx/cert/core-network/public-key.pem` 的同一 P-256 公钥；没有复制核心网私钥。`acf_group_config.proof` 先用固定核心网公钥验签，通过后才允许缓存成员和提交动态路由。
+- `apply_identity/applyIdentity` 删除北向公钥参数，SDK 自动将本机设备公钥编码为 Base64 DER SubjectPublicKeyInfo 并填入原始 HTTP `public_key` 字段。Python 真实示例删除 `--identity-public-key` 和四个 Demo 安全对象；Android 用户入口收敛为 `AgentSdk.create(service)`。
+- 控制面旧式 `signature` 使用 P-256 ECDSA + SHA-256、ASN.1 DER + 标准 Base64；`proof.jws` 和 A2A 消息使用 ES256、RFC 7797 `b64=false` 分离 JWS。签名原文采用字段名排序、无多余空白的 UTF-8 JSON，并覆盖业务字段、时间戳和 proof 元数据。
+- A2A 入站继续只使用已验签群组快照中的发送方 P-256 `did:key` 验签；出站自动使用本机设备私钥签名。安全 SPI 从 Android 公共入口移为内部实现，Python 顶层包不再导出 `ControlRequestAuthenticator`，测试覆盖使用下划线内部注入点。
+- Android 控制面同步接入内建认证，并在端侧直接解析 AgentRuntime 原样透传的 `vc0`、`vc1`、`result[].agent_card` 和嵌套 `target_agents + group_config`，不要求 Runtime 做字段改名或展平。
+- Python Wheel 版本从 `0.6.0` 升级为 `0.7.0`。根 README、Python/Android 客户指南及本地 HTTP 接口文档、用户友好版设计文档同步新的密钥生命周期和调用方式；原始《SDK设计文档》保持不动。
+
+### 验证内容
+
+- Python 新增设备密钥首次生成/稳定复用/权限、控制面真实签名、A2A `did:key` 验签、核心网固定公钥验签和篡改拒绝测试；`compileall` 与全量测试通过（`58 passed`）。
+- Android 新增软件 P-256 后端单元测试，覆盖控制面签名、A2A 分离 JWS、核心网固定公钥验签和篡改拒绝；JVM 单元测试 `17 tests / 0 failures / 0 errors`，Release AAR 和 example Debug APK 构建成功。
+- `agent_connect_sdk-0.7.0-py3-none-any.whl` 通过 `twine check`，独立安装显示版本 `0.7.0`，`agent-sdk-self-check` 输出 `FULL FLOW DEMO PASSED`，首次初始化实际生成两个权限为 `0600` 的设备签名密钥文件。
+- Wheel 和 AAR 私钥材料扫描均为 clean；Wheel/AAR 包含相同的 `core-network-public-key.pem`，其源文件 SHA-256 均为 `c1f6cff8bd6d29225ffe7b7c7c3877471355b5d13db7882132a6f33456312d38`。
+- 交付物 SHA-256：Wheel `6a20473d8b9132b85a0ec51543718777e46fb696f22fd350ede067b6a11d880b`，Release AAR `9fc517c7e786e3d426e9eeed65e234102f86c670c1978bfe67034c7f67d93b90`，example APK `92b947a6ea755b97c2e794cae61bc629da562d8dc17a5d2023d15fab507ecb45`。
+- HTTP 接口文档的 19 个 JSON 示例和用户友好版设计文档的 3 个 JSON 示例全部通过标准解析；原始《SDK设计文档》SHA-256 仍为 `d2509f323338d0cdb948ceff36e32c3ae71d59c646916b687168b4c2e862947b`。
+
 ## 2026-08-20 — 核心网主动下行改为同端口 WebSocket
 
 ### 修改原因

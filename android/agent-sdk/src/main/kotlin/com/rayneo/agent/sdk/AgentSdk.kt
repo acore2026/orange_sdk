@@ -14,11 +14,14 @@ import com.rayneo.agent.sdk.model.NetworkMessageType
 import com.rayneo.agent.sdk.model.OffloadingSession
 import com.rayneo.agent.sdk.model.OperationResult
 import com.rayneo.agent.sdk.model.SdkInitResult
+import com.rayneo.agent.sdk.security.AndroidDeviceSecurity
 import com.rayneo.agent.sdk.security.RejectUnconfiguredMessageSigner
 import com.rayneo.agent.sdk.security.RejectUnconfiguredMessageSignatureVerifier
 import com.rayneo.agent.sdk.security.RejectUnconfiguredProofVerifier
 import com.rayneo.agent.sdk.server.TcpJsonLocalServer
 import com.rayneo.agent.sdk.transport.GroupMessageListener
+import com.rayneo.agent.sdk.transport.ControlRequestAuthenticator
+import com.rayneo.agent.sdk.transport.DevicePublicKeyProvider
 import com.rayneo.agent.sdk.transport.LocalServer
 import com.rayneo.agent.sdk.transport.MediaOffloadAdapter
 import com.rayneo.agent.sdk.transport.MasqueConfiguration
@@ -54,10 +57,12 @@ import java.net.URI
 import java.time.Instant
 import java.util.UUID
 
-class AgentSdk(
+class AgentSdk internal constructor(
     private val tunnelController: TunnelController,
     private val masqueTransport: MasqueTransport,
     private val proofVerifier: ProofVerifier = RejectUnconfiguredProofVerifier(),
+    private val controlRequestAuthenticator: ControlRequestAuthenticator? = null,
+    private val devicePublicKeyProvider: DevicePublicKeyProvider? = null,
     private val messageSigner: MessageSigner = RejectUnconfiguredMessageSigner,
     private val messageSignatureVerifier: MessageSignatureVerifier = RejectUnconfiguredMessageSignatureVerifier,
     private val peerMessenger: PeerMessenger = OkHttpPeerMessenger(),
@@ -120,6 +125,7 @@ class AgentSdk(
         this.localUdpPort = localUdpPort
         state = State.INITIALIZING
         try {
+            devicePublicKeyProvider?.ensure()
             runtime = runtimeFactory(agentRuntimeIp, agentRuntimePort).also { transport ->
                 transport.connect()
             }
@@ -311,22 +317,30 @@ class AgentSdk(
     suspend fun applyIdentity(
         owner: String,
         name: String,
-        publicKey: String,
         description: String = "",
         metadata: JsonObject = buildJsonObject { },
     ): AgentProfile {
         requireReady()
-        val response = runtime!!.request("POST", "/idm/v1/identity-applications", buildJsonObject {
+        val publicKey = devicePublicKeyProvider?.publicKeyBase64
+            ?: throw AgentSdkException(
+                ErrorCode.SIGNATURE_ERROR,
+                "SDK device signing identity is unavailable",
+            )
+        val path = "/idm/v1/identity-applications"
+        val response = runtime!!.request("POST", path, authenticateControl(path, buildJsonObject {
             put("owner", owner)
             put("name", name)
             put("public_key", publicKey)
             put("description", description)
             put("metadata", metadata)
-        })
+        }))
+        val identityVc = response["vc0"] as? JsonObject ?: buildJsonObject { }
+        val responseName = (identityVc["claims"] as? JsonObject)
+            ?.get("agent_name")?.jsonPrimitive?.contentOrNull ?: name
         return AgentProfile(
             agentId = response.requireString("agent_id"),
-            agentName = response["agent_name"]?.jsonPrimitive?.contentOrNull ?: name,
-            identityVc = response["identity_vc"] as? JsonObject ?: buildJsonObject { },
+            agentName = responseName,
+            identityVc = identityVc,
         ).also { profile = it }
     }
 
@@ -334,25 +348,31 @@ class AgentSdk(
         profile = restored
     }
 
-    suspend fun deregisterIdentity(agentId: String, reason: String = ""): OperationResult =
+    suspend fun deregisterIdentity(agentId: String, reason: String = "retired"): OperationResult =
         operation("POST", "/acn-agent/v1/agent-deletions", buildJsonObject {
             put("agent_id", agentId)
             put("reason", reason)
         }).also { if (profile?.agentId == agentId) profile = null }
 
-    suspend fun getNetworkAbility(agentId: String, intent: String = ""): NetworkAbility {
+    suspend fun getNetworkAbility(
+        agentId: String,
+        intent: String = "Get Network Ability VC",
+    ): NetworkAbility {
         requireReady()
-        val response = runtime!!.request("POST", "/idm/v1/network-ability", buildJsonObject {
+        val path = "/idm/v1/network-ability"
+        val response = runtime!!.request("POST", path, authenticateControl(path, buildJsonObject {
             put("agent_id", agentId)
             put("intent", intent)
-        })
-        val abilities = (response["abilities"] as? JsonArray)
+        }))
+        val abilityVc = response["vc1"] as? JsonObject ?: buildJsonObject { }
+        val claims = abilityVc["claims"] as? JsonObject
+        val abilities = (claims?.get("abilities") as? JsonArray)
             ?.mapNotNull { it.jsonPrimitive.contentOrNull }
             ?: emptyList()
         return NetworkAbility(
-            response["ability_vc"] as? JsonObject ?: buildJsonObject { },
+            abilityVc,
             abilities,
-            response["valid_until"]?.jsonPrimitive?.contentOrNull?.let(Instant::parse),
+            abilityVc["valid_until"]?.jsonPrimitive?.contentOrNull?.let(Instant::parse),
         )
     }
 
@@ -385,22 +405,24 @@ class AgentSdk(
         maxResults: Int = 10,
     ): List<DiscoveredAgent> {
         requireReady()
-        val response = runtime!!.request("POST", "/arf/v1/agent-discoveries", buildJsonObject {
+        val path = "/arf/v1/agent-discoveries"
+        val response = runtime!!.request("POST", path, authenticateControl(path, buildJsonObject {
             put("task_id", taskId)
             put("agent_id", agentId)
             put("task_description", taskDescription)
             put("required_skills", buildJsonArray { requiredSkills.forEach { add(JsonPrimitive(it)) } })
             put("discovery_scope", discoveryScope)
             put("max_results", maxResults)
-        })
-        return (response["agents"] as? JsonArray).orEmpty().map { element ->
+        }))
+        return (response["result"] as? JsonArray).orEmpty().map { element ->
             val item = element.jsonObject
+            val card = item["agent_card"]?.jsonObject ?: buildJsonObject { }
             DiscoveredAgent(
-                agentId = item.requireString("agent_id"),
-                ip = item["ip"]?.jsonPrimitive?.contentOrNull ?: "",
-                tcpPort = item["tcp_port"]?.jsonPrimitive?.intOrNull ?: 0,
-                udpPort = item["udp_port"]?.jsonPrimitive?.intOrNull ?: 0,
-                skills = (item["skills"] as? JsonArray).orEmpty().map { it.jsonPrimitive.content },
+                agentId = card.requireString("agent_id"),
+                ip = card["agent_ip"]?.jsonPrimitive?.contentOrNull ?: "",
+                tcpPort = card["tcp_port"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
+                udpPort = card["udp_port"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
+                skills = (card["skills"] as? JsonArray).orEmpty().map { it.jsonPrimitive.content },
                 priority = item["priority"]?.jsonPrimitive?.intOrNull ?: 0,
             )
         }.sortedBy { it.priority }
@@ -414,13 +436,16 @@ class AgentSdk(
         maxMembers: Int = 10,
     ): GroupInfo {
         requireReady()
-        val response = runtime!!.request("POST", "/acf/v1/agents-grouping", buildJsonObject {
+        val path = "/acf/v1/agents-grouping"
+        val response = runtime!!.request("POST", path, authenticateControl(path, buildJsonObject {
             put("agent_id", agentId)
-            put("target_agent_ids", buildJsonArray { targetAgentIds.forEach { add(JsonPrimitive(it)) } })
-            put("group_name", groupName)
-            put("scope", scope)
-            put("max_members", maxMembers)
-        })
+            put("target_agents", buildJsonArray { targetAgentIds.forEach { add(JsonPrimitive(it)) } })
+            put("group_config", buildJsonObject {
+                put("group_name", groupName)
+                put("scope", scope)
+                put("max_members", maxMembers)
+            })
+        }))
         return GroupInfo(response.requireString("group_id"), groupName).also {
             groups[it.groupId] = it
         }
@@ -440,11 +465,12 @@ class AgentSdk(
                 "timeoutSeconds",
             )
         }
-        val response = runtime!!.request("POST", "/compute/v1/offloading-sessions", buildJsonObject {
+        val path = "/compute/v1/offloading-sessions"
+        val response = runtime!!.request("POST", path, authenticateControl(path, buildJsonObject {
             put("agent_id", agentId)
             put("task_type", taskType)
             sandboxId?.let { put("preferred_sandbox_id", it) }
-        })
+        }))
         var session = OffloadingSession(
             response.requireString("session_id"),
             response["sandbox_id"]?.jsonPrimitive?.contentOrNull ?: "",
@@ -528,12 +554,28 @@ class AgentSdk(
 
     private suspend fun operation(method: String, path: String, body: JsonObject): OperationResult {
         requireReady()
-        val response = runtime!!.request(method, path, body)
+        val response = runtime!!.request(method, path, authenticateControl(path, body))
         return OperationResult(
             response["success"]?.jsonPrimitive?.booleanOrNull ?: true,
             response["operation_id"]?.jsonPrimitive?.contentOrNull ?: "",
             response["message"]?.jsonPrimitive?.contentOrNull ?: "",
         )
+    }
+
+    private suspend fun authenticateControl(path: String, body: JsonObject): JsonObject {
+        val authentication = controlRequestAuthenticator?.authenticate(path, body)
+            ?: return body
+        val overlap = body.keys.intersect(authentication.keys)
+        if (overlap.isNotEmpty()) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "Control authenticator overwrote business fields: ${overlap.sorted()}",
+            )
+        }
+        return buildJsonObject {
+            body.forEach(::put)
+            authentication.forEach(::put)
+        }
     }
 
     private fun requireReady() {
@@ -578,22 +620,25 @@ class AgentSdk(
     companion object {
         fun create(
             vpnService: AgentVpnService,
-            proofVerifier: ProofVerifier,
-            messageSigner: MessageSigner = RejectUnconfiguredMessageSigner,
-            messageSignatureVerifier: MessageSignatureVerifier =
-                RejectUnconfiguredMessageSignatureVerifier,
             mediaOffloadAdapter: MediaOffloadAdapter? = null,
             peerMessenger: PeerMessenger = OkHttpPeerMessenger(),
             localServerFactory: () -> LocalServer = { TcpJsonLocalServer() },
-        ): AgentSdk = AgentSdk(
-            tunnelController = VpnTunnelController(vpnService),
-            masqueTransport = NativeMasqueTransport(NativeMasqueBridge(vpnService)),
-            proofVerifier = proofVerifier,
-            messageSigner = messageSigner,
-            messageSignatureVerifier = messageSignatureVerifier,
-            mediaOffloadAdapter = mediaOffloadAdapter,
-            peerMessenger = peerMessenger,
-            localServerFactory = localServerFactory,
-        )
+        ): AgentSdk {
+            val security = vpnService.resources.openRawResource(
+                R.raw.core_network_public_key
+            ).use(AndroidDeviceSecurity::create)
+            return AgentSdk(
+                tunnelController = VpnTunnelController(vpnService),
+                masqueTransport = NativeMasqueTransport(NativeMasqueBridge(vpnService)),
+                proofVerifier = security,
+                controlRequestAuthenticator = security,
+                devicePublicKeyProvider = security,
+                messageSigner = security,
+                messageSignatureVerifier = security,
+                mediaOffloadAdapter = mediaOffloadAdapter,
+                peerMessenger = peerMessenger,
+                localServerFactory = localServerFactory,
+            )
+        }
     }
 }

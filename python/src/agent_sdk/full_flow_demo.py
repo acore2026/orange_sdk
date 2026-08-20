@@ -311,10 +311,10 @@ async def run_demo(
         return tun
 
     sdk = AgentSdk(
-        proof_verifier=DemoAcceptAllProofVerifier(),
-        control_request_authenticator=DemoControlRequestAuthenticator(),
-        message_signer=DemoMessageSigner(),
-        message_signature_verifier=DemoMessageSignatureVerifier(),
+        _proof_verifier=DemoAcceptAllProofVerifier(),
+        _control_request_authenticator=DemoControlRequestAuthenticator(),
+        _message_signer=DemoMessageSigner(),
+        _message_signature_verifier=DemoMessageSignatureVerifier(),
         peer_messenger=peer_messenger,
         tun_factory=tun_factory,
         masque_factory=lambda config: masque,
@@ -346,7 +346,6 @@ async def run_demo(
         profile = await sdk.apply_identity(
             owner="demo-owner",
             name="Agent A",
-            public_key="did:key:local-demo",
             description="wheel installation self-check",
             metadata={"platform": "Linux"},
         )

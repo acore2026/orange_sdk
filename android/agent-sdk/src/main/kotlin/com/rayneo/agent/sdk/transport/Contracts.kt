@@ -5,15 +5,24 @@ import com.rayneo.agent.sdk.model.NetworkMessageType
 import com.rayneo.agent.sdk.model.OffloadingSession
 import kotlinx.serialization.json.JsonObject
 
-fun interface ProofVerifier {
+internal fun interface ProofVerifier {
     suspend fun verifyGroupConfig(payload: JsonObject)
 }
 
-interface MessageSigner {
+internal fun interface ControlRequestAuthenticator {
+    suspend fun authenticate(path: String, payload: JsonObject): JsonObject
+}
+
+internal interface DevicePublicKeyProvider {
+    fun ensure()
+    val publicKeyBase64: String
+}
+
+internal interface MessageSigner {
     suspend fun signA2a(payload: JsonObject): JsonObject
 }
 
-interface MessageSignatureVerifier {
+internal interface MessageSignatureVerifier {
     suspend fun verifyA2a(payload: JsonObject, expectedDidKey: String)
 }
 

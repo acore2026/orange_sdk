@@ -13,9 +13,6 @@ import com.rayneo.agent.sdk.AgentSdk
 import com.rayneo.agent.sdk.model.AgentProfile
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import com.rayneo.agent.sdk.model.NetworkMessageType
-import com.rayneo.agent.sdk.security.DemoAcceptAllProofVerifier
-import com.rayneo.agent.sdk.security.DemoMessageSignatureVerifier
-import com.rayneo.agent.sdk.security.DemoMessageSigner
 import com.rayneo.agent.sdk.transport.GroupMessageListener
 import com.rayneo.agent.sdk.transport.NetworkMessageListener
 import com.rayneo.agent.sdk.vpn.AgentVpnService
@@ -75,14 +72,7 @@ class MainActivity : Activity() {
             status.text = ExampleConfig.usage
             return
         }
-        // Demo verifier is for this lab application only. Production must inject
-        // the network trust-anchor-backed proof verifier.
-        val value = AgentSdk.create(
-            service,
-            DemoAcceptAllProofVerifier(),
-            DemoMessageSigner,
-            DemoMessageSignatureVerifier,
-        )
+        val value = AgentSdk.create(service)
         value.restoreLocalProfile(
             AgentProfile(config.agentId, config.agentName, buildJsonObject { })
         )

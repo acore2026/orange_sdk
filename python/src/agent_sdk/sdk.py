@@ -57,10 +57,11 @@ from .rest_server import AiohttpLocalServer
 from .routes import GroupRouteManager, Pyroute2RouteBackend, RouteBackend
 from .runtime import HttpPeerMessenger, HttpRuntimeTransport
 from .security import (
-    RejectUnconfiguredControlRequestAuthenticator,
-    RejectUnconfiguredMessageSignatureVerifier,
-    RejectUnconfiguredMessageSigner,
-    RejectUnconfiguredProofVerifier,
+    CoreNetworkProofVerifier,
+    DeviceControlRequestAuthenticator,
+    DeviceMessageSigner,
+    DeviceSigningIdentityStore,
+    DidKeyMessageSignatureVerifier,
 )
 from .tun import LinuxTunDevice, validate_ip_packet
 
@@ -155,10 +156,10 @@ class AgentSdk:
     def __init__(
         self,
         *,
-        proof_verifier: ProofVerifier | None = None,
-        control_request_authenticator: ControlRequestAuthenticator | None = None,
-        message_signer: MessageSigner | None = None,
-        message_signature_verifier: MessageSignatureVerifier | None = None,
+        _proof_verifier: ProofVerifier | None = None,
+        _control_request_authenticator: ControlRequestAuthenticator | None = None,
+        _message_signer: MessageSigner | None = None,
+        _message_signature_verifier: MessageSignatureVerifier | None = None,
         peer_messenger: PeerMessenger | None = None,
         tun_factory: TunFactory | None = None,
         masque_factory: MasqueFactory | None = None,
@@ -170,14 +171,17 @@ class AgentSdk:
         self._logger = logging.getLogger(f"agent_sdk.client.{id(self)}")
         self._logger.propagate = False
         self._pending_logs: list[tuple[int, str, bool, dict[str, Any]]] = []
-        self._proof_verifier = proof_verifier or RejectUnconfiguredProofVerifier()
+        self._device_identity_store = DeviceSigningIdentityStore()
+        self._proof_verifier = _proof_verifier or CoreNetworkProofVerifier()
         self._control_request_authenticator = (
-            control_request_authenticator
-            or RejectUnconfiguredControlRequestAuthenticator()
+            _control_request_authenticator
+            or DeviceControlRequestAuthenticator(self._device_identity_store)
         )
-        self._message_signer = message_signer or RejectUnconfiguredMessageSigner()
+        self._message_signer = _message_signer or DeviceMessageSigner(
+            self._device_identity_store
+        )
         self._message_signature_verifier = (
-            message_signature_verifier or RejectUnconfiguredMessageSignatureVerifier()
+            _message_signature_verifier or DidKeyMessageSignatureVerifier()
         )
         self._peer_messenger = peer_messenger or HttpPeerMessenger(logger=self._logger)
         self._tun_factory = tun_factory or LinuxTunDevice.create
@@ -334,6 +338,9 @@ class AgentSdk:
                 log_max_bytes=log_max_bytes,
                 log_backup_count=log_backup_count,
             )
+            # The persistent P-256 identity is SDK-owned. It is generated on the
+            # first startup attempt and reused on subsequent startups.
+            self._device_identity_store.ensure()
             self._state = "INITIALIZING"
             self._runtime = self._runtime_factory(
                 agent_runtime_ip,
@@ -625,7 +632,6 @@ class AgentSdk:
         self,
         owner: str,
         name: str,
-        public_key: str,
         description: str = "",
         metadata: Mapping[str, Any] | None = None,
     ) -> AgentProfile:
@@ -637,7 +643,7 @@ class AgentSdk:
             {
                 "owner": owner,
                 "name": name,
-                "public_key": public_key,
+                "public_key": self._device_identity_store.ensure().public_key_base64,
                 "description": description,
                 "metadata": dict(metadata or {}),
             },

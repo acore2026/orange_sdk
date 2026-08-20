@@ -8,7 +8,7 @@ SDK 收到 AgentRuntime 透传的 `acf_group_config` 后，会自动缓存 `grou
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.6.0-py3-none-any.whl`：SDK wheel。
+- `agent_connect_sdk-0.7.0-py3-none-any.whl`：SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/masque-proxy.example.json`：服务器 MASQUE Proxy 配置模板。
@@ -41,7 +41,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.6.0-py3-none-any.whl
+dist/agent_connect_sdk-0.7.0-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -53,7 +53,7 @@ dist/agent_connect_sdk-0.6.0-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.6.0-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.7.0-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -68,14 +68,14 @@ agent-masque-proxy --help
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.6.0-py3-none-any.whl
+  ./agent_connect_sdk-0.7.0-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.6.0-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.7.0-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -311,6 +311,31 @@ grep -E '"event":"(http_error|function_error)"|"status_code":[45][0-9][0-9]' \
 
 `authorization`、token、密码、签名、`proof/jws`、公私钥、DID key、VC 和 credentials 会写成 `[REDACTED]`。业务消息结构和非敏感字段保留，便于定位问题。日志目录必须预先允许 SDK 进程写入；无法创建日志文件时，`init()` 返回 `LOG_SETUP_FAILED`。
 
+### 3.6 SDK 内建的消息签名和验签
+
+用户不配置密钥，也不实现安全回调。第一次 `init()` 会生成一套独立于
+MASQUE TLS 的 P-256 消息签名密钥：
+
+- 私钥：`$XDG_STATE_HOME/agent-sdk/security/device-private-key.pem`，未设置
+  `XDG_STATE_HOME` 时位于 `~/.local/state/agent-sdk/security/`。
+- 公钥：同目录 `device-public-key.pem`，身份申请时 SDK 自动转换成 Base64
+  DER SubjectPublicKeyInfo，填入 HTTP 请求的 `public_key`。
+- 目录权限为 `0700`，两个密钥文件权限为 `0600`；后续启动复用同一密钥。
+- 私钥不进入请求、返回值或日志。
+
+签名算法固定为 P-256 ECDSA + SHA-256。普通 `signature` 字段使用 ASN.1 DER
+签名后做标准 Base64；`proof.jws` 使用 `ES256`、RFC 7797 `b64=false` 的分离
+JWS。签名原文是字段名排序、无多余空白的 UTF-8 JSON，验签时排除
+`signature`、`signature_encoding` 和 `proof.jws`，其余业务字段和 proof 元数据
+均受签名保护。
+
+Wheel 只预置 `/root/lpx/cert/core-network/public-key.pem` 对应的核心网公钥，
+SPKI DER SHA-256 指纹为
+`86:D4:77:77:67:4E:79:77:88:A9:61:18:8A:C9:B8:A4:CD:34:DF:15:F4:61:FC:1C:E9:BA:89:D2:15:01:6C:CD`。
+核心网私钥不会进入 SDK。`acf_group_config` 必须携带
+`proof_purpose=assertionMethod` 的有效签名，否则 SDK 拒绝缓存成员和安装路由。
+A2A 收包则使用已验签群组配置中的发送方 P-256 `did:key` 验签。
+
 ## 4. 应用如何调用 SDK
 
 ### 4.1 创建 SDK 和注册监听器
@@ -332,17 +357,15 @@ class GroupListener:
         print("收到消息", group_id, sender_agent_id, payload)
 
 
-sdk = AgentSdk(
-    proof_verifier=my_group_config_verifier,
-    control_request_authenticator=my_control_authenticator,
-    message_signer=my_message_signer,
-    message_signature_verifier=my_message_verifier,
-)
+sdk = AgentSdk()
 sdk.register_network_message_listener(NetworkListener())
 sdk.register_group_message_listener(GroupListener())
 ```
 
-四个安全对象必须由部署方接入真实密钥和信任根。SDK 默认采用拒绝策略；`Demo*` 实现只能用于离线示例和联调环境。
+应用不传入签名器、验签器或私钥。首次 `init()` 时 SDK 自动生成 P-256
+设备密钥并持久化；之后控制面请求和 A2A 消息都复用该私钥签名。核心网下发
+的 `acf_group_config.proof` 使用 Wheel 内置的核心网 P-256 公钥验签，对端
+A2A 消息使用已验签群组配置中的 `did_key` 验签。
 
 ### 4.2 身份、能力、发现和建群
 
@@ -350,7 +373,6 @@ sdk.register_group_message_listener(GroupListener())
 profile = await sdk.apply_identity(
     owner="customer-a",
     name="Agent A",
-    public_key="did:key:...",
     description="RayNeo edge agent",
     metadata={"platform": "Ubuntu"},
 )
@@ -498,7 +520,6 @@ sudo -E .venv/bin/python examples/linux_agent.py \
   --local-vlan-ip 192.168.1.10 \
   --agent-name 'Agent A' \
   --owner 'customer-a' \
-  --identity-public-key 'did:key:z6Mk...' \
   --masque-url https://192.168.3.10:4433/.well-known/masque/ip \
   --masque-token 'replace-with-secret-for-device-a' \
   --required-skill text \
@@ -509,10 +530,10 @@ sudo -E .venv/bin/python examples/linux_agent.py \
   --log-level INFO
 ```
 
-`--identity-public-key` 是身份申请接口使用的 DID/消息签名公钥，与 SDK 自动
-生成的 MASQUE TLS 客户端密钥不是同一用途。`--target-agent-id` 省略时使用
-发现结果的第一项；建群后脚本会等待 AgentRuntime 下发 `acf_group_config`，
-不会让用户填写对端 IP 或端口。
+身份申请的 `public_key` 由 SDK 从本地 P-256 设备密钥自动导出，命令行不再
+接收公钥或私钥。该设备签名密钥与 MASQUE TLS 客户端密钥用途独立。
+`--target-agent-id` 省略时使用发现结果的第一项；建群后脚本会等待
+AgentRuntime 下发 `acf_group_config`，不会让用户填写对端 IP 或端口。
 
 为保证示例能够实际执行所有媒体函数，文件内置了明确标记为 example-only
 的 `ExampleMediaOffloadAdapter`；它不读取真实摄像头，也不代表真实 WebRTC
@@ -520,9 +541,7 @@ sudo -E .venv/bin/python examples/linux_agent.py \
 
 该全流程默认注销本次申请的身份。需要保留身份时传 `--keep-identity`，并把
 验证后的 `AgentProfile` 安全持久化；传 `--stay-running` 可在流程完成后继续
-接收消息。脚本中的 `DemoAcceptAllProofVerifier`、
-`DemoControlRequestAuthenticator` 和 `DemoMessageSigner` 也仅为联调占位，
-生产发布前必须替换为真实签名和验签实现。
+接收消息。签名和验签全部由 SDK 内部执行。
 
 ## 6. 函数清单
 
