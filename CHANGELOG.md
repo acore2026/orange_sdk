@@ -2,6 +2,27 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-21 — 新增 Proof 生成与校验独立说明
+
+### 修改原因
+
+- 双摘要签名输入已经在 Python 和 Android SDK 中落地，但 README 只给出了公式，无法独立支持 AgentRuntime、核心网和其他 Agent 开发者完成逐字节联调。
+- 需要明确区分 proof 生成规则、可信公钥选择和上层时间/重放策略，避免接入方从未验签消息的 `verification_method` 自选公钥，或误以为基础验签函数已经完成全部业务授权和防重放。
+- 现有消息字段固定为 snake_case，规范化采用项目排序紧凑 JSON；文档需要明确它是 ACN 兼容 Profile，而不是把当前实现误写成采用 URDNA2015/camelCase 的完整 W3C JsonWebSignature2020。
+
+### 修改方式
+
+- 新增《Agent SDK Proof 生成与校验说明》，分别说明适用范围、proof 五个字段、设备密钥生命周期、三类消息的信任锚、待签业务文档、proofOptions、JSON 规范化、`proofHash || documentHash`、RFC 7797 分离 JWS、ES256 `r || s` 编码和验签步骤。
+- 文档提供跨平台黄金向量、控制面请求的 `request_id` 排除规则、群组配置与 A2A 的验签公钥来源、生成/校验伪代码、常见对接错误和 Python/Android 实现位置。
+- 如实记录当前兼容和安全边界：无句点 `jws` 的历史 DER Base64 验签分支仍存在；基础 proof 验签只要求 `created` 非空，不负责绝对时间窗、重放缓存或业务授权。
+- 根 README 增加该文档入口；SDK 代码、线上字段、签名字节和版本号均未修改。
+
+### 验证内容
+
+- 文档中的 8 个 JSON 代码块全部通过标准 JSON 解析。
+- 按文档重新计算的 `proofHash` 为 `1a96f0c94b92eaa51b8fb1de55b1842584e66a24be9af373507bd956581ab0b3`，`documentHash` 为 `31126a50a843b70e3b740f33884f6d0dc38054a942753600f9546c10a67122c1`，拼接结果为 64 字节，与 Python/Android 自动测试黄金向量一致。
+- `git diff --check` 通过；本次仅修改 Markdown，无需重新构建 Wheel、AAR 或 APK。
+
 ## 2026-08-21 — proof 签名改为 proof 与业务文档双摘要拼接
 
 ### 修改原因
