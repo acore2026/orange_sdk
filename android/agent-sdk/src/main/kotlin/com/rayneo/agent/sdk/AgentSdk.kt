@@ -54,8 +54,9 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.coroutines.withTimeout
-import java.net.URI
 import java.io.File
+import java.net.InetAddress
+import java.net.URI
 import java.time.Instant
 import java.util.UUID
 
@@ -97,6 +98,7 @@ class AgentSdk internal constructor(
         localVlanIp: String,
         localTcpPort: Int,
         localUdpPort: Int,
+        agentTunCidr: String,
         masqueServerUrl: String,
         masqueAuthorization: String? = null,
         tunMtu: Int = 1280,
@@ -124,21 +126,17 @@ class AgentSdk internal constructor(
                 "masqueServerUrl",
             )
         }
+        val normalizedTun = normalizeAgentTunCidr(agentTunCidr)
+        this.agentTunCidr = normalizedTun.first
+        this.agentTunIp = normalizedTun.second
         this.localTcpPort = localTcpPort
         this.localUdpPort = localUdpPort
         state = State.INITIALIZING
         try {
             devicePublicKeyProvider?.ensure()
-            runtime = runtimeFactory(agentRuntimeIp, agentRuntimePort).also { transport ->
-                transport.connect()
-            }
-            val registration = runtime!!.registerEndpoint(
-                localVlanIp, localTcpPort, localUdpPort
-            )
-            this.agentTunCidr = registration.agentTunCidr
-            this.agentTunIp = registration.ueIp
+            runtime = runtimeFactory(agentRuntimeIp, agentRuntimePort)
             tunnelController.establish(
-                TunnelConfiguration(agentTunCidr, emptySet(), tunMtu)
+                TunnelConfiguration(this.agentTunCidr, emptySet(), tunMtu)
             )
             groupCache = GroupMemberCache(tunnelController)
             localServer = localServerFactory().also { server ->
@@ -156,7 +154,7 @@ class AgentSdk internal constructor(
                     serverUrl = masqueServerUrl,
                     authorization = masqueAuthorization,
                     localVlanIp = localVlanIp,
-                    agentTunCidr = agentTunCidr,
+                    agentTunCidr = this.agentTunCidr,
                     mtu = tunMtu,
                     identityDirectory = tunnelController.clientIdentityDirectory,
                 ),
@@ -171,7 +169,7 @@ class AgentSdk internal constructor(
                 localUdpEndpoint = "$localVlanIp:$localUdpPort",
                 agentTcpEndpoint = "$agentTunIp:$localTcpPort",
                 agentUdpEndpoint = "$agentTunIp:$localUdpPort",
-                agentTunCidr = agentTunCidr,
+                agentTunCidr = this.agentTunCidr,
                 masqueProxyEndpoint = masqueServerUrl,
             )
         } catch (error: Exception) {
@@ -650,6 +648,40 @@ class AgentSdk internal constructor(
         }
     }
 
+    private fun normalizeAgentTunCidr(value: String): Pair<String, String> {
+        val parts = value.split('/', limit = 2)
+        if (parts.size != 2) invalidAgentTunCidr()
+        val rawIp = parts[0]
+        val ipv4Candidate = IPV4_LITERAL.matches(rawIp)
+        val ipv6Candidate = rawIp.contains(':') &&
+            rawIp.all { it.isDigit() || it in ":abcdefABCDEF" }
+        if (!ipv4Candidate && !ipv6Candidate) invalidAgentTunCidr()
+        val address = try {
+            InetAddress.getByName(rawIp)
+        } catch (error: Exception) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "agentTunCidr must contain an IP literal and a valid prefix",
+                "agentTunCidr",
+                cause = error,
+            )
+        }
+        val expectedBytes = if (ipv4Candidate) 4 else 16
+        if (address.address.size != expectedBytes) invalidAgentTunCidr()
+        val maxPrefix = if (expectedBytes == 4) 32 else 128
+        val prefixLength = parts[1].toIntOrNull()?.takeIf { it in 0..maxPrefix }
+            ?: invalidAgentTunCidr()
+        val normalizedIp = address.hostAddress?.substringBefore('%')
+            ?: invalidAgentTunCidr()
+        return "$normalizedIp/$prefixLength" to normalizedIp
+    }
+
+    private fun invalidAgentTunCidr(): Nothing = throw AgentSdkException(
+        ErrorCode.INVALID_ARGUMENT,
+        "agentTunCidr must contain an IP literal and a valid prefix",
+        "agentTunCidr",
+    )
+
     private fun JsonObject.requireString(field: String): String =
         this[field]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
             ?: throw AgentSdkException(
@@ -659,6 +691,8 @@ class AgentSdk internal constructor(
             )
 
     companion object {
+        private val IPV4_LITERAL = Regex("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}")
+
         fun create(
             vpnService: AgentVpnService,
             mediaOffloadAdapter: MediaOffloadAdapter? = null,

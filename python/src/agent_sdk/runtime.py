@@ -5,7 +5,6 @@ import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from ipaddress import ip_address
 from typing import Any, Mapping
 
 import httpx
@@ -13,7 +12,7 @@ from aiohttp import ClientSession, ClientTimeout, ClientWebSocketResponse, WSMsg
 
 from .errors import AgentSdkError, ErrorCode
 from .logging_utils import log_event
-from .models import EndpointRegistration, NetworkMessageAction
+from .models import NetworkMessageAction
 
 
 DOWNLINK_WEBSOCKET_PATH = "/v1/acn/downlink-websocket"
@@ -26,12 +25,10 @@ class HttpRuntimeTransport:
         port: int,
         *,
         verify: bool | str = True,
-        endpoint_registration_path: str = "/sdk/v1/endpoints",
         timeout: float = 10.0,
         logger: logging.Logger | None = None,
     ) -> None:
         self._base_url = f"http://{host}:{port}"
-        self._registration_path = endpoint_registration_path
         self._timeout = timeout
         self._client = httpx.AsyncClient(
             base_url=self._base_url, verify=verify, timeout=timeout
@@ -52,99 +49,6 @@ class HttpRuntimeTransport:
             return response.json()
         except ValueError:
             return f"<non-json-response:{len(response.content)} bytes>"
-
-    async def connect(self) -> None:
-        request_id = uuid.uuid4().hex
-        log_event(
-            self._logger,
-            logging.INFO,
-            "http_request",
-            request_id=request_id,
-            direction="outbound",
-            peer="AgentRuntime",
-            method="GET",
-            url=f"{self._base_url}/health",
-            body=None,
-        )
-        try:
-            response = await self._client.get("/health")
-            log_event(
-                self._logger,
-                logging.INFO,
-                "http_response",
-                request_id=request_id,
-                direction="inbound",
-                peer="AgentRuntime",
-                method="GET",
-                url=f"{self._base_url}/health",
-                status_code=response.status_code,
-                body=self._response_body(response),
-            )
-        except httpx.HTTPStatusError:
-            return
-        except httpx.HTTPError as exc:
-            log_event(
-                self._logger,
-                logging.ERROR,
-                "http_error",
-                exc_info=True,
-                request_id=request_id,
-                direction="outbound",
-                peer="AgentRuntime",
-                method="GET",
-                url=f"{self._base_url}/health",
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-            raise AgentSdkError(
-                ErrorCode.RUNTIME_UNREACHABLE,
-                f"AgentRuntime is unreachable: {exc}",
-                retryable=True,
-            ) from exc
-
-    async def register_endpoint(
-        self, local_ip: str, tcp_port: int, udp_port: int
-    ) -> EndpointRegistration:
-        response = await self.request(
-            "POST",
-            self._registration_path,
-            {
-                "local_vlan_ip": local_ip,
-                "tcp_port": tcp_port,
-                "udp_port": udp_port,
-            },
-        )
-        ue_ip = response.get("ue_ip")
-        if not isinstance(ue_ip, str):
-            raise AgentSdkError(
-                ErrorCode.RUNTIME_REJECTED,
-                "endpoint registration response has no valid ue_ip",
-                field="ue_ip",
-            )
-        try:
-            parsed_ue_ip = ip_address(ue_ip)
-        except ValueError as exc:
-            raise AgentSdkError(
-                ErrorCode.RUNTIME_REJECTED,
-                "endpoint registration response ue_ip must be an IP literal",
-                field="ue_ip",
-            ) from exc
-        prefix_length = response.get("ue_prefix_length")
-        max_prefix_length = 32 if parsed_ue_ip.version == 4 else 128
-        if (
-            isinstance(prefix_length, bool)
-            or not isinstance(prefix_length, int)
-            or not 0 <= prefix_length <= max_prefix_length
-        ):
-            raise AgentSdkError(
-                ErrorCode.RUNTIME_REJECTED,
-                f"ue_prefix_length must be an integer in 0..{max_prefix_length}",
-                field="ue_prefix_length",
-            )
-        return EndpointRegistration(
-            ue_ip=str(parsed_ue_ip),
-            ue_prefix_length=prefix_length,
-        )
 
     async def start_downlink(
         self,

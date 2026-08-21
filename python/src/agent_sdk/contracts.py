@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Protocol
 
 from .models import (
-    EndpointRegistration,
     NetworkMessageAction,
     NetworkMessageType,
     OffloadingSession,
@@ -31,18 +30,12 @@ class ControlRequestAuthenticator(Protocol):
 
 
 class RuntimeTransport(Protocol):
-    async def connect(self) -> None: ...
-
     async def start_downlink(
         self,
         handler: Callable[
             [str, int, Mapping[str, Any]], Awaitable[NetworkMessageAction]
         ],
     ) -> None: ...
-
-    async def register_endpoint(
-        self, local_ip: str, tcp_port: int, udp_port: int
-    ) -> EndpointRegistration: ...
 
     async def request(
         self, method: str, path: str, body: Mapping[str, Any]

@@ -30,8 +30,10 @@ Linux/Python 和 Android 的 AgentCard 发布接口默认接收已经签发的 V
 正式环境仍应传入外部认证机构签发好的 VC。
 
 核心网主动下行不再反向 POST 到端侧。Linux/Android SDK 初始化时主动连接
-`/v1/acn/downlink-websocket`，WebSocket 握手与主动上行 REST 接口使用同一
-AgentRuntime IP 和端口；本地 HTTP Server 只保留 Agent 间 `/A2A/message`。
+`/v1/acn/downlink-websocket`，WebSocket 握手与后续主动上行 REST 接口使用同一
+AgentRuntime IP 和端口。初始化不再调用 `/health` 或 `/sdk/v1/endpoints`，
+也不向 AgentRuntime 同步本机信息；`agent_tun_cidr` 作为本地部署参数传入。
+本地 HTTP Server 只保留 Agent 间 `/A2A/message`。
 
 快速验证 Python 实现：
 

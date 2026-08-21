@@ -25,7 +25,6 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.net.InetAddress
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
@@ -43,19 +42,6 @@ class OkHttpRuntimeTransport(
     private val downlinkScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val downlinkStarted = AtomicBoolean(false)
     @Volatile private var downlinkSocket: WebSocket? = null
-
-    override suspend fun connect() = withContext(Dispatchers.IO) {
-        try {
-            client.newCall(Request.Builder().url("$baseUrl/health").get().build()).execute().close()
-        } catch (error: Exception) {
-            throw AgentSdkException(
-                ErrorCode.RUNTIME_UNREACHABLE,
-                "AgentRuntime is unreachable",
-                retryable = true,
-                cause = error,
-            )
-        }
-    }
 
     override suspend fun startDownlink(
         handler: suspend (String, Int, JsonObject) -> NetworkMessageAction,
@@ -152,67 +138,8 @@ class OkHttpRuntimeTransport(
         }
     }
 
-    override suspend fun registerEndpoint(
-        localIp: String,
-        tcpPort: Int,
-        udpPort: Int,
-    ): EndpointRegistration {
-        val response = request("POST", "/sdk/v1/endpoints", buildJsonObject {
-            put("local_vlan_ip", localIp)
-            put("tcp_port", tcpPort)
-            put("udp_port", udpPort)
-        })
-        val rawUeIp = response["ue_ip"]?.jsonPrimitive?.contentOrNull
-            ?: throw AgentSdkException(
-                ErrorCode.RUNTIME_REJECTED,
-                "Endpoint registration has no ue_ip",
-                "ue_ip",
-            )
-        val ueIp = normalizeIpLiteral(rawUeIp)
-        val maxPrefix = if (ueIp.contains(':')) 128 else 32
-        val uePrefixLength = response["ue_prefix_length"]?.jsonPrimitive?.intOrNull
-            ?.takeIf { it in 0..maxPrefix }
-            ?: throw AgentSdkException(
-                ErrorCode.RUNTIME_REJECTED,
-                "ue_prefix_length must be an integer in 0..$maxPrefix",
-                "ue_prefix_length",
-            )
-        return EndpointRegistration(ueIp, uePrefixLength)
-    }
-
-    private fun normalizeIpLiteral(value: String): String {
-        val ipv4Candidate = IPV4_LITERAL.matches(value)
-        val ipv6Candidate = value.contains(':') &&
-            value.all { it.isDigit() || it in ":abcdefABCDEF" }
-        if (!ipv4Candidate && !ipv6Candidate) {
-            throw AgentSdkException(
-                ErrorCode.RUNTIME_REJECTED,
-                "ue_ip must be an IP literal",
-                "ue_ip",
-            )
-        }
-        return try {
-            val address = InetAddress.getByName(value)
-            if ((ipv4Candidate && address.address.size != 4) ||
-                (ipv6Candidate && address.address.size != 16)
-            ) {
-                throw IllegalArgumentException("IP address family mismatch")
-            }
-            address.hostAddress?.substringBefore('%')
-                ?: throw IllegalArgumentException("IP address has no normalized representation")
-        } catch (error: Exception) {
-            throw AgentSdkException(
-                ErrorCode.RUNTIME_REJECTED,
-                "ue_ip must be an IP literal",
-                "ue_ip",
-                cause = error,
-            )
-        }
-    }
-
     private companion object {
         const val TAG = "AgentSdkRuntime"
-        val IPV4_LITERAL = Regex("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}")
     }
 
     override suspend fun request(method: String, path: String, body: JsonObject): JsonObject =

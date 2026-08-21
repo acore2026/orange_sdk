@@ -2,6 +2,30 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-21 — SDK 初始化收敛为 WebSocket 下行注册
+
+### 修改原因
+
+- Agent Application 与基带 SDK 的下行注册已统一为 `GET /v1/acn/downlink-websocket` WebSocket Upgrade，SDK 初始化不应再额外调用 `/health` 或 `/sdk/v1/endpoints`。
+- AgentRuntime 仅负责原样透传网内消息；SDK 不应在初始化时向它同步本机物理 IP、监听端口或 Agent TUN 地址。
+- WebSocket 握手没有 UE IP 响应体，因此本机 TUN 地址必须由部署配置显式传入，并与 MASQUE Proxy/UERANSIM 的设备映射一致。
+
+### 修改方式
+
+- Python `AgentSdk.init()` 新增必填关键字参数 `agent_tun_cidr`，Android `AgentSdk.initialize()` 新增必填参数 `agentTunCidr`；两端均在创建 TUN 前校验 IP 字面量、地址簇和前缀范围，该值只在本地使用。
+- Python/Android 删除 Runtime Transport 的健康检查、端点注册方法及 `EndpointRegistration` 模型；初始化完成 TUN、A2A Server 和 MASQUE 后，只向同一 AgentRuntime IP/端口发起固定 WebSocket Upgrade，握手成功才返回。
+- 保留现有 WebSocket 报文：下行请求使用 `kind + request_id + message_type + transaction_id + payload`，响应仅使用 `kind=response + request_id + payload.result`，并支持多请求并发和乱序返回。
+- Linux 真实示例新增 `--agent-tun-cidr`，Android example 新增 `agent_tun_cidr` Intent extra；离线全流程示例、客户 README 同步新的边界。本地 HTTP 接口文档和用户友好版设计文档也已更新，但按交付排除规则继续被 Git 忽略、不进入提交或远端；原始《SDK设计文档》保持不动。
+- Python Wheel 版本从 `0.8.0` 升级为 `0.9.0`。
+
+### 验证内容
+
+- Python `compileall` 和全量测试通过（`59 passed`）；覆盖本地 TUN CIDR 实际传入、非法前缀拒绝、初始化期间无 Runtime REST 请求以及下行 handler 已注册。
+- Android JVM 单元测试共 `22 tests / 0 skipped / 0 failures / 0 errors`；覆盖本地 TUN CIDR、非法 CIDR 拒绝、无初始化 REST 请求，以及 WebSocket 精确路径/请求响应格式/并发乱序响应。
+- `agent_connect_sdk-0.9.0-py3-none-any.whl` 通过 `twine check`，在独立虚拟环境安装后显示版本 `0.9.0`，`agent-sdk-self-check` 输出 `FULL FLOW DEMO PASSED`。Wheel SHA-256 为 `468985d46d5e12a1e34ce1a3c7f2d1044b7e7623fd0ec8ae55a43682ead8dcaa`。
+- Android Release AAR 和 example Debug APK 构建成功，SHA-256 分别为 `56744363b968dd0d2899626d46d544eda9a060c1108e3001ed1b736ba51378ea` 和 `9e68e6cecf301109907c1777b99cde01130e90e8335ab2ec8d73c608069ea61a`。Wheel、AAR 和 APK 均无私钥资源；APK `classes2.dex` 仅包含 SDK 解析器的 PEM 私钥边界字面量，不包含私钥材料。
+- HTTP 接口文档的 16 个 JSON 示例和用户友好版设计文档的 1 个 JSON 示例均通过标准解析；原始《SDK设计文档》SHA-256 仍为 `d2509f323338d0cdb948ceff36e32c3ae71d59c646916b687168b4c2e862947b`。
+
 ## 2026-08-20 — Android AgentCard 支持内测能力 VC 即时签发
 
 ### 修改原因

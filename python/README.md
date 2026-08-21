@@ -8,7 +8,7 @@ SDK 收到 AgentRuntime 透传的 `acf_group_config` 后，会自动缓存 `grou
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.8.0-py3-none-any.whl`：SDK wheel。
+- `agent_connect_sdk-0.9.0-py3-none-any.whl`：SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/masque-proxy.example.json`：服务器 MASQUE Proxy 配置模板。
@@ -41,7 +41,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.8.0-py3-none-any.whl
+dist/agent_connect_sdk-0.9.0-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -53,7 +53,7 @@ dist/agent_connect_sdk-0.8.0-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.8.0-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.9.0-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -68,14 +68,14 @@ agent-masque-proxy --help
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.8.0-py3-none-any.whl
+  ./agent_connect_sdk-0.9.0-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.8.0-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.9.0-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -224,6 +224,7 @@ result = await sdk.init(
     local_vlan_ip="192.168.1.10",
     local_tcp_port=4001,
     local_udp_port=28443,
+    agent_tun_cidr="8.8.8.7/24",
     masque_server_url="https://192.168.3.10:4433",
     masque_authorization="Bearer replace-with-secret-for-device-a",
     tun_name="agent_tun0",
@@ -238,9 +239,13 @@ result = await sdk.init(
 设备 B 只需替换本机值：
 
 - `local_vlan_ip="192.168.2.10"`
+- `agent_tun_cidr="8.8.8.8/24"`
 - `masque_authorization="Bearer replace-with-secret-for-device-b"`
 
-本机 Agent TUN IP 也不由用户配置。`init` 内部调用 `POST /sdk/v1/endpoints`，AgentRuntime 在响应中返回 `ue_ip` 和 `ue_prefix_length`；SDK 验证后将其组合为 Agent TUN CIDR。例如设备 A 获得 `8.8.8.7/24`，设备 B 获得 `8.8.8.8/24`。可通过 `result.agent_tun_cidr` 查看服务器实际分配结果。
+`agent_tun_cidr` 是本机部署参数，必须与服务器 MASQUE Proxy 中该设备的
+`agent_ip + uesimtun` 映射一致。SDK 只在本地校验和使用它，不会将其或本机
+IP/端口同步给 AgentRuntime。例如设备 A 传 `8.8.8.7/24`，设备 B 传
+`8.8.8.8/24`；实际使用值可通过 `result.agent_tun_cidr` 查看。
 
 不要传对端 IP、端口或路由。SDK 在收到合法的 `acf_group_config` 后自动获得并维护这些信息。
 
@@ -253,6 +258,7 @@ result = await sdk.init(
 | `local_vlan_ip` | 是 | 本设备物理网 IP；用于 Runtime 上行 HTTP 和 MASQUE QUIC 外层 |
 | `local_tcp_port` | 是 | 本地 `/A2A/message` TCP 监听端口 |
 | `local_udp_port` | 是 | 对外公布的 UDP 业务端口 |
+| `agent_tun_cidr` | 是 | 本机 Agent TUN 地址/前缀；必须与服务器侧该设备映射一致 |
 | `masque_server_url` | 是 | MASQUE Proxy 的 HTTPS URL，底层使用 HTTP/3/QUIC |
 | `masque_authorization` | 否 | 推荐使用 `Bearer <device-token>` |
 | `tun_name` | 否 | 默认 `agent_tun0` |
@@ -269,9 +275,10 @@ result = await sdk.init(
 `0600`。应用不传密钥路径，也不应读取或复制该私钥。
 
 除 `masque_server_url` 必须使用 `https://` 以建立 HTTP/3/QUIC 外，SDK
-访问 AgentRuntime 的健康检查、端点注册和全部控制接口均使用 `http://`。
-核心网主动下行使用同一 HTTP 服务端口上的 WebSocket Upgrade；Agent 之间的
-`/A2A/message` 使用 HTTP。
+的后续 AgentRuntime 主动上行控制接口均使用 `http://`。`init()`
+不调用健康检查或端点注册 REST 接口，也不上报本机 IP、端口或 TUN 地址；
+它与 AgentRuntime 的唯一初始化交互是同一 HTTP 服务端口上的
+WebSocket Upgrade。Agent 之间的 `/A2A/message` 使用 HTTP。
 
 `init()` 还会主动建立以下 WebSocket，使用与上行 REST 完全相同的 Runtime
 IP 和端口，不增加新的配置参数：
@@ -542,6 +549,7 @@ sudo -E .venv/bin/python examples/linux_agent.py \
   --runtime-ip 192.168.3.10 \
   --runtime-port 8080 \
   --local-vlan-ip 192.168.1.10 \
+  --agent-tun-cidr 8.8.8.7/24 \
   --agent-name 'Agent A' \
   --owner 'customer-a' \
   --masque-url https://192.168.3.10:4433/.well-known/masque/ip \
@@ -571,7 +579,7 @@ AgentRuntime 下发 `acf_group_config`，不会让用户填写对端 IP 或端�
 
 | 函数 | 用途 | 关键返回值 |
 |---|---|---|
-| `init(...)` | 注册端点、建立下行 WebSocket、创建 TUN/A2A 服务并连接 MASQUE | `SdkInitResult` |
+| `init(...)` | 校验本地配置、建立下行 WebSocket、创建 TUN/A2A 服务并连接 MASQUE | `SdkInitResult` |
 | `apply_identity(...)` | 申请身份，直接解析网元原始 `vc0` | `AgentProfile` |
 | `set_local_profile_for_restore(profile)` | 恢复安全存储中的既有身份 | 无 |
 | `deregister_identity(...)` | 注销身份 | `OperationResult` |

@@ -43,11 +43,13 @@ verifiers, authenticators, signers, public keys, or production private keys.
 The explicit lab-only capability issuer import described below is the sole
 exception.
 
-Only the MASQUE URL uses HTTPS/HTTP/3. Health checks, endpoint registration and
-all other AgentRuntime calls use HTTP. During `initialize`, the SDK opens
-`/v1/acn/downlink-websocket` on the same AgentRuntime host and port used by the
-uplink REST calls; no additional port is configured. A2A continues to use HTTP.
-The AAR manifest enables cleartext traffic for this internal deployment.
+Only the MASQUE URL uses HTTPS/HTTP/3. Later AgentRuntime uplink control calls
+use HTTP. `initialize` does not call a health-check or endpoint-registration
+REST API and does not upload the local IP, ports, or TUN address. Its only
+AgentRuntime interaction is opening `/v1/acn/downlink-websocket` on the same
+host and port used by later uplink REST calls; no additional port is configured.
+A2A continues to use HTTP. The AAR manifest enables cleartext traffic for this
+internal deployment.
 
 ## Test-only capability VC issuance
 
@@ -106,6 +108,7 @@ adb shell am start -n com.rayneo.agent.example/.MainActivity \
   --es local_vlan_ip 192.168.1.10 \
   --ei tcp_port 4001 \
   --ei udp_port 28443 \
+  --es agent_tun_cidr 8.8.8.7/24 \
   --es agent_id 'did:example:agent-a' \
   --es agent_name 'Agent A' \
   --es test_capabilities 'robot-control,voice' \
@@ -114,10 +117,11 @@ adb shell am start -n com.rayneo.agent.example/.MainActivity \
   --es masque_url https://192.168.3.10:4433
 ```
 
-The application does not provide an Agent TUN IP. During `initialize`, the SDK
-calls `POST /sdk/v1/endpoints`; AgentRuntime returns `ue_ip` and
-`ue_prefix_length`, and the SDK validates that assignment before creating the
-VPN TUN. The returned CIDR is available as `SdkInitResult.agentTunCidr`.
+The application must provide its locally assigned `agent_tun_cidr`. It must
+match that device's `agent_ip + uesimtun` mapping on the MASQUE Proxy. The SDK
+validates and uses the CIDR locally before creating the VPN TUN; it never sends
+the value to AgentRuntime. The effective CIDR is available as
+`SdkInitResult.agentTunCidr`.
 
 Core-network downlink frames use `kind + request_id + message_type +
 transaction_id + payload`. Each frame is handled in its own coroutine, so

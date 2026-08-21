@@ -139,9 +139,9 @@ class SdkConfig:
             normalized_tun_cidr = str(ip_interface(agent_tun_cidr))
         except ValueError as exc:
             raise AgentSdkError(
-                ErrorCode.RUNTIME_REJECTED,
-                "AgentRuntime returned an invalid UE address assignment",
-                field="ue_ip",
+                ErrorCode.INVALID_ARGUMENT,
+                "agent_tun_cidr must be a valid IP interface",
+                field="agent_tun_cidr",
             ) from exc
 
         return cls(

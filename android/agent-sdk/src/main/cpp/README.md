@@ -21,7 +21,8 @@ outer connection can be routed back into the VPN and recurse.
 
 The core negotiates `:protocol=connect-ip`, `Capsule-Protocol: ?1` and HTTP
 Datagrams through `connect-ip-go`; it validates the ADDRESS_ASSIGN address
-against AgentRuntime's UE assignment, waits for route advertisement, preserves
-packet boundaries, and bounds packets by the configured MTU. The server CA and
-TLS name are compiled into the `.so`; the client identity is generated and
-persisted by the core, so neither is part of the public Kotlin API.
+against the locally configured Agent TUN CIDR, waits for route advertisement,
+preserves packet boundaries, and bounds packets by the configured MTU. This
+internal-test build disables server certificate verification; the client
+identity is generated and persisted by the core, so no certificate path is
+part of the public Kotlin API.

@@ -16,7 +16,6 @@ from typing import Any, Mapping
 
 from agent_sdk import (
     AgentSdk,
-    EndpointRegistration,
     NetworkMessageAction,
     NetworkMessageType,
 )
@@ -71,9 +70,6 @@ class DemoRuntime:
         self.requests: list[tuple[str, str, Mapping[str, Any]]] = []
         self.downlink_handler = None
 
-    async def connect(self) -> None:
-        return None
-
     async def start_downlink(self, handler) -> None:
         self.downlink_handler = handler
 
@@ -118,12 +114,6 @@ class DemoRuntime:
                 "proof": {"jws": "demo-group-proof"},
             },
         )
-
-    async def register_endpoint(
-        self, local_ip: str, tcp_port: int, udp_port: int
-    ) -> EndpointRegistration:
-        del local_ip, tcp_port, udp_port
-        return EndpointRegistration("8.8.8.7", 24)
 
     async def request(
         self, method: str, path: str, body: Mapping[str, Any]
@@ -337,6 +327,7 @@ async def run_demo(
             "192.168.1.10",
             4001,
             28443,
+            agent_tun_cidr="8.8.8.7/24",
             masque_server_url="https://192.168.3.10:4433",
             masque_authorization="Bearer demo-device-a-token",
             log_file_path=log_file_path,

@@ -7,7 +7,7 @@ from typing import Any, Mapping
 import pytest
 
 from agent_sdk import AgentSdk, NetworkMessageAction
-from agent_sdk.models import AgentProfile, EndpointRegistration, NetworkMessageType
+from agent_sdk.models import AgentProfile, NetworkMessageType
 from agent_sdk.routes import MemoryRouteBackend
 
 
@@ -59,9 +59,6 @@ class FakeRuntime:
         self.closed = False
         self.downlink_handler = None
 
-    async def connect(self) -> None:
-        return None
-
     async def start_downlink(self, handler) -> None:
         self.downlink_handler = handler
 
@@ -78,11 +75,6 @@ class FakeRuntime:
         self, payload: Mapping[str, Any]
     ) -> NetworkMessageAction:
         return await self.deliver_downlink("ACN_AGENT_GROUP_CONFIG", payload)
-
-    async def register_endpoint(
-        self, local_ip: str, tcp_port: int, udp_port: int
-    ) -> EndpointRegistration:
-        return EndpointRegistration("8.8.8.7", 24)
 
     async def request(self, method: str, path: str, body: Mapping[str, Any]):
         self.requests.append((method, path, body))
@@ -339,6 +331,7 @@ async def sdk_fixture(tmp_path):
         "192.168.1.10",
         4001,
         28443,
+        agent_tun_cidr="8.8.8.7/24",
         masque_server_url="https://192.168.3.10:4433",
         log_file_path=str(tmp_path / "agent-sdk.log"),
     )

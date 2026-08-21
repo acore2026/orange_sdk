@@ -27,24 +27,11 @@ internal interface MessageSignatureVerifier {
 }
 
 interface RuntimeTransport {
-    suspend fun connect()
     suspend fun startDownlink(
         handler: suspend (String, Int, JsonObject) -> NetworkMessageAction,
     )
-    suspend fun registerEndpoint(
-        localIp: String,
-        tcpPort: Int,
-        udpPort: Int,
-    ): EndpointRegistration
     suspend fun request(method: String, path: String, body: JsonObject): JsonObject
     suspend fun close()
-}
-
-data class EndpointRegistration(
-    val ueIp: String,
-    val uePrefixLength: Int,
-) {
-    val agentTunCidr: String get() = "$ueIp/$uePrefixLength"
 }
 
 data class TunnelConfiguration(

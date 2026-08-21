@@ -4,7 +4,6 @@ import com.rayneo.agent.sdk.model.AgentProfile
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import com.rayneo.agent.sdk.model.NetworkMessageType
 import com.rayneo.agent.sdk.transport.LocalServer
-import com.rayneo.agent.sdk.transport.EndpointRegistration
 import com.rayneo.agent.sdk.transport.MediaOffloadAdapter
 import com.rayneo.agent.sdk.transport.MessageSigner
 import com.rayneo.agent.sdk.transport.MasqueConfiguration
@@ -94,6 +93,25 @@ class AgentSdkGroupConfigTest {
         assertEquals(4001, target.tcpPort)
         assertEquals(28443, target.udpPort)
         assertEquals(setOf("8.8.8.8"), tunnel.groupPeers["g1"])
+    }
+
+    @Test
+    fun `initialize registers only the runtime downlink websocket`() = runTest {
+        initializeSdk()
+
+        assertEquals("", runtime.lastPath)
+        assertNotNull(runtime.downlinkHandler)
+        assertEquals("8.8.8.7/24", tunnel.establishedConfiguration?.agentTunCidr)
+    }
+
+    @Test
+    fun `initialize rejects invalid local Agent TUN CIDR`() = runTest {
+        val error = runCatching { initializeSdk("8.8.8.7/33") }
+            .exceptionOrNull() as AgentSdkException
+
+        assertEquals(ErrorCode.INVALID_ARGUMENT, error.code)
+        assertEquals("agentTunCidr", error.field)
+        assertEquals(null, runtime.downlinkHandler)
     }
 
     @Test
@@ -280,13 +298,14 @@ class AgentSdkGroupConfigTest {
         })
     }
 
-    private suspend fun initializeSdk() {
+    private suspend fun initializeSdk(agentTunCidr: String = "8.8.8.7/24") {
         val result = sdk.initialize(
             agentRuntimeIp = "192.168.3.10",
             agentRuntimePort = 8080,
             localVlanIp = "192.168.1.10",
             localTcpPort = 4001,
             localUdpPort = 28443,
+            agentTunCidr = agentTunCidr,
             masqueServerUrl = "https://192.168.3.10:4433",
         )
         assertEquals("8.8.8.7:4001", result.agentTcpEndpoint)
@@ -377,7 +396,6 @@ class AgentSdkGroupConfigTest {
         var lastBody: JsonObject? = null
         var downlinkHandler: (suspend (String, Int, JsonObject) -> NetworkMessageAction)? = null
 
-        override suspend fun connect() = Unit
         override suspend fun startDownlink(
             handler: suspend (String, Int, JsonObject) -> NetworkMessageAction,
         ) { downlinkHandler = handler }
@@ -388,11 +406,6 @@ class AgentSdkGroupConfigTest {
         ): NetworkMessageAction = downlinkHandler!!(messageType, transactionId, payload)
         suspend fun deliverGroupConfig(payload: JsonObject): NetworkMessageAction =
             deliverDownlink("ACN_AGENT_GROUP_CONFIG", payload)
-        override suspend fun registerEndpoint(
-            localIp: String,
-            tcpPort: Int,
-            udpPort: Int,
-        ) = EndpointRegistration("8.8.8.7", 24)
         override suspend fun request(method: String, path: String, body: JsonObject): JsonObject {
             lastMethod = method
             lastPath = path

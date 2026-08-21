@@ -9,7 +9,6 @@ from .contracts import (
 from .models import (
     AgentProfile,
     DiscoveredAgent,
-    EndpointRegistration,
     GroupConfigSnapshot,
     GroupInfo,
     GroupMemberInfo,
@@ -26,14 +25,13 @@ from .sdk import AgentSdk
 try:
     __version__ = version("agent-connect-sdk")
 except PackageNotFoundError:  # Source checkout without an installed distribution.
-    __version__ = "0.8.0"
+    __version__ = "0.9.0"
 
 __all__ = [
     "AgentSdk",
     "AgentSdkError",
     "AgentProfile",
     "DiscoveredAgent",
-    "EndpointRegistration",
     "ErrorCode",
     "GroupConfigSnapshot",
     "GroupInfo",
