@@ -39,6 +39,11 @@ AgentRuntime 同步本机信息。
 
 控制面写请求由 SDK 自动生成普通 UUID 格式的 `request_id`。身份申请严格按
 `ACN-H-ID-v1` 的 LP16/U64BE 字段编码签名；其他控制请求使用 `proof`。
+`proof` 保留现有 `verification_method/proof_purpose` 字段名。其分离 JWS 的
+未编码载荷固定为
+`SHA-256(canonical(proof 去掉 jws)) || SHA-256(canonical(业务文档去掉 proof))`；
+两个摘要均为 32 字节且 proof 摘要在前。控制请求的 `request_id` 不进入业务
+文档摘要。
 核心网群组配置下行消息类型固定为
 `ACN_AGENT_GROUPING_NOTIFICATION`。A2A 消息使用
 `src_agent_id/dst_agent_id/type/task_id/payload`，成功响应为

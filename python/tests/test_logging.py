@@ -22,7 +22,7 @@ async def test_public_function_entry_exit_error_and_redaction(sdk_fixture):
         metadata={
             "region": "CN",
             "os": "Linux",
-            "version": "0.11.0",
+            "version": "0.12.0",
         },
     )
     try:

@@ -48,7 +48,7 @@ async def test_identity_uses_raw_request_and_vc0_response(sdk_fixture):
         "Alice",
         "AliceAgent",
         "AgentModel-X",
-        {"region": "CN", "os": "Linux", "version": "0.11.0"},
+        {"region": "CN", "os": "Linux", "version": "0.12.0"},
     )
 
     method, path, body = runtime.requests[-1]
@@ -63,7 +63,7 @@ async def test_identity_uses_raw_request_and_vc0_response(sdk_fixture):
         "name": "AliceAgent",
         "public_key": body["public_key"],
         "description": "AgentModel-X",
-        "metadata": {"region": "CN", "os": "Linux", "version": "0.11.0"},
+        "metadata": {"region": "CN", "os": "Linux", "version": "0.12.0"},
         "timestamp": "2026-08-19T00:00:00Z",
         "signature": "test-signature",
         "signature_encoding": "base64",
@@ -81,7 +81,7 @@ async def test_identity_rejects_metadata_outside_n01_contract(sdk_fixture):
             {
                 "region": "CN",
                 "os": "Linux",
-                "version": "0.11.0",
+                "version": "0.12.0",
                 "platform": "unsupported-extra",
             },
         )

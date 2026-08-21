@@ -146,7 +146,7 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
         metadata={
             "region": args.region,
             "os": "Linux",
-            "version": "0.11.0",
+            "version": "0.12.0",
         },
     )
     print("[2 apply_identity]", profile.agent_id)

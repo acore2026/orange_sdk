@@ -43,6 +43,14 @@ verifiers, authenticators, signers, public keys, or production private keys.
 The explicit lab-only capability issuer import described below is the sole
 exception.
 
+Proof wire fields remain `verification_method` and `proof_purpose`. Detached
+JWS signs `SHA-256(canonical(proof without jws)) ||
+SHA-256(canonical(business document without proof))`, with the proof digest
+first. Each digest is 32 bytes. HTTP `request_id` remains outside the signed
+business document. Python and Android use the same recursively key-sorted,
+compact UTF-8 JSON canonicalization and the same 64-byte cross-platform test
+vector.
+
 Only the MASQUE URL uses HTTPS/HTTP/3. Later AgentRuntime uplink control calls
 use HTTP. `initialize` does not call a health-check or endpoint-registration
 API and does not upload the local IP, ports, or TUN address. It first sends a

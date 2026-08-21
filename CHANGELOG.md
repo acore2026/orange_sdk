@@ -2,6 +2,29 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-21 — proof 签名改为 proof 与业务文档双摘要拼接
+
+### 修改原因
+
+- 旧实现先把不含 `jws` 的 proof 元数据放回业务文档，再对整个 JSON 直接生成分离 JWS；这不符合已确认的 `Hash(Canonicalize(proofOptions)) || Hash(Canonicalize(业务文档，不含 proof))` 签名数据结构。
+- `proofOptions` 不应嵌入待签业务文档，但 `type/created/verification_method/proof_purpose` 仍必须受签名保护，避免攻击者在不修改业务字段的情况下替换验签方法、用途或创建时间。
+- 当前 AgentRuntime/NAS 消息契约已经固定 snake_case 字段名，因此本次只调整签名字节，不把 `verification_method/proof_purpose` 改为 camelCase。
+
+### 修改方式
+
+- Python 与 Android 新增一致的 proof 签名数据生成逻辑：移除 `proof.jws` 得到 `proofOptions`，从业务文档完整移除 `proof`，分别按既有递归字段排序、紧凑 UTF-8 JSON 规则规范化并计算 SHA-256，最后按 `proofHash || documentHash` 拼接为固定 64 字节 `verifyData`。
+- ES256 分离 JWS 强制使用 `b64=false` 和 `crit=["b64"]`，验签不再接受编码载荷变体；JWS 实际签名输入改为 `BASE64URL(protectedHeader) + "." + verifyData`。签名和验签路径同步修改，控制请求的 HTTP `request_id` 继续只做幂等关联，不进入业务文档摘要。
+- 线上 proof 仍输出和校验 `type/verification_method/proof_purpose/created/jws`；测试显式断言没有改成 `verificationMethod/proofPurpose`。
+- 两端增加同一个跨平台黄金向量：proof 摘要 `1a96f0c94b92eaa51b8fb1de55b1842584e66a24be9af373507bd956581ab0b3` 在前，文档摘要 `31126a50a843b70e3b740f33884f6d0dc38054a942753600f9546c10a67122c1` 在后；同时覆盖业务字段篡改和 `verification_method` 篡改拒绝。
+- 该签名输入与旧版本线协议不兼容，Python Wheel 升级为 `0.12.0`。根 README、Python/Android 指南同步；被 Git 忽略的本地《Agent SDK HTTP 接口文档》和《SDK 设计文档-用户友好版》分别更新为 V1.9.0 和 V5.0，原始《SDK设计文档》保持不动。
+
+### 验证内容
+
+- Python `compileall` 和全量测试通过（`70 passed`）；`agent_connect_sdk-0.12.0-py3-none-any.whl` 通过 `twine check`，独立虚拟环境安装显示版本 `0.12.0`，`agent-sdk-self-check` 输出 `FULL FLOW DEMO PASSED`。
+- Android JVM 单元测试共 `27 tests / 0 skipped / 0 failures / 0 errors`；Release AAR 和 example Debug APK 构建成功。
+- Wheel、AAR、APK SHA-256 分别为 `29c695c8a835a9b0add53eb046becf35f48b5d9684108715c9ece698014350b0`、`58e31f483f7236f8e8df71f2ee3e7fe59aecc95df13fcc55c6a1c2d3750b88b3`、`d83e7cc9d307957192249e459ca87ef9ac163215a499f18a8e604e055eb9621d`。
+- HTTP 接口文档 21 个 JSON 示例、用户友好版设计文档 2 个 JSON 示例均通过标准解析；原始《SDK设计文档》SHA-256 仍为 `d2509f323338d0cdb948ceff36e32c3ae71d59c646916b687168b4c2e862947b`。
+
 ## 2026-08-21 — SDK 对齐 ACN HTTP、身份签名与 A2A 新契约
 
 ### 修改原因

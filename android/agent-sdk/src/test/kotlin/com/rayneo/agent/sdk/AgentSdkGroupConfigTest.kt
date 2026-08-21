@@ -288,7 +288,7 @@ class AgentSdkGroupConfigTest {
             metadata = buildJsonObject {
                 put("region", "CN")
                 put("os", "Android")
-                put("version", "0.11.0")
+                put("version", "0.12.0")
             },
         )
 
@@ -320,7 +320,7 @@ class AgentSdkGroupConfigTest {
                 metadata = buildJsonObject {
                     put("region", "CN")
                     put("os", "Android")
-                    put("version", "0.11.0")
+                    put("version", "0.12.0")
                     put("platform", "unsupported-extra")
                 },
             )

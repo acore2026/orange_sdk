@@ -8,7 +8,7 @@ SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.11.0-py3-none-any.whl`：SDK wheel。
+- `agent_connect_sdk-0.12.0-py3-none-any.whl`：SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/masque-proxy.example.json`：服务器 MASQUE Proxy 配置模板。
@@ -41,7 +41,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.11.0-py3-none-any.whl
+dist/agent_connect_sdk-0.12.0-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -53,7 +53,7 @@ dist/agent_connect_sdk-0.11.0-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.11.0-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.12.0-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -68,14 +68,14 @@ agent-masque-proxy --help
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.11.0-py3-none-any.whl
+  ./agent_connect_sdk-0.12.0-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.11.0-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.12.0-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -337,6 +337,20 @@ MASQUE TLS 的 P-256 消息签名密钥：
 JWS。SDK 自动生成普通 UUID `request_id`，它只用于 HTTP 幂等关联，不进入
 NAS 业务体，也不属于签名覆盖范围。
 
+`proof` 的线上字段名保持 `verification_method` 和 `proof_purpose`。SDK 先将
+`proof` 去掉 `jws` 得到 `proofOptions`，再将完整 `proof` 从业务文档移除。两部分
+分别按字段名递归排序、无多余空白的紧凑 UTF-8 JSON 规范化，签名数据固定为：
+
+```text
+proofHash    = SHA-256(canonical_json(proofOptions))
+documentHash = SHA-256(canonical_json(业务文档，不含 proof 和 HTTP request_id))
+verifyData   = proofHash || documentHash
+JWSInput     = BASE64URL(protectedHeader) || "." || verifyData
+```
+
+`proofHash` 和 `documentHash` 各 32 字节，顺序不可交换；最终请求体再附加包含
+`jws` 的完整 `proof`。
+
 Wheel 只预置 `/root/lpx/cert/core-network/public-key.pem` 对应的核心网公钥，
 SPKI DER SHA-256 指纹为
 `86:D4:77:77:67:4E:79:77:88:A9:61:18:8A:C9:B8:A4:CD:34:DF:15:F4:61:FC:1C:E9:BA:89:D2:15:01:6C:CD`。
@@ -382,7 +396,7 @@ profile = await sdk.apply_identity(
     owner="customer-a",
     name="Agent A",
     description="RayNeo edge agent",
-    metadata={"region": "CN", "os": "Linux", "version": "0.11.0"},
+    metadata={"region": "CN", "os": "Linux", "version": "0.12.0"},
 )
 
 ability = await sdk.get_network_ability(profile.agent_id)

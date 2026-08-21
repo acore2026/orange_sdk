@@ -4,6 +4,7 @@ import com.rayneo.agent.sdk.AgentSdkException
 import com.rayneo.agent.sdk.ErrorCode
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
@@ -50,6 +51,35 @@ class AndroidDeviceSecurityTest {
     }
 
     @Test
+    fun `proof signing bytes match cross-platform golden vector`() {
+        val document = buildJsonObject {
+            put("agent_id", "did:example:a")
+            put("intent", "Issue Network Ability Credential")
+            put("timestamp", "2026-08-21T00:00:00Z")
+        }
+        val proof = buildJsonObject {
+            put("type", "JsonWebSignature2020")
+            put("verification_method", "did:key:zExample#zExample")
+            put("proof_purpose", "authentication")
+            put("created", "2026-08-21T00:00:00Z")
+            put("jws", "excluded-from-proof-options")
+        }
+        val securedDocument = buildJsonObject {
+            document.forEach(::put)
+            put("proof", proof)
+        }
+
+        val verifyData = proofSigningBytes(securedDocument, proof)
+
+        assertEquals(64, verifyData.size)
+        assertEquals(
+            "1a96f0c94b92eaa51b8fb1de55b1842584e66a24be9af373507bd956581ab0b3" +
+                "31126a50a843b70e3b740f33884f6d0dc38054a942753600f9546c10a67122c1",
+            verifyData.joinToString("") { "%02x".format(it) },
+        )
+    }
+
+    @Test
     fun `control request is signed with the persistent device key`() = runTest {
         val backend = SoftwareP256Backend()
         val security = AndroidDeviceSecurity(backend, SoftwareP256Backend().publicKey)
@@ -62,7 +92,7 @@ class AndroidDeviceSecurityTest {
             put("metadata", buildJsonObject {
                 put("region", "CN")
                 put("os", "Android")
-                put("version", "0.11.0")
+                put("version", "0.12.0")
             })
         }
 
@@ -125,6 +155,41 @@ class AndroidDeviceSecurityTest {
         val error = runCatching { security.verifyA2a(tampered, security.didKey) }
             .exceptionOrNull() as AgentSdkException
         assertEquals(ErrorCode.SIGNATURE_ERROR, error.code)
+
+        val originalProof = signed.getValue("proof").jsonObject
+        val tamperedProof = buildJsonObject {
+            signed.forEach { (key, value) ->
+                put(
+                    key,
+                    if (key == "proof") {
+                        buildJsonObject {
+                            originalProof.forEach { (proofKey, proofValue) ->
+                                put(
+                                    proofKey,
+                                    if (proofKey == "verification_method") {
+                                        kotlinx.serialization.json.JsonPrimitive(
+                                            "did:key:zTampered#zTampered"
+                                        )
+                                    } else {
+                                        proofValue
+                                    },
+                                )
+                            }
+                        }
+                    } else {
+                        value
+                    },
+                )
+            }
+        }
+        val proofError = runCatching {
+            security.verifyA2a(tamperedProof, security.didKey)
+        }.exceptionOrNull() as AgentSdkException
+        assertEquals(ErrorCode.SIGNATURE_ERROR, proofError.code)
+        assertTrue("verification_method" in originalProof)
+        assertTrue("proof_purpose" in originalProof)
+        assertTrue("verificationMethod" !in originalProof)
+        assertTrue("proofPurpose" !in originalProof)
     }
 
     @Test

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import os
 import re
@@ -208,6 +209,25 @@ def _document_without_signature(payload: Mapping[str, Any]) -> dict[str, Any]:
     return document
 
 
+def _proof_signing_bytes(
+    document: Mapping[str, Any], proof: Mapping[str, Any]
+) -> bytes:
+    """Build proofHash || documentHash for the ACN detached-JWS profile.
+
+    ``proof`` is canonicalized without its signature value.  The business
+    document is canonicalized without the complete ``proof`` member.  The
+    existing snake_case wire names are intentionally preserved.
+    """
+
+    proof_options = dict(proof)
+    proof_options.pop("jws", None)
+    unsecured_document = dict(document)
+    unsecured_document.pop("proof", None)
+    proof_hash = hashlib.sha256(canonical_json(proof_options)).digest()
+    document_hash = hashlib.sha256(canonical_json(unsecured_document)).digest()
+    return proof_hash + document_hash
+
+
 def _load_p256_public_key(pem: bytes) -> ec.EllipticCurvePublicKey:
     try:
         public_key = serialization.load_pem_public_key(pem)
@@ -284,11 +304,11 @@ class DeviceSigningIdentity:
             "proof_purpose": purpose,
             "created": created or _utc_now(),
         }
-        document = {**payload, "proof": proof}
         protected = _base64url_encode(
             canonical_json({"alg": "ES256", "b64": False, "crit": ["b64"]})
         )
-        signing_input = protected.encode("ascii") + b"." + canonical_json(document)
+        verify_data = _proof_signing_bytes(payload, proof)
+        signing_input = protected.encode("ascii") + b"." + verify_data
         der_signature = self._private_key.sign(
             signing_input, ec.ECDSA(hashes.SHA256())
         )
@@ -424,7 +444,7 @@ def verify_proof(
     jws = proof.get("jws")
     if not isinstance(jws, str) or not jws:
         raise AgentSdkError(ErrorCode.SIGNATURE_ERROR, "proof.jws is required")
-    document = canonical_json(_document_without_signature(payload))
+    verify_data = _proof_signing_bytes(payload, proof)
     try:
         if jws.count(".") == 2:
             protected, detached_payload, encoded_signature = jws.split(".")
@@ -433,15 +453,9 @@ def verify_proof(
             header = json.loads(_base64url_decode(protected))
             if not isinstance(header, dict) or header.get("alg") != "ES256":
                 raise ValueError("proof.jws algorithm must be ES256")
-            unencoded = header.get("b64") is False
-            if unencoded and "b64" not in header.get("crit", []):
-                raise ValueError("proof.jws b64=false must be critical")
-            payload_component = (
-                document
-                if unencoded
-                else _base64url_encode(document).encode("ascii")
-            )
-            signing_input = protected.encode("ascii") + b"." + payload_component
+            if header.get("b64") is not False or header.get("crit") != ["b64"]:
+                raise ValueError("proof.jws must use critical b64=false")
+            signing_input = protected.encode("ascii") + b"." + verify_data
             raw_signature = _base64url_decode(encoded_signature)
             if len(raw_signature) != 64:
                 raise ValueError("proof.jws ES256 signature must be 64 bytes")
@@ -457,7 +471,7 @@ def verify_proof(
             encoded += b"=" * (-len(encoded) % 4)
             der_signature = base64.b64decode(encoded, validate=True)
             public_key.verify(
-                der_signature, document, ec.ECDSA(hashes.SHA256())
+                der_signature, verify_data, ec.ECDSA(hashes.SHA256())
             )
     except (
         InvalidSignature,

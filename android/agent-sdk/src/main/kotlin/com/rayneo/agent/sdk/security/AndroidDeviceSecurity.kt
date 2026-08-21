@@ -28,6 +28,7 @@ import java.security.AlgorithmParameters
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.MessageDigest
 import java.security.PrivateKey
 import java.security.PublicKey
 import java.security.Signature
@@ -293,10 +294,6 @@ internal class AndroidDeviceSecurity internal constructor(
             put("proof_purpose", purpose)
             put("created", created)
         }
-        val document = buildJsonObject {
-            payload.forEach(::put)
-            put("proof", proofOptions)
-        }
         val protected = base64Url(
             canonicalJson(
                 buildJsonObject {
@@ -307,7 +304,7 @@ internal class AndroidDeviceSecurity internal constructor(
             )
         )
         val signingInput = protected.toByteArray(Charsets.US_ASCII) +
-            byteArrayOf('.'.code.toByte()) + canonicalJson(document)
+            byteArrayOf('.'.code.toByte()) + proofSigningBytes(payload, proofOptions)
         val signature = derToJose(deviceKeys.sign(signingInput))
         return buildJsonObject {
             proofOptions.forEach(::put)
@@ -333,7 +330,7 @@ internal class AndroidDeviceSecurity internal constructor(
         }
         val jws = proof["jws"]?.jsonPrimitive?.contentOrNull
             ?.takeIf { it.isNotBlank() } ?: signatureError("proof.jws is required")
-        val document = canonicalDocument(payload)
+        val verifyData = proofSigningBytes(payload, proof)
         try {
             val (signature, signingInput) = if (jws.count { it == '.' } == 2) {
                 val parts = jws.split('.', limit = 3)
@@ -344,24 +341,18 @@ internal class AndroidDeviceSecurity internal constructor(
                 require(header["alg"]?.jsonPrimitive?.content == "ES256") {
                     "proof.jws algorithm must be ES256"
                 }
-                val unencoded = header["b64"]?.jsonPrimitive?.content == "false"
-                if (unencoded) {
-                    require(
-                        header["crit"]?.jsonArray?.any {
-                            it.jsonPrimitive.content == "b64"
-                        } == true
-                    ) { "proof.jws b64=false must be critical" }
+                require(header["b64"]?.jsonPrimitive?.content == "false") {
+                    "proof.jws must use b64=false"
                 }
-                val payloadComponent = if (unencoded) {
-                    document
-                } else {
-                    base64Url(document).toByteArray(Charsets.US_ASCII)
-                }
+                require(
+                    header["crit"]?.jsonArray?.map { it.jsonPrimitive.content } ==
+                        listOf("b64")
+                ) { "proof.jws b64=false must be critical" }
                 joseToDer(base64UrlDecode(parts[2])) to
                     (parts[0].toByteArray(Charsets.US_ASCII) +
-                        byteArrayOf('.'.code.toByte()) + payloadComponent)
+                        byteArrayOf('.'.code.toByte()) + verifyData)
             } else {
-                Base64.getDecoder().decode(jws) to document
+                Base64.getDecoder().decode(jws) to verifyData
             }
             val valid = Signature.getInstance("SHA256withECDSA").run {
                 initVerify(publicKey)
@@ -388,27 +379,17 @@ internal class AndroidDeviceSecurity internal constructor(
     }
 }
 
-private fun canonicalDocument(payload: JsonObject): ByteArray {
-    val document = buildJsonObject {
-        payload.forEach { (key, value) ->
-            when (key) {
-                "signature", "signature_encoding" -> Unit
-                "proof" -> {
-                    val proof = value as? JsonObject
-                    put(
-                        key,
-                        if (proof == null) value else buildJsonObject {
-                            proof.forEach { (proofKey, proofValue) ->
-                                if (proofKey != "jws") put(proofKey, proofValue)
-                            }
-                        },
-                    )
-                }
-                else -> put(key, value)
-            }
-        }
+internal fun proofSigningBytes(document: JsonObject, proof: JsonObject): ByteArray {
+    val proofOptions = buildJsonObject {
+        proof.forEach { (key, value) -> if (key != "jws") put(key, value) }
     }
-    return canonicalJson(document)
+    val unsecuredDocument = buildJsonObject {
+        document.forEach { (key, value) -> if (key != "proof") put(key, value) }
+    }
+    val digest = MessageDigest.getInstance("SHA-256")
+    val proofHash = digest.digest(canonicalJson(proofOptions))
+    val documentHash = digest.digest(canonicalJson(unsecuredDocument))
+    return proofHash + documentHash
 }
 
 internal fun canonicalJson(value: JsonElement): ByteArray = buildString {

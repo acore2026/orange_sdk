@@ -16,6 +16,7 @@ from agent_sdk.security import (
     DeviceSigningIdentity,
     DeviceSigningIdentityStore,
     DidKeyMessageSignatureVerifier,
+    _proof_signing_bytes,
     canonical_json,
     embedded_core_network_public_key_pem,
     identity_application_signing_bytes,
@@ -71,7 +72,7 @@ async def test_identity_signature_uses_field_encoding_and_excludes_request_id(tm
         "name": "Agent A",
         "public_key": identity.public_key_base64,
         "description": "AgentModel-X",
-        "metadata": {"region": "CN", "os": "Linux", "version": "0.11.0"},
+        "metadata": {"region": "CN", "os": "Linux", "version": "0.12.0"},
     }
 
     authentication = await authenticator.authenticate(
@@ -114,6 +115,63 @@ async def test_non_identity_proof_does_not_sign_http_request_id(tmp_path: Path):
     verify_proof(signed, store.ensure().public_key, expected_purpose="authentication")
 
 
+def test_proof_signing_bytes_match_cross_platform_golden_vector():
+    document = {
+        "agent_id": "did:example:a",
+        "intent": "Issue Network Ability Credential",
+        "timestamp": "2026-08-21T00:00:00Z",
+    }
+    proof = {
+        "type": "JsonWebSignature2020",
+        "verification_method": "did:key:zExample#zExample",
+        "proof_purpose": "authentication",
+        "created": "2026-08-21T00:00:00Z",
+        "jws": "excluded-from-proof-options",
+    }
+
+    verify_data = _proof_signing_bytes(
+        {**document, "proof": proof}, proof
+    )
+
+    assert len(verify_data) == 64
+    assert verify_data.hex() == (
+        "1a96f0c94b92eaa51b8fb1de55b1842584e66a24be9af373507bd956581ab0b3"
+        "31126a50a843b70e3b740f33884f6d0dc38054a942753600f9546c10a67122c1"
+    )
+
+
+def test_detached_jws_signs_proof_hash_then_document_hash(tmp_path: Path):
+    identity = DeviceSigningIdentityStore(tmp_path / "security").ensure()
+    document = {
+        "agent_id": "did:example:a",
+        "intent": "Issue Network Ability Credential",
+        "timestamp": "2026-08-21T00:00:00Z",
+    }
+    proof = identity.create_proof(
+        document,
+        purpose="authentication",
+        created="2026-08-21T00:00:00Z",
+    )
+    protected, detached_payload, encoded_signature = proof["jws"].split(".")
+    raw_signature = base64.urlsafe_b64decode(
+        encoded_signature + "=" * (-len(encoded_signature) % 4)
+    )
+    r_value = int.from_bytes(raw_signature[:32], "big")
+    s_value = int.from_bytes(raw_signature[32:], "big")
+    from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+
+    identity.public_key.verify(
+        encode_dss_signature(r_value, s_value),
+        protected.encode("ascii") + b"." + _proof_signing_bytes(document, proof),
+        ec.ECDSA(hashes.SHA256()),
+    )
+    assert detached_payload == ""
+    assert "verification_method" in proof
+    assert "proof_purpose" in proof
+    assert "verificationMethod" not in proof
+    assert "proofPurpose" not in proof
+
+
 async def test_a2a_detached_jws_verifies_with_sender_did_key(tmp_path: Path):
     store = DeviceSigningIdentityStore(tmp_path / "security")
     identity = store.ensure()
@@ -135,6 +193,19 @@ async def test_a2a_detached_jws_verifies_with_sender_did_key(tmp_path: Path):
     with pytest.raises(AgentSdkError) as caught:
         await DidKeyMessageSignatureVerifier().verify_a2a(
             tampered, identity.did_key
+        )
+    assert caught.value.code is ErrorCode.SIGNATURE_ERROR
+
+    tampered_proof = {
+        **signed,
+        "proof": {
+            **proof,
+            "verification_method": "did:key:zTampered#zTampered",
+        },
+    }
+    with pytest.raises(AgentSdkError) as caught:
+        await DidKeyMessageSignatureVerifier().verify_a2a(
+            tampered_proof, identity.did_key
         )
     assert caught.value.code is ErrorCode.SIGNATURE_ERROR
 
