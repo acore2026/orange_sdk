@@ -1,5 +1,7 @@
 package com.rayneo.agent.sdk.transport
 
+import com.rayneo.agent.sdk.AgentSdkException
+import com.rayneo.agent.sdk.ErrorCode
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.runTest
@@ -20,6 +22,47 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
 class OkHttpRuntimeTransportTest {
+    @Test
+    fun `UE info uses exact GET and returns active default PDU IPv4`() = runTest {
+        val server = MockWebServer()
+        server.enqueue(MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(UE_INFO_JSON))
+        server.start()
+        val transport = OkHttpRuntimeTransport(server.hostName, server.port)
+        try {
+            assertEquals("10.60.0.11", transport.getUeAgentIp())
+            val request = server.takeRequest(2, TimeUnit.SECONDS)!!
+            assertEquals("GET", request.method)
+            assertEquals(UE_INFO_PATH, request.path)
+            assertEquals(0L, request.bodySize)
+        } finally {
+            transport.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `UE info rejects inactive PDU Session`() = runTest {
+        val server = MockWebServer()
+        server.enqueue(MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody(UE_INFO_JSON.replace("\"active\"", "\"inactive\"")))
+        server.start()
+        val transport = OkHttpRuntimeTransport(server.hostName, server.port)
+        try {
+            val error = runCatching { transport.getUeAgentIp() }
+                .exceptionOrNull() as AgentSdkException
+            assertEquals(ErrorCode.RUNTIME_REJECTED, error.code)
+            assertEquals("pdu_sessions", error.field)
+        } finally {
+            transport.close()
+            server.shutdown()
+        }
+    }
+
     @Test
     fun `downlink websocket uses runtime port and allows out of order responses`() = runTest {
         val server = MockWebServer()
@@ -91,4 +134,32 @@ class OkHttpRuntimeTransportTest {
             put("payload", buildJsonObject { put("sequence", sequence) })
         }.toString()
 
+    private companion object {
+        val UE_INFO_JSON = """
+            {
+              "identity": {
+                "supi": "imsi-001010000000001",
+                "imei": "356938035643803",
+                "imeisv": "3569380356438031"
+              },
+              "serving_plmn": {"mcc": "001", "mnc": "01"},
+              "nas": {
+                "state": "session_ready",
+                "registered": true,
+                "security_context": true
+              },
+              "pdu_sessions": [{
+                "pdu_session_id": 1,
+                "state": "active",
+                "dnn": "internet",
+                "type": "IPv4",
+                "snssai": {"sst": 1, "sd": "010203"},
+                "ssc_mode": 1,
+                "ipv4": "10.60.0.11",
+                "auto_establish": true,
+                "default_route": true
+              }]
+            }
+        """.trimIndent()
+    }
 }

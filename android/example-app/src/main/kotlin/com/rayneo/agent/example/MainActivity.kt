@@ -109,7 +109,6 @@ class MainActivity : Activity() {
                     localVlanIp = config.localVlanIp,
                     localTcpPort = config.tcpPort,
                     localUdpPort = config.udpPort,
-                    agentTunCidr = config.agentTunCidr,
                     masqueServerUrl = config.masqueUrl,
                     masqueAuthorization = config.masqueToken?.let { "Bearer $it" },
                 )
@@ -146,7 +145,6 @@ class MainActivity : Activity() {
         val localVlanIp: String,
         val tcpPort: Int,
         val udpPort: Int,
-        val agentTunCidr: String,
         val masqueUrl: String,
         val agentId: String,
         val agentName: String,
@@ -158,7 +156,6 @@ class MainActivity : Activity() {
             fun fromIntent(intent: Intent): ExampleConfig? {
                 val runtimeIp = intent.getStringExtra("runtime_ip") ?: return null
                 val localVlanIp = intent.getStringExtra("local_vlan_ip") ?: return null
-                val agentTunCidr = intent.getStringExtra("agent_tun_cidr") ?: return null
                 val masqueUrl = intent.getStringExtra("masque_url") ?: return null
                 val agentId = intent.getStringExtra("agent_id") ?: return null
                 val agentName = intent.getStringExtra("agent_name") ?: return null
@@ -168,7 +165,6 @@ class MainActivity : Activity() {
                     localVlanIp,
                     intent.getIntExtra("tcp_port", 4001),
                     intent.getIntExtra("udp_port", 28443),
-                    agentTunCidr,
                     masqueUrl,
                     agentId,
                     agentName,
@@ -185,7 +181,7 @@ class MainActivity : Activity() {
             val usage = """
                 Pass deployment values through intent extras; no IP is hardcoded:
                 runtime_ip, runtime_port, local_vlan_ip, tcp_port, udp_port,
-                agent_tun_cidr, masque_url, agent_id, agent_name, optional masque_token,
+                masque_url, agent_id, agent_name, optional masque_token,
                 test_capabilities (comma separated), and priority.
             """.trimIndent()
         }

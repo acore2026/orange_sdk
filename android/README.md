@@ -45,11 +45,12 @@ exception.
 
 Only the MASQUE URL uses HTTPS/HTTP/3. Later AgentRuntime uplink control calls
 use HTTP. `initialize` does not call a health-check or endpoint-registration
-REST API and does not upload the local IP, ports, or TUN address. Its only
-AgentRuntime interaction is opening `/v1/acn/downlink-websocket` on the same
-host and port used by later uplink REST calls; no additional port is configured.
-A2A continues to use HTTP. The AAR manifest enables cleartext traffic for this
-internal deployment.
+API and does not upload the local IP, ports, or TUN address. It first sends a
+bodyless `GET /v1/ue/info`, selects the single active default IPv4 PDU Session,
+and configures its `ipv4` as the Agent TUN address with a `/32` prefix. It then
+opens `/v1/acn/downlink-websocket` on the same host and port; no additional port
+is configured. A2A continues to use HTTP. The AAR manifest enables cleartext
+traffic for this internal deployment.
 
 ## Test-only capability VC issuance
 
@@ -108,7 +109,6 @@ adb shell am start -n com.rayneo.agent.example/.MainActivity \
   --es local_vlan_ip 192.168.1.10 \
   --ei tcp_port 4001 \
   --ei udp_port 28443 \
-  --es agent_tun_cidr 8.8.8.7/24 \
   --es agent_id 'did:example:agent-a' \
   --es agent_name 'Agent A' \
   --es test_capabilities 'robot-control,voice' \
@@ -117,10 +117,11 @@ adb shell am start -n com.rayneo.agent.example/.MainActivity \
   --es masque_url https://192.168.3.10:4433
 ```
 
-The application must provide its locally assigned `agent_tun_cidr`. It must
-match that device's `agent_ip + uesimtun` mapping on the MASQUE Proxy. The SDK
-validates and uses the CIDR locally before creating the VPN TUN; it never sends
-the value to AgentRuntime. The effective CIDR is available as
+The application does not provide an Agent TUN IP. `GET /v1/ue/info` must report
+`nas.registered=true`, `nas.state=session_ready`, a ready security context, and
+one active default IPv4 PDU Session. The SDK uses that session's `ipv4` locally
+as `/32`; the address must match the device's `agent_ip + uesimtun` mapping on
+the MASQUE Proxy. The effective CIDR is available as
 `SdkInitResult.agentTunCidr`.
 
 Core-network downlink frames use `kind + request_id + message_type +

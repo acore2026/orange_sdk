@@ -27,6 +27,7 @@ internal interface MessageSignatureVerifier {
 }
 
 interface RuntimeTransport {
+    suspend fun getUeAgentIp(): String
     suspend fun startDownlink(
         handler: suspend (String, Int, JsonObject) -> NetworkMessageAction,
     )

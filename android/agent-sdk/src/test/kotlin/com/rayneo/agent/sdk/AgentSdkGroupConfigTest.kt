@@ -96,22 +96,13 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
-    fun `initialize registers only the runtime downlink websocket`() = runTest {
+    fun `initialize queries UE info and registers runtime downlink websocket`() = runTest {
         initializeSdk()
 
+        assertEquals(1, runtime.ueInfoRequests)
         assertEquals("", runtime.lastPath)
         assertNotNull(runtime.downlinkHandler)
-        assertEquals("8.8.8.7/24", tunnel.establishedConfiguration?.agentTunCidr)
-    }
-
-    @Test
-    fun `initialize rejects invalid local Agent TUN CIDR`() = runTest {
-        val error = runCatching { initializeSdk("8.8.8.7/33") }
-            .exceptionOrNull() as AgentSdkException
-
-        assertEquals(ErrorCode.INVALID_ARGUMENT, error.code)
-        assertEquals("agentTunCidr", error.field)
-        assertEquals(null, runtime.downlinkHandler)
+        assertEquals("8.8.8.7/32", tunnel.establishedConfiguration?.agentTunCidr)
     }
 
     @Test
@@ -298,19 +289,18 @@ class AgentSdkGroupConfigTest {
         })
     }
 
-    private suspend fun initializeSdk(agentTunCidr: String = "8.8.8.7/24") {
+    private suspend fun initializeSdk() {
         val result = sdk.initialize(
             agentRuntimeIp = "192.168.3.10",
             agentRuntimePort = 8080,
             localVlanIp = "192.168.1.10",
             localTcpPort = 4001,
             localUdpPort = 28443,
-            agentTunCidr = agentTunCidr,
             masqueServerUrl = "https://192.168.3.10:4433",
         )
         assertEquals("8.8.8.7:4001", result.agentTcpEndpoint)
-        assertEquals("8.8.8.7/24", result.agentTunCidr)
-        assertEquals("8.8.8.7/24", tunnel.establishedConfiguration?.agentTunCidr)
+        assertEquals("8.8.8.7/32", result.agentTunCidr)
+        assertEquals("8.8.8.7/32", tunnel.establishedConfiguration?.agentTunCidr)
         assertTrue(tunnel.establishedConfiguration?.routes?.isEmpty() == true)
         assertEquals(tunnel.clientIdentityDirectory, masque.configuration?.identityDirectory)
         sdk.restoreLocalProfile(
@@ -394,7 +384,13 @@ class AgentSdkGroupConfigTest {
         var lastMethod = ""
         var lastPath = ""
         var lastBody: JsonObject? = null
+        var ueInfoRequests = 0
         var downlinkHandler: (suspend (String, Int, JsonObject) -> NetworkMessageAction)? = null
+
+        override suspend fun getUeAgentIp(): String {
+            ueInfoRequests += 1
+            return "8.8.8.7"
+        }
 
         override suspend fun startDownlink(
             handler: suspend (String, Int, JsonObject) -> NetworkMessageAction,

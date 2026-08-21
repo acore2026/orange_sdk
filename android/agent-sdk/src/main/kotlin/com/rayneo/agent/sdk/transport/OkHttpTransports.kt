@@ -12,7 +12,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
@@ -25,12 +28,14 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.net.InetAddress
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 const val DOWNLINK_WEBSOCKET_PATH = "/v1/acn/downlink-websocket"
+const val UE_INFO_PATH = "/v1/ue/info"
 
 class OkHttpRuntimeTransport(
     host: String,
@@ -42,6 +47,121 @@ class OkHttpRuntimeTransport(
     private val downlinkScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val downlinkStarted = AtomicBoolean(false)
     @Volatile private var downlinkSocket: WebSocket? = null
+
+    override suspend fun getUeAgentIp(): String = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url(baseUrl + UE_INFO_PATH)
+            .get()
+            .build()
+        val payload = try {
+            Log.i(TAG, "GET $UE_INFO_PATH")
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw AgentSdkException(
+                        ErrorCode.RUNTIME_REJECTED,
+                        "Runtime returned HTTP ${response.code} for $UE_INFO_PATH",
+                    )
+                }
+                json.parseToJsonElement(response.body?.string() ?: "{}") as? JsonObject
+                    ?: throw AgentSdkException(
+                        ErrorCode.RUNTIME_REJECTED,
+                        "GET $UE_INFO_PATH response must be a JSON object",
+                    )
+            }
+        } catch (error: AgentSdkException) {
+            throw error
+        } catch (error: Exception) {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_UNREACHABLE,
+                "GET $UE_INFO_PATH failed",
+                retryable = true,
+                cause = error,
+            )
+        }
+        selectUeAgentIp(payload)
+    }
+
+    private fun selectUeAgentIp(payload: JsonObject): String {
+        val nas = payload["nas"] as? JsonObject
+            ?: ueInfoRejected("response has no valid nas object", "nas")
+        if (nas.boolean("registered") != true) {
+            ueInfoRejected("UERANSIM UE is not registered", "nas.registered", true)
+        }
+        if (nas.string("state") != "session_ready") {
+            ueInfoRejected("UERANSIM NAS state is not session_ready", "nas.state", true)
+        }
+        if (nas.boolean("security_context") != true) {
+            ueInfoRejected(
+                "UERANSIM NAS security context is not ready",
+                "nas.security_context",
+                true,
+            )
+        }
+
+        val sessions = payload["pdu_sessions"] as? JsonArray
+            ?: ueInfoRejected("response has no valid pdu_sessions array", "pdu_sessions")
+        val activeIpv4 = mutableListOf<Pair<String, Boolean>>()
+        sessions.forEach { element ->
+            val session = element as? JsonObject ?: return@forEach
+            if (session.string("state") != "active" || session.string("type") != "IPv4") {
+                return@forEach
+            }
+            val rawIpv4 = session.string("ipv4")
+                ?: ueInfoRejected(
+                    "active IPv4 PDU Session has no ipv4 address",
+                    "pdu_sessions.ipv4",
+                )
+            activeIpv4 += normalizeIpv4(rawIpv4) to
+                (session.boolean("default_route") == true)
+        }
+        val defaults = activeIpv4.filter { it.second }.map { it.first }
+        if (defaults.size != 1) {
+            ueInfoRejected(
+                "exactly one active default IPv4 PDU Session is required",
+                "pdu_sessions",
+                true,
+            )
+        }
+        return defaults.single()
+    }
+
+    private fun normalizeIpv4(value: String): String {
+        if (!IPV4_LITERAL.matches(value)) {
+            ueInfoRejected("PDU Session ipv4 must be an IPv4 literal", "pdu_sessions.ipv4")
+        }
+        val address = try {
+            InetAddress.getByName(value)
+        } catch (error: Exception) {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "PDU Session ipv4 must be an IPv4 literal",
+                "pdu_sessions.ipv4",
+                cause = error,
+            )
+        }
+        if (address.address.size != 4) {
+            ueInfoRejected("PDU Session ipv4 must be an IPv4 literal", "pdu_sessions.ipv4")
+        }
+        return address.hostAddress
+            ?: ueInfoRejected("PDU Session ipv4 has no normalized form", "pdu_sessions.ipv4")
+    }
+
+    private fun JsonObject.string(field: String): String? =
+        (this[field] as? JsonPrimitive)?.contentOrNull
+
+    private fun JsonObject.boolean(field: String): Boolean? =
+        (this[field] as? JsonPrimitive)?.booleanOrNull
+
+    private fun ueInfoRejected(
+        message: String,
+        field: String,
+        retryable: Boolean = false,
+    ): Nothing = throw AgentSdkException(
+        ErrorCode.RUNTIME_REJECTED,
+        "GET $UE_INFO_PATH $message",
+        field,
+        retryable,
+    )
 
     override suspend fun startDownlink(
         handler: suspend (String, Int, JsonObject) -> NetworkMessageAction,
@@ -140,6 +260,7 @@ class OkHttpRuntimeTransport(
 
     private companion object {
         const val TAG = "AgentSdkRuntime"
+        val IPV4_LITERAL = Regex("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}")
     }
 
     override suspend fun request(method: String, path: String, body: JsonObject): JsonObject =

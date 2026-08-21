@@ -21,7 +21,7 @@ outer connection can be routed back into the VPN and recurse.
 
 The core negotiates `:protocol=connect-ip`, `Capsule-Protocol: ?1` and HTTP
 Datagrams through `connect-ip-go`; it validates the ADDRESS_ASSIGN address
-against the locally configured Agent TUN CIDR, waits for route advertisement,
+against the Agent TUN CIDR derived from `GET /v1/ue/info`, waits for route advertisement,
 preserves packet boundaries, and bounds packets by the configured MTU. This
 internal-test build disables server certificate verification; the client
 identity is generated and persisted by the core, so no certificate path is

@@ -57,8 +57,6 @@ def test_linux_agent_parser_accepts_full_flow_values():
             "192.168.3.10",
             "--local-vlan-ip",
             "192.168.1.10",
-            "--agent-tun-cidr",
-            "8.8.8.7/24",
             "--agent-name",
             "Agent A",
             "--owner",
@@ -74,7 +72,6 @@ def test_linux_agent_parser_accepts_full_flow_values():
         ]
     )
     assert arguments.message == {"type": "text", "content": "hello"}
-    assert arguments.agent_tun_cidr == "8.8.8.7/24"
     assert arguments.test_capability == ["robot-control", "voice"]
     assert arguments.keep_identity is False
 
@@ -93,8 +90,6 @@ async def test_linux_agent_full_flow_executes_every_business_api():
             "192.168.3.10",
             "--local-vlan-ip",
             "192.168.1.10",
-            "--agent-tun-cidr",
-            "8.8.8.7/24",
             "--agent-name",
             "Agent A",
             "--owner",
@@ -123,7 +118,7 @@ async def test_linux_agent_full_flow_executes_every_business_api():
     )
     stream = SimpleNamespace(recv=AsyncMock(return_value={"frame": "processed"}))
     sdk = SimpleNamespace(
-        init=AsyncMock(return_value=SimpleNamespace(agent_tun_cidr="8.8.8.7/24")),
+        init=AsyncMock(return_value=SimpleNamespace(agent_tun_cidr="8.8.8.7/32")),
         apply_identity=AsyncMock(return_value=profile),
         set_local_profile_for_restore=Mock(),
         get_network_ability=AsyncMock(return_value=ability),

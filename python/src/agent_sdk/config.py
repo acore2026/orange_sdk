@@ -110,7 +110,7 @@ class SdkConfig:
         local_vlan_ip: str,
         local_tcp_port: int,
         local_udp_port: int,
-        agent_tun_cidr: str,
+        agent_tun_ip: str,
         masque_server_url: str,
         masque_authorization: str | None,
         tun_name: str,
@@ -136,13 +136,20 @@ class SdkConfig:
             log_backup_count=log_backup_count,
         )
         try:
-            normalized_tun_cidr = str(ip_interface(agent_tun_cidr))
+            normalized_tun_ip = ip_address(agent_tun_ip)
         except ValueError as exc:
             raise AgentSdkError(
-                ErrorCode.INVALID_ARGUMENT,
-                "agent_tun_cidr must be a valid IP interface",
-                field="agent_tun_cidr",
+                ErrorCode.RUNTIME_REJECTED,
+                "GET /v1/ue/info returned an invalid PDU Session IPv4 address",
+                field="pdu_sessions.ipv4",
             ) from exc
+        if normalized_tun_ip.version != 4:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "GET /v1/ue/info PDU Session address must be IPv4",
+                field="pdu_sessions.ipv4",
+            )
+        normalized_tun_cidr = f"{normalized_tun_ip}/32"
 
         return cls(
             agent_runtime_ip=agent_runtime_ip,

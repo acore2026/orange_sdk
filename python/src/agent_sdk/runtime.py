@@ -5,6 +5,7 @@ import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
+from ipaddress import ip_address
 from typing import Any, Mapping
 
 import httpx
@@ -16,6 +17,7 @@ from .models import NetworkMessageAction
 
 
 DOWNLINK_WEBSOCKET_PATH = "/v1/acn/downlink-websocket"
+UE_INFO_PATH = "/v1/ue/info"
 
 
 class HttpRuntimeTransport:
@@ -258,8 +260,11 @@ class HttpRuntimeTransport:
                 error=str(exc),
             )
 
-    async def request(
-        self, method: str, path: str, body: Mapping[str, Any]
+    async def _request_json(
+        self,
+        method: str,
+        path: str,
+        body: Mapping[str, Any] | None,
     ) -> Mapping[str, Any]:
         request_id = uuid.uuid4().hex
         url = f"{self._base_url}{path}"
@@ -275,7 +280,8 @@ class HttpRuntimeTransport:
             body=body,
         )
         try:
-            response = await self._client.request(method, path, json=dict(body))
+            request_arguments = {} if body is None else {"json": dict(body)}
+            response = await self._client.request(method, path, **request_arguments)
             response.raise_for_status()
         except httpx.TimeoutException as exc:
             log_event(
@@ -357,6 +363,88 @@ class HttpRuntimeTransport:
                 ErrorCode.RUNTIME_REJECTED, "Runtime response must be a JSON object"
             )
         return payload
+
+    async def get_ue_agent_ip(self) -> str:
+        payload = await self._request_json("GET", UE_INFO_PATH, None)
+        nas = payload.get("nas")
+        if not isinstance(nas, Mapping):
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "GET /v1/ue/info response has no valid nas object",
+                field="nas",
+            )
+        if nas.get("registered") is not True:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "UERANSIM UE is not registered",
+                field="nas.registered",
+                retryable=True,
+            )
+        if nas.get("state") != "session_ready":
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "UERANSIM NAS state is not session_ready",
+                field="nas.state",
+                retryable=True,
+            )
+        if nas.get("security_context") is not True:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "UERANSIM NAS security context is not ready",
+                field="nas.security_context",
+                retryable=True,
+            )
+
+        sessions = payload.get("pdu_sessions")
+        if not isinstance(sessions, list):
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "GET /v1/ue/info response has no valid pdu_sessions array",
+                field="pdu_sessions",
+            )
+        active_ipv4: list[tuple[str, bool]] = []
+        for session in sessions:
+            if not isinstance(session, Mapping):
+                continue
+            if session.get("state") != "active" or session.get("type") != "IPv4":
+                continue
+            raw_ipv4 = session.get("ipv4")
+            if not isinstance(raw_ipv4, str):
+                raise AgentSdkError(
+                    ErrorCode.RUNTIME_REJECTED,
+                    "active IPv4 PDU Session has no ipv4 address",
+                    field="pdu_sessions.ipv4",
+                )
+            try:
+                parsed_ipv4 = ip_address(raw_ipv4)
+            except ValueError as exc:
+                raise AgentSdkError(
+                    ErrorCode.RUNTIME_REJECTED,
+                    "PDU Session ipv4 must be an IPv4 literal",
+                    field="pdu_sessions.ipv4",
+                ) from exc
+            if parsed_ipv4.version != 4:
+                raise AgentSdkError(
+                    ErrorCode.RUNTIME_REJECTED,
+                    "PDU Session ipv4 must be an IPv4 literal",
+                    field="pdu_sessions.ipv4",
+                )
+            active_ipv4.append((str(parsed_ipv4), session.get("default_route") is True))
+
+        defaults = [address for address, is_default in active_ipv4 if is_default]
+        if len(defaults) != 1:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "exactly one active default IPv4 PDU Session is required",
+                field="pdu_sessions",
+                retryable=True,
+            )
+        return defaults[0]
+
+    async def request(
+        self, method: str, path: str, body: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        return await self._request_json(method, path, body)
 
     async def close(self) -> None:
         self._downlink_closing = True

@@ -283,7 +283,6 @@ class AgentSdk:
         local_tcp_port: int,
         local_udp_port: int,
         *,
-        agent_tun_cidr: str,
         masque_server_url: str,
         masque_authorization: str | None = None,
         tun_name: str = "agent_tun0",
@@ -310,7 +309,6 @@ class AgentSdk:
                 "local_vlan_ip": local_vlan_ip,
                 "local_tcp_port": local_tcp_port,
                 "local_udp_port": local_udp_port,
-                "agent_tun_cidr": agent_tun_cidr,
                 "masque_server_url": masque_server_url,
                 "masque_authorization": masque_authorization,
                 "tun_name": tun_name,
@@ -327,13 +325,12 @@ class AgentSdk:
                     ErrorCode.INVALID_ARGUMENT,
                     f"cannot init SDK in state {self._state}",
                 )
-            config = SdkConfig.validate(
+            SdkConfig.validate_client_parameters(
                 agent_runtime_ip=agent_runtime_ip,
                 agent_runtime_port=agent_runtime_port,
                 local_vlan_ip=local_vlan_ip,
                 local_tcp_port=local_tcp_port,
                 local_udp_port=local_udp_port,
-                agent_tun_cidr=agent_tun_cidr,
                 masque_server_url=masque_server_url,
                 masque_authorization=masque_authorization,
                 tun_name=tun_name,
@@ -350,6 +347,23 @@ class AgentSdk:
             self._runtime = self._runtime_factory(
                 agent_runtime_ip,
                 agent_runtime_port,
+            )
+            agent_tun_ip = await self._runtime.get_ue_agent_ip()
+            config = SdkConfig.validate(
+                agent_runtime_ip=agent_runtime_ip,
+                agent_runtime_port=agent_runtime_port,
+                local_vlan_ip=local_vlan_ip,
+                local_tcp_port=local_tcp_port,
+                local_udp_port=local_udp_port,
+                agent_tun_ip=agent_tun_ip,
+                masque_server_url=masque_server_url,
+                masque_authorization=masque_authorization,
+                tun_name=tun_name,
+                tun_mtu=tun_mtu,
+                log_file_path=log_file_path,
+                log_level=log_level,
+                log_max_bytes=log_max_bytes,
+                log_backup_count=log_backup_count,
             )
             self._config = config
             self._tun = await self._tun_factory(

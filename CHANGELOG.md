@@ -2,6 +2,31 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-21 — SDK 初始化改为查询 UERANSIM UE 信息
+
+### 修改原因
+
+- 上一提交将用户误粘贴的下行 WebSocket 协议当作了 `sdk.init` 的 UE IP 获取接口，导致公开 API 需要额外传入 `agent_tun_cidr`。
+- 正确的初始化查询是 `GET /v1/ue/info`；响应中活动 IPv4 PDU Session 的 `ipv4` 就是本机 Agent TUN IP。
+- 该接口是无请求体的状态查询，仍不需要向 AgentRuntime 同步端侧物理 IP、端口或自行分配的 TUN 地址。
+
+### 修改方式
+
+- Python `AgentSdk.init()` 和 Android `AgentSdk.initialize()` 删除公开的 `agent_tun_cidr`/`agentTunCidr` 参数，初始化时先对同一 AgentRuntime IP/端口发起无 body 的 `GET /v1/ue/info`。
+- 两端统一要求 `nas.registered=true`、`nas.state=session_ready`、`nas.security_context=true`；只选择活动 IPv4 PDU Session，优先且要求唯一的 `default_route=true` Session。
+- 对所选 `ipv4` 做 IPv4 字面量校验和规范化，按点到点 TUN 构造 `<ipv4>/32`；无可用 Session、多个默认 Session 或非法 IP 均使初始化明确失败。
+- 原有 `/v1/acn/downlink-websocket` 仍作为独立的核心网主动下行通道保留；初始化顺序为 UE 信息查询、TUN/MASQUE 建立、WebSocket 握手。
+- Linux/Android example 删除 TUN IP 入参；客户 README 同步新流程。本地 HTTP 接口文档和用户友好版设计文档已增加完整请求/响应和选择规则，但按交付排除规则继续被 Git 忽略、不进入提交或远端；原始《SDK设计文档》保持不动。
+- Python Wheel 版本从 `0.9.0` 升级为 `0.10.0`。
+
+### 验证内容
+
+- Python `compileall` 和全量测试通过（`65 passed`）；新增精确 GET URL/空 body、正常 PDU IPv4 提取和 NAS/PDU 非就绪拒绝覆盖。
+- Android JVM 单元测试共 `23 tests / 0 skipped / 0 failures / 0 errors`；新增精确 GET 报文、PDU IPv4 提取和非活动 Session 拒绝覆盖。
+- `agent_connect_sdk-0.10.0-py3-none-any.whl` 通过 `twine check`，在独立虚拟环境安装后显示版本 `0.10.0`，`agent-sdk-self-check` 输出 `FULL FLOW DEMO PASSED`，并确认初始化结果为 `agent_tun_cidr=8.8.8.7/32`。Wheel SHA-256 为 `ddd0d20676758bcf10cd841a034b5c9abaa77a707d27be0b6e7594ccb4f392c1`。
+- Android Release AAR 和 example Debug APK 构建成功，SHA-256 分别为 `85127cc82c1d61d04e1d1ae63ea750b0c51a4d9dd2591bbc28810c33009b96b3` 和 `e645ed2e6eea207446f04dc2601df3d5949dff93003be75f62405b09f14b8f8c`；Wheel、AAR 和 APK 均无私钥资源。
+- HTTP 接口文档的 17 个 JSON 示例和用户友好版设计文档的 2 个 JSON 示例均通过标准解析；原始《SDK设计文档》SHA-256 仍为 `d2509f323338d0cdb948ceff36e32c3ae71d59c646916b687168b4c2e862947b`。
+
 ## 2026-08-21 — SDK 初始化收敛为 WebSocket 下行注册
 
 ### 修改原因

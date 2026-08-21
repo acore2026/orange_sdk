@@ -126,7 +126,6 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
         args.local_vlan_ip,
         args.tcp_port,
         args.udp_port,
-        agent_tun_cidr=args.agent_tun_cidr,
         masque_server_url=args.masque_url,
         masque_authorization=(
             f"Bearer {args.masque_token}" if args.masque_token else None
@@ -294,11 +293,6 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--local-vlan-ip", required=True)
     value.add_argument("--tcp-port", type=int, default=4001)
     value.add_argument("--udp-port", type=int, default=28443)
-    value.add_argument(
-        "--agent-tun-cidr",
-        required=True,
-        help="local UE/TUN CIDR, for example 8.8.8.7/24; never sent to AgentRuntime",
-    )
     value.add_argument("--agent-id", help="optional expected ID returned by apply_identity")
     value.add_argument("--agent-name", required=True)
     value.add_argument("--owner", required=True)

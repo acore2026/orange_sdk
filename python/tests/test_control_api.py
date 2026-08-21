@@ -2,10 +2,41 @@ from __future__ import annotations
 
 import base64
 import httpx
+import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from agent_sdk import AgentSdkError, ErrorCode
 from agent_sdk.runtime import HttpRuntimeTransport
+
+
+def _ue_info_response() -> dict:
+    return {
+        "identity": {
+            "supi": "imsi-001010000000001",
+            "imei": "356938035643803",
+            "imeisv": "3569380356438031",
+        },
+        "serving_plmn": {"mcc": "001", "mnc": "01"},
+        "nas": {
+            "state": "session_ready",
+            "registered": True,
+            "security_context": True,
+        },
+        "pdu_sessions": [
+            {
+                "pdu_session_id": 1,
+                "state": "active",
+                "dnn": "internet",
+                "type": "IPv4",
+                "snssai": {"sst": 1, "sd": "010203"},
+                "ssc_mode": 1,
+                "ipv4": "10.60.0.11",
+                "auto_establish": True,
+                "default_route": True,
+            }
+        ],
+    }
 
 
 async def test_identity_uses_raw_request_and_vc0_response(sdk_fixture):
@@ -185,3 +216,69 @@ async def test_runtime_transport_uses_plain_http_base_url():
         assert str(transport._client.base_url) == "http://runtime.example:8080"
     finally:
         await transport.close()
+
+
+async def test_ue_info_uses_exact_get_without_body_and_returns_pdu_ipv4():
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, request=request, json=_ue_info_response())
+
+    transport = HttpRuntimeTransport("runtime.example", 8080)
+    await transport._client.aclose()
+    transport._client = httpx.AsyncClient(
+        base_url="http://runtime.example:8080",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert await transport.get_ue_agent_ip() == "10.60.0.11"
+    finally:
+        await transport.close()
+
+    assert captured[0].method == "GET"
+    assert captured[0].url == "http://runtime.example:8080/v1/ue/info"
+    assert captured[0].content == b""
+
+
+@pytest.mark.parametrize(
+    "mutate,field",
+    [
+        (lambda body: body["nas"].update(registered=False), "nas.registered"),
+        (lambda body: body["nas"].update(state="registered"), "nas.state"),
+        (
+            lambda body: body["nas"].update(security_context=False),
+            "nas.security_context",
+        ),
+        (lambda body: body.update(pdu_sessions=[]), "pdu_sessions"),
+        (
+            lambda body: body["pdu_sessions"][0].update(default_route=False),
+            "pdu_sessions",
+        ),
+        (
+            lambda body: body["pdu_sessions"][0].update(ipv4="not-an-ip"),
+            "pdu_sessions.ipv4",
+        ),
+    ],
+)
+async def test_ue_info_rejects_unready_or_invalid_assignment(mutate, field):
+    response_body = _ue_info_response()
+    mutate(response_body)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, json=response_body)
+
+    transport = HttpRuntimeTransport("runtime.example", 8080)
+    await transport._client.aclose()
+    transport._client = httpx.AsyncClient(
+        base_url="http://runtime.example:8080",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(AgentSdkError) as raised:
+            await transport.get_ue_agent_ip()
+    finally:
+        await transport.close()
+
+    assert raised.value.code is ErrorCode.RUNTIME_REJECTED
+    assert raised.value.field == field

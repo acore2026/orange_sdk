@@ -33,7 +33,7 @@ PEER_AGENT_ID = "did:example:agent-b"
 
 class DemoTun:
     name = "agent_tun0"
-    cidr = "8.8.8.7/24"
+    cidr = "8.8.8.7/32"
     mtu = 1280
 
     def __init__(self) -> None:
@@ -69,6 +69,9 @@ class DemoRuntime:
     def __init__(self) -> None:
         self.requests: list[tuple[str, str, Mapping[str, Any]]] = []
         self.downlink_handler = None
+
+    async def get_ue_agent_ip(self) -> str:
+        return "8.8.8.7"
 
     async def start_downlink(self, handler) -> None:
         self.downlink_handler = handler
@@ -327,7 +330,6 @@ async def run_demo(
             "192.168.1.10",
             4001,
             28443,
-            agent_tun_cidr="8.8.8.7/24",
             masque_server_url="https://192.168.3.10:4433",
             masque_authorization="Bearer demo-device-a-token",
             log_file_path=log_file_path,

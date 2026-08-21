@@ -17,7 +17,7 @@ PEER_ID = "did:example:agent-b"
 
 class FakeTun:
     name = "agent_tun0"
-    cidr = "8.8.8.7/24"
+    cidr = "8.8.8.7/32"
     mtu = 1280
 
     def __init__(self) -> None:
@@ -56,8 +56,13 @@ class FakeMasque:
 class FakeRuntime:
     def __init__(self) -> None:
         self.requests: list[tuple[str, str, Mapping[str, Any]]] = []
+        self.ue_info_requests = 0
         self.closed = False
         self.downlink_handler = None
+
+    async def get_ue_agent_ip(self) -> str:
+        self.ue_info_requests += 1
+        return "8.8.8.7"
 
     async def start_downlink(self, handler) -> None:
         self.downlink_handler = handler
@@ -331,7 +336,6 @@ async def sdk_fixture(tmp_path):
         "192.168.1.10",
         4001,
         28443,
-        agent_tun_cidr="8.8.8.7/24",
         masque_server_url="https://192.168.3.10:4433",
         log_file_path=str(tmp_path / "agent-sdk.log"),
     )

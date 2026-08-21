@@ -30,6 +30,8 @@ class ControlRequestAuthenticator(Protocol):
 
 
 class RuntimeTransport(Protocol):
+    async def get_ue_agent_ip(self) -> str: ...
+
     async def start_downlink(
         self,
         handler: Callable[
