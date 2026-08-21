@@ -29,8 +29,11 @@ async def test_a2a_signature_key_comes_from_committed_member(sdk_fixture):
         {
             "message_id": "m1",
             "group_id": "g1",
-            "sender_agent_id": PEER_ID,
-            "target_agent_id": "did:example:agent-a",
+            "src_agent_id": PEER_ID,
+            "dst_agent_id": "did:example:agent-a",
+            "type": "text",
+            "task_id": "task-patrol",
+            "timestamp": "2026-08-21T09:00:00Z",
             "payload": {"hello": "world"},
             "proof": {"jws": "example"},
         }

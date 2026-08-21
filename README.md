@@ -2,7 +2,7 @@
 
 本仓库包含 Linux/Python SDK 和 Android/RayNeoOS SDK。
 
-当前 Linux/Python 版本可以构建为 `agent-connect-sdk` wheel。客户安装 wheel 后即可导入 `agent_sdk`，端侧通过 TUN + MASQUE CONNECT-IP 接入 UERANSIM/5GC，发送消息时只需要提供 `group_id`、`target_agent_id` 和消息体。
+当前 Linux/Python 版本可以构建为 `agent-connect-sdk` wheel。客户安装 wheel 后即可导入 `agent_sdk`，端侧通过 TUN + MASQUE CONNECT-IP 接入 UERANSIM/5GC。发送消息时应用提供 `group_id`、`target_agent_id`、消息类型、任务 ID 和消息体；IP、端口和路由始终由 SDK 缓存解析。
 
 完整的 wheel 构建、客户安装、MASQUE 服务器/端侧配置、全流程调用示例、函数清单和故障排查见：
 
@@ -36,6 +36,13 @@ AgentRuntime IP 和端口。初始化不再调用 `/health` 或 `/sdk/v1/endpoin
 Session 的 `ipv4` 字段得到本机 Agent TUN IP；该 GET 无请求体，不向
 AgentRuntime 同步本机信息。
 本地 HTTP Server 只保留 Agent 间 `/A2A/message`。
+
+控制面写请求由 SDK 自动生成普通 UUID 格式的 `request_id`。身份申请严格按
+`ACN-H-ID-v1` 的 LP16/U64BE 字段编码签名；其他控制请求使用 `proof`。
+核心网群组配置下行消息类型固定为
+`ACN_AGENT_GROUPING_NOTIFICATION`。A2A 消息使用
+`src_agent_id/dst_agent_id/type/task_id/payload`，成功响应为
+`{"status":"OK"}`。
 
 快速验证 Python 实现：
 

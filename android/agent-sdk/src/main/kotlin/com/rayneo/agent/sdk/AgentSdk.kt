@@ -232,10 +232,8 @@ class AgentSdk internal constructor(
         return when {
             messageType == "ACN_AGENT_GROUPING_INVITATION" ->
                 handleGroupInvitation(payload)
-            messageType == "ACN_AGENT_GROUP_CONFIG" ||
-                messageType == "ACF_GROUP_CONFIG" ||
-                payload["notification_type"]?.jsonPrimitive?.contentOrNull ==
-                "acf_group_config" -> handleGroupConfig(payload)
+            messageType == "ACN_AGENT_GROUPING_NOTIFICATION" ->
+                handleGroupConfig(payload)
             else -> networkListener?.onNetworkMessage(
                 NetworkMessageType.UNKNOWN,
                 payload,
@@ -254,8 +252,11 @@ class AgentSdk internal constructor(
             "Group message listener is unavailable",
         )
         val groupId = payload.requireString("group_id")
-        val senderId = payload.requireString("sender_agent_id")
-        if (payload.requireString("target_agent_id") != localProfile.agentId) {
+        val senderId = payload.requireString("src_agent_id")
+        payload.requireString("type")
+        payload.requireString("task_id")
+        payload.requireString("timestamp")
+        if (payload.requireString("dst_agent_id") != localProfile.agentId) {
             throw AgentSdkException(
                 ErrorCode.TARGET_NOT_IN_GROUP,
                 "A2A message targets another agent",
@@ -274,6 +275,8 @@ class AgentSdk internal constructor(
         groupId: String,
         targetAgentId: String,
         jsonMessage: JsonObject,
+        messageType: String,
+        taskId: String,
         timeoutSeconds: Double = 5.0,
     ): MessageReceipt {
         requireReady()
@@ -288,15 +291,31 @@ class AgentSdk internal constructor(
             ErrorCode.GROUP_NOT_ACTIVE,
             "Local identity is unavailable",
         )
+        if (messageType.isEmpty()) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "messageType must be a non-empty string",
+                "messageType",
+            )
+        }
+        if (taskId.isEmpty()) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "taskId must be a non-empty string",
+                "taskId",
+            )
+        }
         val target = groupCache!!.resolve(groupId, targetAgentId)
         val messageId = UUID.randomUUID().toString()
         val unsigned = buildJsonObject {
             put("message_id", messageId)
             put("group_id", groupId)
-            put("sender_agent_id", localProfile.agentId)
-            put("target_agent_id", targetAgentId)
+            put("type", messageType)
             put("timestamp", Instant.now().toString())
             put("payload", jsonMessage)
+            put("src_agent_id", localProfile.agentId)
+            put("dst_agent_id", targetAgentId)
+            put("task_id", taskId)
         }
         val body = buildJsonObject {
             unsigned.forEach { (key, value) -> put(key, value) }
@@ -308,17 +327,18 @@ class AgentSdk internal constructor(
             body,
             (timeoutSeconds * 1000).toLong(),
         )
-        val delivered = response["ack"]?.jsonPrimitive?.booleanOrNull == true
+        val delivered = response["status"]?.jsonPrimitive?.contentOrNull == "OK"
         return MessageReceipt(messageId, delivered, if (delivered) Instant.now() else null)
     }
 
     suspend fun applyIdentity(
         owner: String,
         name: String,
-        description: String = "",
-        metadata: JsonObject = buildJsonObject { },
+        description: String,
+        metadata: JsonObject,
     ): AgentProfile {
         requireReady()
+        validateIdentityApplication(owner, name, description, metadata)
         val publicKey = devicePublicKeyProvider?.publicKeyBase64
             ?: throw AgentSdkException(
                 ErrorCode.SIGNATURE_ERROR,
@@ -326,12 +346,20 @@ class AgentSdk internal constructor(
             )
         val path = "/idm/v1/identity-applications"
         val response = runtime!!.request("POST", path, authenticateControl(path, buildJsonObject {
+            put("request_id", UUID.randomUUID().toString())
             put("owner", owner)
             put("name", name)
             put("public_key", publicKey)
             put("description", description)
             put("metadata", metadata)
         }))
+        if (response["result"]?.jsonPrimitive?.contentOrNull != "success") {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime identity response result must be success",
+                "result",
+            )
+        }
         val identityVc = response["vc0"] as? JsonObject ?: buildJsonObject { }
         val responseName = (identityVc["claims"] as? JsonObject)
             ?.get("agent_name")?.jsonPrimitive?.contentOrNull ?: name
@@ -346,19 +374,40 @@ class AgentSdk internal constructor(
         profile = restored
     }
 
-    suspend fun deregisterIdentity(agentId: String, reason: String = "retired"): OperationResult =
-        operation("POST", "/acn-agent/v1/agent-deletions", buildJsonObject {
+    suspend fun deregisterIdentity(agentId: String, reason: String = "retired"): OperationResult {
+        if (reason !in setOf(
+                "normal", "uninstalled", "replaced", "user_request",
+                "security_event", "retired", "other",
+            )
+        ) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "reason is not a supported deregistration reason",
+                "reason",
+            )
+        }
+        return operation("POST", "/acn-agent/v1/agent-deletions", buildJsonObject {
+            put("request_id", UUID.randomUUID().toString())
             put("agent_id", agentId)
             put("reason", reason)
         }).also { if (profile?.agentId == agentId) profile = null }
+    }
 
     suspend fun getNetworkAbility(
         agentId: String,
-        intent: String = "Get Network Ability VC",
+        intent: String = "Issue Network Ability Credential",
     ): NetworkAbility {
         requireReady()
+        if (intent.isEmpty() || intent.length > 256) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "intent length must be in 1..256",
+                "intent",
+            )
+        }
         val path = "/idm/v1/network-ability"
         val response = runtime!!.request("POST", path, authenticateControl(path, buildJsonObject {
+            put("request_id", UUID.randomUUID().toString())
             put("agent_id", agentId)
             put("intent", intent)
         }))
@@ -366,6 +415,7 @@ class AgentSdk internal constructor(
         val claims = abilityVc["claims"] as? JsonObject
         val abilities = (claims?.get("abilities") as? JsonArray)
             ?.mapNotNull { it.jsonPrimitive.contentOrNull }
+            ?: claims?.get("agent_attribute")?.jsonPrimitive?.contentOrNull?.let(::listOf)
             ?: emptyList()
         return NetworkAbility(
             abilityVc,
@@ -406,6 +456,7 @@ class AgentSdk internal constructor(
             )
         }
         return operation("POST", "/arf/v1/agent-cards", buildJsonObject {
+            put("request_id", UUID.randomUUID().toString())
             put("agent_id", agentId)
             put("priority", priority)
             put("vc_list", JsonArray(vcList))
@@ -427,6 +478,7 @@ class AgentSdk internal constructor(
         updateItems: List<JsonObject>,
         credentials: List<JsonObject>,
     ): OperationResult = operation("POST", "/arf/v1/agent-cards-update", buildJsonObject {
+        put("request_id", UUID.randomUUID().toString())
         put("agent_id", agentId)
         put("update_items", JsonArray(updateItems))
         put("credentials", JsonArray(credentials))
@@ -443,6 +495,7 @@ class AgentSdk internal constructor(
         requireReady()
         val path = "/arf/v1/agent-discoveries"
         val response = runtime!!.request("POST", path, authenticateControl(path, buildJsonObject {
+            put("request_id", UUID.randomUUID().toString())
             put("task_id", taskId)
             put("agent_id", agentId)
             put("task_description", taskDescription)
@@ -474,6 +527,7 @@ class AgentSdk internal constructor(
         requireReady()
         val path = "/acf/v1/agents-grouping"
         val response = runtime!!.request("POST", path, authenticateControl(path, buildJsonObject {
+            put("request_id", UUID.randomUUID().toString())
             put("agent_id", agentId)
             put("target_agents", buildJsonArray { targetAgentIds.forEach { add(JsonPrimitive(it)) } })
             put("group_config", buildJsonObject {
@@ -482,6 +536,13 @@ class AgentSdk internal constructor(
                 put("max_members", maxMembers)
             })
         }))
+        if (response["status"]?.jsonPrimitive?.contentOrNull != "grouped") {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime group response status must be grouped",
+                "status",
+            )
+        }
         return GroupInfo(response.requireString("group_id"), groupName).also {
             groups[it.groupId] = it
         }
@@ -611,6 +672,45 @@ class AgentSdk internal constructor(
         return buildJsonObject {
             body.forEach(::put)
             authentication.forEach(::put)
+        }
+    }
+
+    private fun validateIdentityApplication(
+        owner: String,
+        name: String,
+        description: String,
+        metadata: JsonObject,
+    ) {
+        listOf(
+            Triple("owner", owner, 128),
+            Triple("name", name, 128),
+            Triple("description", description, 512),
+        ).forEach { (field, value, maximum) ->
+            if (value.isEmpty() || value.length > maximum) {
+                throw AgentSdkException(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "$field length must be in 1..$maximum",
+                    field,
+                )
+            }
+        }
+        val extraFields = metadata.keys - setOf("region", "os", "version")
+        if (extraFields.isNotEmpty()) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "metadata contains unsupported fields: ${extraFields.sorted()}",
+                "metadata",
+            )
+        }
+        listOf("region", "os", "version").forEach { field ->
+            val value = metadata[field]?.jsonPrimitive?.contentOrNull
+            if (value.isNullOrEmpty()) {
+                throw AgentSdkException(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "metadata.$field must be a non-empty string",
+                    "metadata.$field",
+                )
+            }
         }
     }
 

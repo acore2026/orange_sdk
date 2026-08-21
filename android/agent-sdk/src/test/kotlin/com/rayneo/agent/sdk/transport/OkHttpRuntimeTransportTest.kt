@@ -37,6 +37,7 @@ class OkHttpRuntimeTransportTest {
             assertEquals("GET", request.method)
             assertEquals(UE_INFO_PATH, request.path)
             assertEquals(0L, request.bodySize)
+            assertEquals("application/json", request.getHeader("Content-Type"))
         } finally {
             transport.close()
             server.shutdown()

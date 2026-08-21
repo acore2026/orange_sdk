@@ -130,6 +130,27 @@ responses may be returned out of order and are correlated only by `request_id`.
 The local HTTP/1.1 listener now exposes only `/A2A/message` inside the CONNECT-IP
 path; the former Runtime callback paths are not available.
 
+Control-plane writes carry an SDK-generated plain UUID `request_id`. Identity
+application uses the `ACN-H-ID-v1` domain plus ordered LP16/U64BE signing bytes;
+the remaining control requests use `proof`. Applications must provide non-empty
+identity `description` and `metadata.region/os/version`. Group configuration
+downlink uses exactly `ACN_AGENT_GROUPING_NOTIFICATION`.
+
+A2A calls remain address-free at the application boundary:
+
+```kotlin
+sdk.sendMessage(
+    groupId = group.groupId,
+    targetAgentId = peer.agentId,
+    jsonMessage = buildJsonObject { put("command", "patrol") },
+    messageType = "control",
+    taskId = "task-patrol",
+)
+```
+
+The wire body contains `src_agent_id`, `dst_agent_id`, `type`, `task_id`, and
+`payload`; the receiver returns `{"status":"OK"}` after validation.
+
 Camera/WebRTC calls use the `MediaOffloadAdapter` SPI. The application supplies
 an adapter backed by its chosen Android WebRTC distribution; this repository's
 unit tests use a deterministic fake so no camera or emulator is required.

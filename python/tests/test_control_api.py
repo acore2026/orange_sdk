@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import uuid
 import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -47,7 +48,7 @@ async def test_identity_uses_raw_request_and_vc0_response(sdk_fixture):
         "Alice",
         "AliceAgent",
         "AgentModel-X",
-        {"os": "Linux"},
+        {"region": "CN", "os": "Linux", "version": "0.11.0"},
     )
 
     method, path, body = runtime.requests[-1]
@@ -55,18 +56,39 @@ async def test_identity_uses_raw_request_and_vc0_response(sdk_fixture):
     public_key = serialization.load_der_public_key(base64.b64decode(body["public_key"]))
     assert isinstance(public_key, ec.EllipticCurvePublicKey)
     assert isinstance(public_key.curve, ec.SECP256R1)
+    uuid.UUID(body["request_id"])
     assert body == {
+        "request_id": body["request_id"],
         "owner": "Alice",
         "name": "AliceAgent",
         "public_key": body["public_key"],
         "description": "AgentModel-X",
-        "metadata": {"os": "Linux"},
+        "metadata": {"region": "CN", "os": "Linux", "version": "0.11.0"},
         "timestamp": "2026-08-19T00:00:00Z",
         "signature": "test-signature",
         "signature_encoding": "base64",
     }
     assert profile.agent_name == "Agent A"
     assert profile.identity_vc["id"] == "vc-a"
+
+
+async def test_identity_rejects_metadata_outside_n01_contract(sdk_fixture):
+    with pytest.raises(AgentSdkError) as caught:
+        await sdk_fixture["sdk"].apply_identity(
+            "Alice",
+            "AliceAgent",
+            "AgentModel-X",
+            {
+                "region": "CN",
+                "os": "Linux",
+                "version": "0.11.0",
+                "platform": "unsupported-extra",
+            },
+        )
+
+    assert caught.value.code is ErrorCode.INVALID_ARGUMENT
+    assert caught.value.field == "metadata"
+    assert sdk_fixture["runtime"].requests == []
 
 
 async def test_network_ability_uses_raw_vc1_response(sdk_fixture):
@@ -77,9 +99,11 @@ async def test_network_ability_uses_raw_vc1_response(sdk_fixture):
 
     method, path, body = runtime.requests[-1]
     assert (method, path) == ("POST", "/idm/v1/network-ability")
+    uuid.UUID(body["request_id"])
     assert body == {
+        "request_id": body["request_id"],
         "agent_id": "did:example:agent-a",
-        "intent": "Get Network Ability VC",
+        "intent": "Issue Network Ability Credential",
         "timestamp": "2026-08-19T00:00:00Z",
         "proof": {"jws": "test-proof"},
     }
@@ -109,8 +133,8 @@ async def test_update_capabilities_uses_original_body_and_new_endpoint(sdk_fixtu
     method, path, body = runtime.requests[-1]
     assert method == "POST"
     assert path == "/arf/v1/agent-cards-update"
-    assert body["request_id"].startswith("urn:uuid:")
-    assert body["request_type"] == "agent_registration_update"
+    uuid.UUID(body["request_id"])
+    assert "request_type" not in body
     assert body["agent_id"] == "did:example:agent-a"
     assert body["update_items"] == update_items
     assert body["credentials"] == credentials
@@ -131,6 +155,7 @@ async def test_discovery_parses_raw_result_agent_card(sdk_fixture):
 
     method, path, body = runtime.requests[-1]
     assert (method, path) == ("POST", "/arf/v1/agent-discoveries")
+    uuid.UUID(body["request_id"])
     assert body["timestamp"] == "2026-08-19T00:00:00Z"
     assert body["proof"] == {"jws": "test-proof"}
     assert len(agents) == 1
@@ -155,7 +180,9 @@ async def test_create_group_preserves_nested_original_body(sdk_fixture):
 
     method, path, body = runtime.requests[-1]
     assert (method, path) == ("POST", "/acf/v1/agents-grouping")
+    uuid.UUID(body["request_id"])
     assert body == {
+        "request_id": body["request_id"],
         "agent_id": "did:example:agent-a",
         "target_agents": ["did:example:agent-b"],
         "group_config": {
@@ -169,7 +196,7 @@ async def test_create_group_preserves_nested_original_body(sdk_fixture):
     assert group.group_id == "g1"
 
 
-async def test_legacy_control_requests_include_original_signature_fields(
+async def test_control_requests_use_identity_signature_and_other_proofs(
     sdk_fixture,
 ):
     sdk = sdk_fixture["sdk"]
@@ -180,17 +207,19 @@ async def test_legacy_control_requests_include_original_signature_fields(
     )
     _, publish_path, publish_body = runtime.requests[-1]
     assert publish_path == "/arf/v1/agent-cards"
+    uuid.UUID(publish_body["request_id"])
     assert publish_body["timestamp"] == "2026-08-19T00:00:00Z"
-    assert publish_body["signature"] == "test-signature"
-    assert publish_body["signature_encoding"] == "base64"
+    assert publish_body["proof"] == {"jws": "test-proof"}
+    assert "signature" not in publish_body
 
     await sdk.deregister_identity("did:example:agent-a")
     _, deregister_path, deregister_body = runtime.requests[-1]
     assert deregister_path == "/acn-agent/v1/agent-deletions"
+    uuid.UUID(deregister_body["request_id"])
     assert deregister_body["reason"] == "retired"
     assert deregister_body["timestamp"] == "2026-08-19T00:00:00Z"
-    assert deregister_body["signature"] == "test-signature"
-    assert deregister_body["signature_encoding"] == "base64"
+    assert deregister_body["proof"] == {"jws": "test-proof"}
+    assert "signature" not in deregister_body
 
 
 async def test_runtime_transport_accepts_empty_success_response():
@@ -239,6 +268,7 @@ async def test_ue_info_uses_exact_get_without_body_and_returns_pdu_ipv4():
     assert captured[0].method == "GET"
     assert captured[0].url == "http://runtime.example:8080/v1/ue/info"
     assert captured[0].content == b""
+    assert captured[0].headers["content-type"] == "application/json"
 
 
 @pytest.mark.parametrize(

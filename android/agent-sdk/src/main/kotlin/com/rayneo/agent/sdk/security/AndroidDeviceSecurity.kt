@@ -21,6 +21,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.math.BigInteger
 import java.security.AlgorithmParameters
@@ -36,17 +37,124 @@ import java.security.spec.ECPoint
 import java.security.spec.ECPublicKeySpec
 import java.security.spec.X509EncodedKeySpec
 import java.time.Instant
+import java.time.temporal.ChronoUnit
 import java.util.Base64
 
 private const val KEY_ALIAS = "agent-sdk-device-signing-v1"
-private val LEGACY_SIGNATURE_PATHS = setOf(
-    "/idm/v1/identity-applications",
-    "/acn-agent/v1/agent-deletions",
-    "/arf/v1/agent-cards",
+private const val IDENTITY_APPLICATION_PATH = "/idm/v1/identity-applications"
+private val IDENTITY_SIGNATURE_DOMAIN = "ACN-H-ID-v1\u0000".toByteArray(Charsets.US_ASCII)
+private val UTC_RFC3339_MILLIS = Regex(
+    "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,3})?Z$"
 )
 private val P256_DID_MULTICODEC = byteArrayOf(0x80.toByte(), 0x24)
 private const val BASE58_ALPHABET =
     "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+private fun utcNow(): String = Instant.now().truncatedTo(ChronoUnit.MILLIS).toString()
+
+private fun JsonObject.requiredIdentityString(field: String): String =
+    this[field]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotEmpty)
+        ?: throw AgentSdkException(
+            ErrorCode.INVALID_ARGUMENT,
+            "$field must be a non-empty string",
+            field,
+        )
+
+private fun ByteArrayOutputStream.writeLp16(value: ByteArray, field: String) {
+    if (value.size > 0xffff) {
+        throw AgentSdkException(
+            ErrorCode.INVALID_ARGUMENT,
+            "$field is too long for LP16 encoding",
+            field,
+        )
+    }
+    write((value.size ushr 8) and 0xff)
+    write(value.size and 0xff)
+    write(value)
+}
+
+private fun isP256(publicKey: ECPublicKey): Boolean {
+    val expected = AlgorithmParameters.getInstance("EC").apply {
+        init(ECGenParameterSpec("secp256r1"))
+    }.getParameterSpec(java.security.spec.ECParameterSpec::class.java)
+    return publicKey.params.curve == expected.curve &&
+        publicKey.params.generator == expected.generator &&
+        publicKey.params.order == expected.order &&
+        publicKey.params.cofactor == expected.cofactor
+}
+
+internal fun identityApplicationSigningBytes(payload: JsonObject): ByteArray {
+    val metadata = payload["metadata"] as? JsonObject ?: throw AgentSdkException(
+        ErrorCode.INVALID_ARGUMENT,
+        "metadata must be a JSON object",
+        "metadata",
+    )
+    val publicKeyDer = try {
+        Base64.getDecoder().decode(payload.requiredIdentityString("public_key"))
+    } catch (error: IllegalArgumentException) {
+        throw AgentSdkException(
+            ErrorCode.INVALID_ARGUMENT,
+            "public_key must be standard Base64 SPKI DER",
+            "public_key",
+            cause = error,
+        )
+    }
+    val publicKey = try {
+        KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(publicKeyDer))
+    } catch (error: Exception) {
+        throw AgentSdkException(
+            ErrorCode.INVALID_ARGUMENT,
+            "public_key must be a valid ECDSA SPKI key",
+            "public_key",
+            cause = error,
+        )
+    }
+    if (publicKey !is ECPublicKey || !isP256(publicKey)) {
+        throw AgentSdkException(
+            ErrorCode.INVALID_ARGUMENT,
+            "public_key must be an ECDSA P-256 SPKI key",
+            "public_key",
+        )
+    }
+    val timestamp = payload.requiredIdentityString("timestamp")
+    if (!UTC_RFC3339_MILLIS.matches(timestamp)) {
+        throw AgentSdkException(
+            ErrorCode.INVALID_ARGUMENT,
+            "timestamp must be UTC RFC3339 with at most millisecond precision",
+            "timestamp",
+        )
+    }
+    val timestampMillis = try {
+        Instant.parse(timestamp).toEpochMilli()
+    } catch (error: Exception) {
+        throw AgentSdkException(
+            ErrorCode.INVALID_ARGUMENT,
+            "timestamp is not a valid UTC instant",
+            "timestamp",
+            cause = error,
+        )
+    }
+    if (timestampMillis < 0) {
+        throw AgentSdkException(
+            ErrorCode.INVALID_ARGUMENT,
+            "timestamp must not precede the Unix epoch",
+            "timestamp",
+        )
+    }
+    return ByteArrayOutputStream().apply {
+        write(IDENTITY_SIGNATURE_DOMAIN)
+        writeLp16(payload.requiredIdentityString("owner").toByteArray(), "owner")
+        writeLp16(payload.requiredIdentityString("name").toByteArray(), "name")
+        writeLp16(publicKeyDer, "public_key")
+        writeLp16(payload.requiredIdentityString("description").toByteArray(), "description")
+        for (shift in 56 downTo 0 step 8) {
+            write(((timestampMillis ushr shift) and 0xff).toInt())
+        }
+        writeLp16(metadata.requiredIdentityString("region").toByteArray(), "metadata.region")
+        writeLp16(metadata.requiredIdentityString("os").toByteArray(), "metadata.os")
+        writeLp16(metadata.requiredIdentityString("version").toByteArray(), "metadata.version")
+    }.toByteArray()
+}
 
 internal interface DeviceKeyBackend {
     fun ensure()
@@ -136,18 +244,21 @@ internal class AndroidDeviceSecurity internal constructor(
         get() = "$didKey#${didKey.removePrefix("did:key:")}"
 
     override suspend fun authenticate(path: String, payload: JsonObject): JsonObject {
-        val timestamp = Instant.now().toString()
+        val timestamp = utcNow()
+        val businessPayload = buildJsonObject {
+            payload.forEach { (key, value) -> if (key != "request_id") put(key, value) }
+        }
         val document = buildJsonObject {
-            payload.forEach(::put)
+            businessPayload.forEach(::put)
             put("timestamp", timestamp)
         }
-        return if (path in LEGACY_SIGNATURE_PATHS) {
+        return if (path == IDENTITY_APPLICATION_PATH) {
             buildJsonObject {
                 put("timestamp", timestamp)
                 put(
                     "signature",
                     Base64.getEncoder().encodeToString(
-                        deviceKeys.sign(canonicalDocument(document))
+                        deviceKeys.sign(identityApplicationSigningBytes(document))
                     ),
                 )
                 put("signature_encoding", "base64")
@@ -161,7 +272,7 @@ internal class AndroidDeviceSecurity internal constructor(
     }
 
     override suspend fun signA2a(payload: JsonObject): JsonObject =
-        createProof(payload, "authentication", Instant.now().toString())
+        createProof(payload, "authentication", utcNow())
 
     override suspend fun verifyGroupConfig(payload: JsonObject) {
         verifyProof(payload, coreNetworkPublicKey, "assertionMethod")
@@ -174,7 +285,7 @@ internal class AndroidDeviceSecurity internal constructor(
     internal fun createProof(
         payload: JsonObject,
         purpose: String,
-        created: String = Instant.now().toString(),
+        created: String = utcNow(),
     ): JsonObject {
         val proofOptions = buildJsonObject {
             put("type", "JsonWebSignature2020")

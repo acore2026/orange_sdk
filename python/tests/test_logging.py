@@ -19,10 +19,18 @@ async def test_public_function_entry_exit_error_and_redaction(sdk_fixture):
         "Alice",
         "Agent A",
         description="ordinary-description",
-        metadata={"access_token": "nested-secret-token"},
+        metadata={
+            "region": "CN",
+            "os": "Linux",
+            "version": "0.11.0",
+        },
     )
     try:
-        await sdk.send_message("missing-group", "missing-agent", {"text": "hello"})
+        await sdk.send_message(
+            "missing-group", "missing-agent",
+            {"text": "hello", "access_token": "nested-secret-token"},
+            message_type="text", task_id="task-missing",
+        )
     except AgentSdkError as exc:
         assert exc.code is ErrorCode.GROUP_NOT_ACTIVE
 
@@ -131,7 +139,7 @@ async def test_local_http_ingress_and_response_are_logged(tmp_path):
                 json={"group_id": "g1"},
             )
         assert response.status_code == 200
-        assert response.json() == {"ack": True}
+        assert response.json() == {"status": "OK"}
         assert removed_callback.status_code == 404
     finally:
         await server.close()
@@ -142,7 +150,7 @@ async def test_local_http_ingress_and_response_are_logged(tmp_path):
     assert '"event":"http_request_body"' in text
     assert '"event":"http_response"' in text
     assert '"status_code":200' in text
-    assert '"body":{"ack":true}' in text
+    assert '"body":{"status":"OK"}' in text
     assert "inbound-secret-proof" not in text
     assert "inbound-token" not in text
     assert "inbound-cookie" not in text

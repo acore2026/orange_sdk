@@ -124,7 +124,7 @@ async def test_register_capabilities_accepts_existing_vcs_and_raw_capabilities(
         for item in body["vc_list"][1:]
     )
     assert body["timestamp"] == "2026-08-19T00:00:00Z"
-    assert body["signature"] == "test-signature"
+    assert body["proof"] == {"jws": "test-proof"}
 
 
 async def test_register_raw_capabilities_requires_agent_name_without_profile(

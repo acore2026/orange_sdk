@@ -135,14 +135,14 @@ class AiohttpLocalServer:
                 raise web.HTTPForbidden(text="A2A message must use Agent TUN ingress")
             try:
                 await on_a2a_message(await parse(request))
-                return web.json_response({"ack": True})
+                return web.json_response({"status": "OK"})
             except AgentSdkError as exc:
                 return web.json_response(
-                    {"ack": False, "code": exc.code.value}, status=400
+                    {"status": "ERROR", "code": exc.code.value}, status=400
                 )
             except Exception:
                 return web.json_response(
-                    {"ack": False, "code": "CALLBACK_FAILED"}, status=500
+                    {"status": "ERROR", "code": "CALLBACK_FAILED"}, status=500
                 )
 
         app.router.add_post("/A2A/message", a2a)

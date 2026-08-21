@@ -4,6 +4,8 @@ import com.rayneo.agent.sdk.model.AgentProfile
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import com.rayneo.agent.sdk.model.NetworkMessageType
 import com.rayneo.agent.sdk.transport.LocalServer
+import com.rayneo.agent.sdk.transport.ControlRequestAuthenticator
+import com.rayneo.agent.sdk.transport.DevicePublicKeyProvider
 import com.rayneo.agent.sdk.transport.MediaOffloadAdapter
 import com.rayneo.agent.sdk.transport.MessageSigner
 import com.rayneo.agent.sdk.transport.MasqueConfiguration
@@ -38,6 +40,7 @@ import java.nio.file.Files
 import java.security.KeyPairGenerator
 import java.security.spec.ECGenParameterSpec
 import java.util.Base64
+import java.util.UUID
 
 class AgentSdkGroupConfigTest {
     private lateinit var tunnel: FakeTunnel
@@ -66,6 +69,8 @@ class AgentSdkGroupConfigTest {
             tunnelController = tunnel,
             masqueTransport = masque,
             proofVerifier = ProofVerifier { },
+            controlRequestAuthenticator = FakeControlAuthenticator,
+            devicePublicKeyProvider = FakeDevicePublicKeyProvider,
             messageSigner = FakeMessageSigner,
             peerMessenger = peer,
             runtimeFactory = { _, _ -> runtime },
@@ -149,12 +154,17 @@ class AgentSdkGroupConfigTest {
             "g1",
             PEER_ID,
             buildJsonObject { put("command", "patrol") },
+            messageType = "control",
+            taskId = "task-patrol",
         )
 
         assertTrue(receipt.delivered)
         assertEquals("8.8.8.8", peer.ip)
         assertEquals(4567, peer.port)
-        assertEquals(PEER_ID, peer.body!!["target_agent_id"].toString().trim('"'))
+        assertEquals(PEER_ID, peer.body!!["dst_agent_id"].toString().trim('"'))
+        assertEquals(LOCAL_ID, peer.body!!["src_agent_id"].toString().trim('"'))
+        assertEquals("control", peer.body!!["type"].toString().trim('"'))
+        assertEquals("task-patrol", peer.body!!["task_id"].toString().trim('"'))
     }
 
     @Test
@@ -209,7 +219,13 @@ class AgentSdkGroupConfigTest {
         initializeSdk()
 
         val error = runCatching {
-            sdk.sendMessage("g1", PEER_ID, buildJsonObject { put("hello", "world") })
+            sdk.sendMessage(
+                "g1",
+                PEER_ID,
+                buildJsonObject { put("hello", "world") },
+                messageType = "text",
+                taskId = "task-patrol",
+            )
         }.exceptionOrNull() as AgentSdkException
 
         assertEquals(ErrorCode.GROUP_NOT_ACTIVE, error.code)
@@ -257,6 +273,61 @@ class AgentSdkGroupConfigTest {
         assertEquals("POST", runtime.lastMethod)
         assertEquals("/arf/v1/agent-cards-update", runtime.lastPath)
         assertEquals(LOCAL_ID, runtime.lastBody!!["agent_id"].toString().trim('"'))
+        UUID.fromString(runtime.lastBody!!["request_id"].toString().trim('"'))
+        assertFalse(runtime.lastBody!!.containsKey("request_type"))
+    }
+
+    @Test
+    fun `identity application sends exact required HTTP fields`() = runTest {
+        initializeSdk()
+
+        val profile = sdk.applyIdentity(
+            owner = "Alice",
+            name = "AliceAgent",
+            description = "AgentModel-X",
+            metadata = buildJsonObject {
+                put("region", "CN")
+                put("os", "Android")
+                put("version", "0.11.0")
+            },
+        )
+
+        assertEquals(LOCAL_ID, profile.agentId)
+        assertEquals("POST", runtime.lastMethod)
+        assertEquals("/idm/v1/identity-applications", runtime.lastPath)
+        UUID.fromString(runtime.lastBody!!.getValue("request_id").jsonPrimitive.content)
+        assertEquals("Alice", runtime.lastBody!!.getValue("owner").jsonPrimitive.content)
+        assertEquals(
+            FakeDevicePublicKeyProvider.publicKeyBase64,
+            runtime.lastBody!!.getValue("public_key").jsonPrimitive.content,
+        )
+        assertEquals(
+            "test-signature",
+            runtime.lastBody!!.getValue("signature").jsonPrimitive.content,
+        )
+        assertFalse(runtime.lastBody!!.containsKey("proof"))
+    }
+
+    @Test
+    fun `identity application rejects metadata outside N01 contract`() = runTest {
+        initializeSdk()
+
+        val error = runCatching {
+            sdk.applyIdentity(
+                owner = "Alice",
+                name = "AliceAgent",
+                description = "AgentModel-X",
+                metadata = buildJsonObject {
+                    put("region", "CN")
+                    put("os", "Android")
+                    put("version", "0.11.0")
+                    put("platform", "unsupported-extra")
+                },
+            )
+        }.exceptionOrNull() as AgentSdkException
+
+        assertEquals(ErrorCode.INVALID_ARGUMENT, error.code)
+        assertEquals("metadata", error.field)
     }
 
     @Test
@@ -273,6 +344,7 @@ class AgentSdkGroupConfigTest {
 
         assertEquals("POST", runtime.lastMethod)
         assertEquals("/arf/v1/agent-cards", runtime.lastPath)
+        UUID.fromString(runtime.lastBody!!["request_id"].toString().trim('"'))
         val vcList = runtime.lastBody!!.getValue("vc_list").jsonArray
         assertEquals(3, vcList.size)
         assertEquals("vc0", vcList[0].jsonObject.getValue("id").jsonPrimitive.content)
@@ -401,7 +473,7 @@ class AgentSdkGroupConfigTest {
             transactionId: Int = 49,
         ): NetworkMessageAction = downlinkHandler!!(messageType, transactionId, payload)
         suspend fun deliverGroupConfig(payload: JsonObject): NetworkMessageAction =
-            deliverDownlink("ACN_AGENT_GROUP_CONFIG", payload)
+            deliverDownlink("ACN_AGENT_GROUPING_NOTIFICATION", payload)
         override suspend fun request(method: String, path: String, body: JsonObject): JsonObject {
             lastMethod = method
             lastPath = path
@@ -413,6 +485,14 @@ class AgentSdkGroupConfigTest {
                     put("state", "CONNECTING")
                     put("sdp_answer", "test-answer")
                     put("expires_at", "2026-08-18T12:00:00Z")
+                }
+            } else if (path == "/idm/v1/identity-applications") {
+                buildJsonObject {
+                    put("result", "success")
+                    put("agent_id", LOCAL_ID)
+                    put("vc0", buildJsonObject {
+                        put("claims", buildJsonObject { put("agent_name", "AliceAgent") })
+                    })
                 }
             } else {
                 buildJsonObject { }
@@ -447,7 +527,7 @@ class AgentSdkGroupConfigTest {
             this.ip = ip
             this.port = port
             this.body = body
-            return buildJsonObject { put("ack", true) }
+            return buildJsonObject { put("status", "OK") }
         }
     }
 
@@ -455,6 +535,29 @@ class AgentSdkGroupConfigTest {
         override suspend fun signA2a(payload: JsonObject): JsonObject = buildJsonObject {
             put("jws", "test-message-signature")
         }
+    }
+
+    private object FakeControlAuthenticator : ControlRequestAuthenticator {
+        override suspend fun authenticate(path: String, payload: JsonObject): JsonObject =
+            if (path == "/idm/v1/identity-applications") {
+                buildJsonObject {
+                    put("timestamp", "2026-08-21T09:00:00Z")
+                    put("signature", "test-signature")
+                    put("signature_encoding", "base64")
+                }
+            } else {
+                buildJsonObject {
+                    put("timestamp", "2026-08-21T09:00:00Z")
+                    put("proof", buildJsonObject { put("jws", "test-proof") })
+                }
+            }
+    }
+
+    private object FakeDevicePublicKeyProvider : DevicePublicKeyProvider {
+        override fun ensure() = Unit
+        override val publicKeyBase64 =
+            "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaxfR8uEsQkf4vOblY6RA8ncD" +
+                "fYEt6zOg9KE5RdiYwpZP40Li/hp/m47n60p8D54WK84zV2sxXs7LtkBoN79R9Q=="
     }
 
     private class FakeMedia : MediaOffloadAdapter {

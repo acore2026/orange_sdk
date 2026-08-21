@@ -79,7 +79,9 @@ class FakeRuntime:
     async def deliver_group_config(
         self, payload: Mapping[str, Any]
     ) -> NetworkMessageAction:
-        return await self.deliver_downlink("ACN_AGENT_GROUP_CONFIG", payload)
+        return await self.deliver_downlink(
+            "ACN_AGENT_GROUPING_NOTIFICATION", payload
+        )
 
     async def request(self, method: str, path: str, body: Mapping[str, Any]):
         self.requests.append((method, path, body))
@@ -179,7 +181,7 @@ class FakePeerMessenger:
 
     async def send(self, ip, port, body, timeout):
         self.calls.append((ip, port, body, timeout))
-        return {"ack": True}
+        return {"status": "OK"}
 
 
 class FakeSignatureVerifier:
@@ -200,8 +202,6 @@ class FakeControlRequestAuthenticator:
         del payload
         if path in {
             "/idm/v1/identity-applications",
-            "/acn-agent/v1/agent-deletions",
-            "/arf/v1/agent-cards",
         }:
             return {
                 "timestamp": "2026-08-19T00:00:00Z",

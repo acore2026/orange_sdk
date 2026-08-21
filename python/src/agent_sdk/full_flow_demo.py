@@ -87,7 +87,7 @@ class DemoRuntime:
     async def push_group_config(self) -> NetworkMessageAction:
         assert self.downlink_handler is not None
         return await self.downlink_handler(
-            "ACN_AGENT_GROUP_CONFIG",
+            "ACN_AGENT_GROUPING_NOTIFICATION",
             49,
             {
                 "notification_type": "acf_group_config",
@@ -196,8 +196,10 @@ class DemoLocalServer:
             {
                 "message_id": "message-from-peer",
                 "group_id": "g-demo",
-                "sender_agent_id": PEER_AGENT_ID,
-                "target_agent_id": LOCAL_AGENT_ID,
+                "src_agent_id": PEER_AGENT_ID,
+                "dst_agent_id": LOCAL_AGENT_ID,
+                "type": "text",
+                "task_id": "task-demo",
                 "timestamp": _now(),
                 "payload": {"text": "hello from Agent B"},
                 "proof": {"jws": "demo-message-proof"},
@@ -215,7 +217,7 @@ class DemoPeerMessenger:
     async def send(self, ip, port, body, timeout):
         del body, timeout
         self.last_endpoint = (ip, port)
-        return {"ack": True}
+        return {"status": "OK"}
 
 
 class DemoNetworkListener:
@@ -340,7 +342,7 @@ async def run_demo(
             owner="demo-owner",
             name="Agent A",
             description="wheel installation self-check",
-            metadata={"platform": "Linux"},
+            metadata={"region": "CN", "os": "Linux", "version": "0.11.0"},
         )
         show("2 apply_identity", profile.agent_id)
 
@@ -394,6 +396,8 @@ async def run_demo(
             group.group_id,
             discovered[0].agent_id,
             {"type": "text", "content": "hello Agent B"},
+            message_type="text",
+            task_id="task-demo",
         )
         show("9 send_message", receipt.delivered)
 

@@ -280,7 +280,11 @@ class HttpRuntimeTransport:
             body=body,
         )
         try:
-            request_arguments = {} if body is None else {"json": dict(body)}
+            request_arguments: dict[str, Any] = {
+                "headers": {"Content-Type": "application/json"}
+            }
+            if body is not None:
+                request_arguments["json"] = dict(body)
             response = await self._client.request(method, path, **request_arguments)
             response.raise_for_status()
         except httpx.TimeoutException as exc:

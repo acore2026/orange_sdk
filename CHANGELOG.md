@@ -2,6 +2,31 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-21 — SDK 对齐 ACN HTTP、身份签名与 A2A 新契约
+
+### 修改原因
+
+- 新版端到端流程明确以详细接口定义为准：初始化查询使用 `GET /v1/ue/info`，控制面写请求由 SDK 生成 `request_id`，身份申请采用固定字段二进制编码签名，其他控制请求使用 `proof`。
+- 旧实现只有能力更新携带带 `urn:uuid:` 前缀的请求 ID，身份申请仍签规范化 JSON，注销和能力注册仍使用旧 `signature` 字段，无法与 N-01 及新版 Runtime 契约逐字段对应。
+- 群组配置下行消息类型和 A2A 字段/确认格式发生变化；旧实现仍识别 `ACN_AGENT_GROUP_CONFIG`/`ACF_GROUP_CONFIG`，并发送 `sender_agent_id/target_agent_id`、等待 `ack=true`。
+- 输入文档的汇总表与详细章节存在冲突；路径大小写敏感，因此实现遵循详细 §3.4 的小写 `/v1/ue/info`，下行遵循步骤 7 的 WebSocket，不恢复旧端点注册或回调 POST。
+
+### 修改方式
+
+- Python 与 Android 的身份、注销、网络能力、AgentCard 注册/更新、发现和建群七个控制请求统一生成普通 UUID `request_id`；删除能力更新的 `request_type` 和 `urn:uuid:` 前缀。一次公开方法调用只生成一次请求 ID，认证层将其从签名输入中排除。
+- 身份申请的 `description` 及 `metadata.region/os/version` 改为必填。两端新增完全一致的 `ACN-H-ID-v1\0` 域分隔、LP16、U64BE 编码器；公钥先按标准 Base64 解码为 P-256 SPKI DER，时间戳严格限制为 UTC `Z` 且不超过毫秒，签名为 ECDSA P-256/SHA-256 ASN.1 DER 标准 Base64。
+- 注销和 AgentCard 注册改为 `proof`；网络能力默认 intent 改为 `Issue Network Ability Credential`，Android 同步支持从 `vc1.claims.agent_attribute` 构造能力说明。注销原因严格限定为新版七个枚举值。
+- WebSocket 群组配置只接受 `ACN_AGENT_GROUPING_NOTIFICATION`，不再用 payload 内容或旧消息类型做兼容推导。邀请继续使用 `ACN_AGENT_GROUPING_INVITATION`。
+- A2A 继续由 SDK 按 `group_id + target_agent_id` 从已验签缓存解析目标 IP/端口，但线上业务字段改为 `type/timestamp/payload/src_agent_id/dst_agent_id/task_id`；保留 `group_id/message_id/proof` 用于安全快照定位、回执和防篡改。接收成功统一返回 `{"status":"OK"}`，不再返回 `ack=true`。
+- Python Wheel 版本升级为 `0.11.0`；Linux 全流程示例增加 `--region` 和 `--message-type`，身份元数据、注销原因和 A2A 调用均更新。根 README、Python/Android 指南同步。被 Git 忽略的本地《Agent SDK HTTP 接口文档》和《SDK 设计文档-用户友好版》同步到 V1.8.0/V4.9；原始《SDK设计文档》未修改。
+
+### 验证内容
+
+- Python `compileall` 和全量测试通过（`68 passed`）；Android JVM 单元测试共 `26 tests / 0 skipped / 0 failures / 0 errors`。两端共享的身份编码黄金向量长度为 174 字节，SHA-256 为 `483881296c5966469dcc901c15e7ff1c970644d7cb81446493f6178837e47a03`。
+- `agent_connect_sdk-0.11.0-py3-none-any.whl` 通过 `twine check`；独立虚拟环境安装显示版本 `0.11.0`，`agent-sdk-self-check` 完整执行初始化、身份、能力、发现、建群、群组配置、A2A、算力和注销并输出 `FULL FLOW DEMO PASSED`。
+- Android Release AAR 和 example Debug APK 构建成功。Wheel、AAR、APK SHA-256 分别为 `c2007e3a6d671645d7d0e9f80883fa5cec5b5af257b46877fc7aeba61007517c`、`c58486d12fd89522df49fd0755e4b979c1ff15bf1f0587baaaaaeafab0341eb6`、`693eee4302dfda34918bcdae752eeae76178aa12d0259dbca02654255567fa26`；Wheel/AAR 不含私钥，APK 仅含私钥解析器所需的 PEM 边界字面量，不含私钥材料或测试私钥资源。
+- HTTP 接口文档 20 个 JSON 示例、用户友好版设计文档 2 个 JSON 示例全部通过标准解析。
+
 ## 2026-08-21 — SDK 初始化改为查询 UERANSIM UE 信息
 
 ### 修改原因

@@ -143,7 +143,11 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
         owner=args.owner,
         name=args.agent_name,
         description=args.description,
-        metadata={"platform": "Linux", "example": "linux_agent.py"},
+        metadata={
+            "region": args.region,
+            "os": "Linux",
+            "version": "0.11.0",
+        },
     )
     print("[2 apply_identity]", profile.agent_id)
     if args.agent_id and profile.agent_id != args.agent_id:
@@ -222,6 +226,8 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
         target_agent_id,
         args.message,
         timeout_seconds=args.message_timeout,
+        message_type=args.message_type,
+        task_id=args.task_id,
     )
     print("[10 send_message]", receipt.message_id, receipt.delivered)
 
@@ -296,6 +302,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--agent-id", help="optional expected ID returned by apply_identity")
     value.add_argument("--agent-name", required=True)
     value.add_argument("--owner", required=True)
+    value.add_argument("--region", default="CN")
     value.add_argument("--description", default="Linux Agent SDK full-flow example")
     value.add_argument("--masque-url", required=True)
     value.add_argument("--masque-token")
@@ -335,6 +342,7 @@ def parser() -> argparse.ArgumentParser:
         default={"type": "text", "content": "hello from linux_agent.py"},
     )
     value.add_argument("--message-timeout", type=float, default=5.0)
+    value.add_argument("--message-type", default="application/json")
     value.add_argument("--offloading-task-type", default="video_rendering")
     value.add_argument("--sandbox-id")
     value.add_argument("--offloading-timeout", type=float, default=30.0)
@@ -350,7 +358,19 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not call deregister_identity for the identity created by this run",
     )
-    value.add_argument("--deregister-reason", default="retired by linux_agent.py")
+    value.add_argument(
+        "--deregister-reason",
+        choices=(
+            "normal",
+            "uninstalled",
+            "replaced",
+            "user_request",
+            "security_event",
+            "retired",
+            "other",
+        ),
+        default="retired",
+    )
     value.add_argument("--log-file", default="./logs/agent-sdk.log")
     value.add_argument(
         "--log-level",

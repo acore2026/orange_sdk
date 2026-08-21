@@ -4,12 +4,14 @@ import base64
 import binascii
 import json
 import os
+import re
+import struct
 from datetime import datetime, timezone
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping
 
-from cryptography.exceptions import InvalidSignature
+from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import (
@@ -23,17 +25,128 @@ from .errors import AgentSdkError, ErrorCode
 CORE_NETWORK_VERIFICATION_METHOD = (
     "did:udid:core@6gc.mnc015.mcc234.3gppnetwork.org#keys-1"
 )
-_LEGACY_SIGNATURE_PATHS = {
-    "/idm/v1/identity-applications",
-    "/acn-agent/v1/agent-deletions",
-    "/arf/v1/agent-cards",
-}
+_IDENTITY_APPLICATION_PATH = "/idm/v1/identity-applications"
+_IDENTITY_SIGNATURE_DOMAIN = b"ACN-H-ID-v1\0"
+_UTC_RFC3339_MILLIS = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$"
+)
 _P256_DID_MULTICODEC = b"\x80\x24"
 _BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _identity_string(
+    payload: Mapping[str, Any], field: str, *, container: str | None = None
+) -> str:
+    source: Any = payload
+    if container is not None:
+        source = payload.get(container)
+        if not isinstance(source, Mapping):
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"{container} must be a JSON object",
+                field=container,
+            )
+    value = source.get(field) if isinstance(source, Mapping) else None
+    if not isinstance(value, str) or not value:
+        qualified = f"{container}.{field}" if container else field
+        raise AgentSdkError(
+            ErrorCode.INVALID_ARGUMENT,
+            f"{qualified} must be a non-empty string",
+            field=qualified,
+        )
+    return value
+
+
+def _lp16(value: bytes, field: str) -> bytes:
+    if len(value) > 0xFFFF:
+        raise AgentSdkError(
+            ErrorCode.INVALID_ARGUMENT,
+            f"{field} is too long for LP16 encoding",
+            field=field,
+        )
+    return struct.pack("!H", len(value)) + value
+
+
+def identity_application_signing_bytes(payload: Mapping[str, Any]) -> bytes:
+    """Encode the H-ID signature input exactly as specified by ACN-H-ID-v1."""
+
+    owner = _identity_string(payload, "owner").encode("utf-8")
+    name = _identity_string(payload, "name").encode("utf-8")
+    description = _identity_string(payload, "description").encode("utf-8")
+    timestamp = _identity_string(payload, "timestamp")
+    region = _identity_string(payload, "region", container="metadata").encode(
+        "utf-8"
+    )
+    operating_system = _identity_string(
+        payload, "os", container="metadata"
+    ).encode("utf-8")
+    version = _identity_string(payload, "version", container="metadata").encode(
+        "utf-8"
+    )
+    try:
+        public_key_der = base64.b64decode(
+            _identity_string(payload, "public_key"), validate=True
+        )
+        public_key = serialization.load_der_public_key(public_key_der)
+    except (ValueError, TypeError, binascii.Error, UnsupportedAlgorithm) as exc:
+        raise AgentSdkError(
+            ErrorCode.INVALID_ARGUMENT,
+            "public_key must be standard Base64 SPKI DER",
+            field="public_key",
+        ) from exc
+    if not isinstance(public_key, ec.EllipticCurvePublicKey) or not isinstance(
+        public_key.curve, ec.SECP256R1
+    ):
+        raise AgentSdkError(
+            ErrorCode.INVALID_ARGUMENT,
+            "public_key must be an ECDSA P-256 SPKI key",
+            field="public_key",
+        )
+    if not _UTC_RFC3339_MILLIS.fullmatch(timestamp):
+        raise AgentSdkError(
+            ErrorCode.INVALID_ARGUMENT,
+            "timestamp must be UTC RFC3339 with at most millisecond precision",
+            field="timestamp",
+        )
+    try:
+        instant = datetime.fromisoformat(timestamp.removesuffix("Z") + "+00:00")
+    except ValueError as exc:
+        raise AgentSdkError(
+            ErrorCode.INVALID_ARGUMENT,
+            "timestamp is not a valid UTC instant",
+            field="timestamp",
+        ) from exc
+    delta = instant - datetime(1970, 1, 1, tzinfo=timezone.utc)
+    timestamp_millis = (
+        delta.days * 86_400_000
+        + delta.seconds * 1_000
+        + delta.microseconds // 1_000
+    )
+    if timestamp_millis < 0:
+        raise AgentSdkError(
+            ErrorCode.INVALID_ARGUMENT,
+            "timestamp must not precede the Unix epoch",
+            field="timestamp",
+        )
+    return b"".join(
+        (
+            _IDENTITY_SIGNATURE_DOMAIN,
+            _lp16(owner, "owner"),
+            _lp16(name, "name"),
+            _lp16(public_key_der, "public_key"),
+            _lp16(description, "description"),
+            struct.pack("!Q", timestamp_millis),
+            _lp16(region, "metadata.region"),
+            _lp16(operating_system, "metadata.os"),
+            _lp16(version, "metadata.version"),
+        )
+    )
 
 
 def canonical_json(value: Any) -> bytes:
@@ -147,6 +260,13 @@ class DeviceSigningIdentity:
     def sign_base64(self, document: Mapping[str, Any]) -> str:
         signature = self._private_key.sign(
             canonical_json(_document_without_signature(document)),
+            ec.ECDSA(hashes.SHA256()),
+        )
+        return base64.b64encode(signature).decode("ascii")
+
+    def sign_identity_application(self, document: Mapping[str, Any]) -> str:
+        signature = self._private_key.sign(
+            identity_application_signing_bytes(document),
             ec.ECDSA(hashes.SHA256()),
         )
         return base64.b64encode(signature).decode("ascii")
@@ -363,11 +483,14 @@ class DeviceControlRequestAuthenticator:
     ) -> Mapping[str, Any]:
         identity = self._identity_store.ensure()
         timestamp = _utc_now()
-        document = {**payload, "timestamp": timestamp}
-        if path in _LEGACY_SIGNATURE_PATHS:
+        business_payload = {
+            key: value for key, value in payload.items() if key != "request_id"
+        }
+        document = {**business_payload, "timestamp": timestamp}
+        if path == _IDENTITY_APPLICATION_PATH:
             return {
                 "timestamp": timestamp,
-                "signature": identity.sign_base64(document),
+                "signature": identity.sign_identity_application(document),
                 "signature_encoding": "base64",
             }
         return {
@@ -434,7 +557,7 @@ class DemoControlRequestAuthenticator:
     ) -> Mapping[str, Any]:
         del payload
         timestamp = _utc_now()
-        if path in _LEGACY_SIGNATURE_PATHS:
+        if path == _IDENTITY_APPLICATION_PATH:
             return {
                 "timestamp": timestamp,
                 "signature": "demo-only-signature",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from agent_sdk.security import (
     DidKeyMessageSignatureVerifier,
     canonical_json,
     embedded_core_network_public_key_pem,
+    identity_application_signing_bytes,
 )
 
 
@@ -37,23 +39,79 @@ def test_device_signing_identity_is_generated_once_and_persisted(tmp_path: Path)
     assert isinstance(public_key.curve, ec.SECP256R1)
 
 
-async def test_legacy_control_signature_covers_business_body_and_timestamp(tmp_path: Path):
+def test_identity_signing_bytes_match_cross_platform_golden_vector():
+    payload = {
+        "owner": "Alice",
+        "name": "AliceAgent",
+        "public_key": (
+            "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaxfR8uEsQkf4vOblY6RA8ncD"
+            "fYEt6zOg9KE5RdiYwpZP40Li/hp/m47n60p8D54WK84zV2sxXs7LtkBoN79R9Q=="
+        ),
+        "description": "AgentModel-X, SN123456",
+        "timestamp": "2026-08-20T10:30:15.123Z",
+        "metadata": {"region": "CN", "os": "Linux", "version": "1.0.0"},
+    }
+
+    encoded = identity_application_signing_bytes(payload)
+
+    assert len(encoded) == 174
+    assert hashlib.sha256(encoded).hexdigest() == (
+        "483881296c5966469dcc901c15e7ff1c970644d7cb81446493f6178837e47a03"
+    )
+
+
+async def test_identity_signature_uses_field_encoding_and_excludes_request_id(tmp_path: Path):
     identity = DeviceSigningIdentityStore(tmp_path / "security").ensure()
     authenticator = DeviceControlRequestAuthenticator(
         DeviceSigningIdentityStore(tmp_path / "security")
     )
-    payload = {"owner": "Alice", "name": "Agent A", "public_key": "key"}
+    payload = {
+        "request_id": "a3282bda-6d55-4c31-a0f6-d56f2cd2b1e2",
+        "owner": "Alice",
+        "name": "Agent A",
+        "public_key": identity.public_key_base64,
+        "description": "AgentModel-X",
+        "metadata": {"region": "CN", "os": "Linux", "version": "0.11.0"},
+    }
 
     authentication = await authenticator.authenticate(
         "/idm/v1/identity-applications", payload
     )
-    signed_document = {**payload, "timestamp": authentication["timestamp"]}
+    signed_document = {
+        **{key: value for key, value in payload.items() if key != "request_id"},
+        "timestamp": authentication["timestamp"],
+    }
     identity.public_key.verify(
         base64.b64decode(authentication["signature"]),
-        canonical_json(signed_document),
+        identity_application_signing_bytes(signed_document),
         ec.ECDSA(hashes.SHA256()),
     )
+    assert identity_application_signing_bytes(signed_document).startswith(
+        b"ACN-H-ID-v1\0\x00\x05Alice"
+    )
     assert authentication["signature_encoding"] == "base64"
+
+
+async def test_non_identity_proof_does_not_sign_http_request_id(tmp_path: Path):
+    store = DeviceSigningIdentityStore(tmp_path / "security")
+    authenticator = DeviceControlRequestAuthenticator(store)
+    body = {
+        "request_id": "9e4b0db9-450a-43a7-bda2-a539885f25be",
+        "agent_id": "did:example:a",
+        "intent": "Issue Network Ability Credential",
+    }
+    authentication = await authenticator.authenticate(
+        "/idm/v1/network-ability", body
+    )
+    signed = {
+        "agent_id": body["agent_id"],
+        "intent": body["intent"],
+        "timestamp": authentication["timestamp"],
+        "proof": authentication["proof"],
+    }
+    from agent_sdk.security import verify_proof
+
+    verify_proof(signed, store.ensure().public_key, expected_purpose="authentication")
 
 
 async def test_a2a_detached_jws_verifies_with_sender_did_key(tmp_path: Path):
@@ -62,8 +120,10 @@ async def test_a2a_detached_jws_verifies_with_sender_did_key(tmp_path: Path):
     unsigned = {
         "message_id": "m1",
         "group_id": "g1",
-        "sender_agent_id": "a1",
-        "target_agent_id": "a2",
+        "src_agent_id": "a1",
+        "dst_agent_id": "a2",
+        "type": "control",
+        "task_id": "task-patrol",
         "timestamp": "2026-08-20T00:00:00Z",
         "payload": {"command": "patrol"},
     }

@@ -57,7 +57,7 @@ class TcpJsonLocalServer(
                     )
                 }
                 onA2aMessage(payload)
-                buildJsonObject { put("ack", true) }
+                buildJsonObject { put("status", "OK") }
             }
 
             listOf(physicalIp, agentIp).distinct().forEach { address ->

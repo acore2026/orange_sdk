@@ -40,7 +40,10 @@ async def test_group_config_commits_without_listener(sdk_fixture):
     messenger = sdk_fixture["messenger"]
 
     action = await runtime.deliver_group_config(group_payload())
-    receipt = await sdk.send_message("g1", PEER_ID, {"command": "patrol"})
+    receipt = await sdk.send_message(
+        "g1", PEER_ID, {"command": "patrol"},
+        message_type="control", task_id="task-patrol",
+    )
 
     assert action is NetworkMessageAction.ACK
     assert receipt.delivered is True
@@ -152,20 +155,29 @@ async def test_send_message_uses_only_cached_tcp_endpoint(sdk_fixture):
         group_payload(peer_ip="8.8.8.8", peer_tcp_port="4567")
     )
 
-    receipt = await sdk.send_message("g1", PEER_ID, {"command": "patrol"})
+    receipt = await sdk.send_message(
+        "g1", PEER_ID, {"command": "patrol"},
+        message_type="control", task_id="task-patrol",
+    )
 
     assert receipt.delivered is True
     assert len(messenger.calls) == 1
     ip, port, body, _ = messenger.calls[0]
     assert (ip, port) == ("8.8.8.8", 4567)
-    assert body["target_agent_id"] == PEER_ID
+    assert body["dst_agent_id"] == PEER_ID
+    assert body["src_agent_id"] == "did:example:agent-a"
+    assert body["type"] == "control"
+    assert body["task_id"] == "task-patrol"
 
 
 async def test_send_without_group_config_never_falls_back(sdk_fixture):
     sdk = sdk_fixture["sdk"]
 
     with pytest.raises(AgentSdkError) as exc:
-        await sdk.send_message("g1", PEER_ID, {"hello": "world"})
+        await sdk.send_message(
+            "g1", PEER_ID, {"hello": "world"},
+            message_type="text", task_id="task-patrol",
+        )
 
     assert exc.value.code is ErrorCode.GROUP_NOT_ACTIVE
     assert sdk_fixture["messenger"].calls == []

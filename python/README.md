@@ -2,13 +2,13 @@
 
 `agent-connect-sdk` 为 Linux 端 Agent 提供统一的控制面和数据面能力：应用只需要调用 SDK 函数，不需要感知对端 IP、TCP 端口、TUN 路由或 MASQUE 封装细节。
 
-SDK 收到 AgentRuntime 透传的 `acf_group_config` 后，会自动缓存 `group_id + agent_id -> agent_ip + tcp_port + udp_port`，并自动维护对端 `/32` 或 `/128` 主机路由。应用调用 `send_message(group_id, target_agent_id, payload)` 时只传群组 ID 和目标 Agent ID。
+SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_group_config` 后，会自动缓存 `group_id + agent_id -> agent_ip + tcp_port + udp_port`，并自动维护对端 `/32` 或 `/128` 主机路由。应用发送时提供群组、目标 Agent、消息类型、任务 ID 和业务 JSON，不传 IP、端口或路由。
 
 ## 1. 交付物和运行要求
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.10.0-py3-none-any.whl`：SDK wheel。
+- `agent_connect_sdk-0.11.0-py3-none-any.whl`：SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/masque-proxy.example.json`：服务器 MASQUE Proxy 配置模板。
@@ -41,7 +41,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.10.0-py3-none-any.whl
+dist/agent_connect_sdk-0.11.0-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -53,7 +53,7 @@ dist/agent_connect_sdk-0.10.0-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.10.0-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.11.0-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -68,14 +68,14 @@ agent-masque-proxy --help
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.10.0-py3-none-any.whl
+  ./agent_connect_sdk-0.11.0-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.10.0-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.11.0-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -331,11 +331,11 @@ MASQUE TLS 的 P-256 消息签名密钥：
 - 目录权限为 `0700`，两个密钥文件权限为 `0600`；后续启动复用同一密钥。
 - 私钥不进入请求、返回值或日志。
 
-签名算法固定为 P-256 ECDSA + SHA-256。普通 `signature` 字段使用 ASN.1 DER
-签名后做标准 Base64；`proof.jws` 使用 `ES256`、RFC 7797 `b64=false` 的分离
-JWS。签名原文是字段名排序、无多余空白的 UTF-8 JSON，验签时排除
-`signature`、`signature_encoding` 和 `proof.jws`，其余业务字段和 proof 元数据
-均受签名保护。
+签名算法固定为 P-256 ECDSA + SHA-256。身份申请的普通 `signature` 按
+`ACN-H-ID-v1\0 + LP16/U64BE` 逐字段编码后签名，ASN.1 DER 再做标准 Base64；
+其他控制请求和 A2A 的 `proof.jws` 使用 `ES256`、RFC 7797 `b64=false` 的分离
+JWS。SDK 自动生成普通 UUID `request_id`，它只用于 HTTP 幂等关联，不进入
+NAS 业务体，也不属于签名覆盖范围。
 
 Wheel 只预置 `/root/lpx/cert/core-network/public-key.pem` 对应的核心网公钥，
 SPKI DER SHA-256 指纹为
@@ -382,7 +382,7 @@ profile = await sdk.apply_identity(
     owner="customer-a",
     name="Agent A",
     description="RayNeo edge agent",
-    metadata={"platform": "Ubuntu"},
+    metadata={"region": "CN", "os": "Linux", "version": "0.11.0"},
 )
 
 ability = await sdk.get_network_ability(profile.agent_id)
@@ -481,6 +481,8 @@ receipt = await sdk.send_message(
     target_agent_id=agents[0].agent_id,
     json_message={"type": "text", "content": "hello"},
     timeout_seconds=5.0,
+    message_type="text",
+    task_id="task-001",
 )
 print(receipt.message_id, receipt.delivered)
 ```

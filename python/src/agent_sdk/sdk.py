@@ -512,10 +512,7 @@ class AgentSdk:
         )
         if message_type == "ACN_AGENT_GROUPING_INVITATION":
             return await self._handle_group_invitation(payload)
-        if (
-            message_type in {"ACN_AGENT_GROUP_CONFIG", "ACF_GROUP_CONFIG"}
-            or payload.get("notification_type") == "acf_group_config"
-        ):
+        if message_type == "ACN_AGENT_GROUPING_NOTIFICATION":
             return await self._handle_group_config(payload)
         if self._network_listener is None:
             return NetworkMessageAction.REJECT
@@ -567,8 +564,22 @@ class AgentSdk:
                 ErrorCode.GROUP_NOT_ACTIVE, "A2A listener or local identity is missing"
             )
         group_id = str(payload.get("group_id", ""))
-        sender_id = str(payload.get("sender_agent_id", ""))
-        target_id = str(payload.get("target_agent_id", ""))
+        sender_id = str(payload.get("src_agent_id", ""))
+        target_id = str(payload.get("dst_agent_id", ""))
+        for field in (
+            "group_id",
+            "src_agent_id",
+            "dst_agent_id",
+            "type",
+            "task_id",
+            "timestamp",
+        ):
+            if not isinstance(payload.get(field), str) or not payload[field]:
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"A2A {field} must be a non-empty string",
+                    field=field,
+                )
         if target_id != self._profile.agent_id:
             raise AgentSdkError(
                 ErrorCode.TARGET_NOT_IN_GROUP, "A2A message targets another agent"
@@ -590,6 +601,9 @@ class AgentSdk:
         target_agent_id: str,
         json_message: Mapping[str, Any],
         timeout_seconds: float = 5.0,
+        *,
+        message_type: str,
+        task_id: str,
     ) -> MessageReceipt:
         self._require_ready()
         if timeout_seconds <= 0:
@@ -602,22 +616,36 @@ class AgentSdk:
             raise AgentSdkError(
                 ErrorCode.GROUP_NOT_ACTIVE, "local identity has not been applied"
             )
+        if not message_type:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "message_type must be a non-empty string",
+                field="message_type",
+            )
+        if not task_id:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "task_id must be a non-empty string",
+                field="task_id",
+            )
         assert self._groups is not None
         target = await self._groups.resolve(group_id, target_agent_id)
         message_id = str(uuid.uuid4())
         body: dict[str, Any] = {
             "message_id": message_id,
             "group_id": group_id,
-            "sender_agent_id": self._profile.agent_id,
-            "target_agent_id": target_agent_id,
+            "type": message_type,
             "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "payload": dict(json_message),
+            "src_agent_id": self._profile.agent_id,
+            "dst_agent_id": target_agent_id,
+            "task_id": task_id,
         }
         body["proof"] = dict(await self._message_signer.sign_a2a(body))
         response = await self._peer_messenger.send(
             target.agent_ip, target.tcp_port, body, timeout_seconds
         )
-        delivered = response.get("ack") is True
+        delivered = response.get("status") == "OK"
         return MessageReceipt(
             message_id=message_id,
             delivered=delivered,
@@ -629,15 +657,17 @@ class AgentSdk:
         self,
         owner: str,
         name: str,
-        description: str = "",
-        metadata: Mapping[str, Any] | None = None,
+        description: str,
+        metadata: Mapping[str, Any],
     ) -> AgentProfile:
         self._require_ready()
         assert self._runtime is not None
         path = "/idm/v1/identity-applications"
+        self._validate_identity_application(owner, name, description, metadata)
         body = await self._authenticate_control_request(
             path,
             {
+                "request_id": str(uuid.uuid4()),
                 "owner": owner,
                 "name": name,
                 "public_key": self._device_identity_store.ensure().public_key_base64,
@@ -646,6 +676,12 @@ class AgentSdk:
             },
         )
         response = await self._runtime.request("POST", path, body)
+        if response.get("result") != "success":
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime identity response result must be success",
+                field="result",
+            )
         vc0 = self._require_response_object(response, "vc0")
         claims = vc0.get("claims")
         response_name = name
@@ -673,8 +709,28 @@ class AgentSdk:
         self._require_ready()
         assert self._runtime is not None
         path = "/acn-agent/v1/agent-deletions"
+        allowed_reasons = {
+            "normal",
+            "uninstalled",
+            "replaced",
+            "user_request",
+            "security_event",
+            "retired",
+            "other",
+        }
+        if reason not in allowed_reasons:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "reason is not a supported deregistration reason",
+                field="reason",
+            )
         body = await self._authenticate_control_request(
-            path, {"agent_id": agent_id, "reason": reason}
+            path,
+            {
+                "request_id": str(uuid.uuid4()),
+                "agent_id": agent_id,
+                "reason": reason,
+            },
         )
         response = await self._runtime.request("POST", path, body)
         if self._profile and self._profile.agent_id == agent_id:
@@ -687,13 +743,26 @@ class AgentSdk:
 
     @logged_async
     async def get_network_ability(
-        self, agent_id: str, intent: str = "Get Network Ability VC"
+        self,
+        agent_id: str,
+        intent: str = "Issue Network Ability Credential",
     ) -> NetworkAbility:
         self._require_ready()
         assert self._runtime is not None
+        if not isinstance(intent, str) or not (1 <= len(intent) <= 256):
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "intent length must be in 1..256",
+                field="intent",
+            )
         path = "/idm/v1/network-ability"
         body = await self._authenticate_control_request(
-            path, {"agent_id": agent_id, "intent": intent}
+            path,
+            {
+                "request_id": str(uuid.uuid4()),
+                "agent_id": agent_id,
+                "intent": intent,
+            },
         )
         response = await self._runtime.request("POST", path, body)
         vc1 = self._require_response_object(response, "vc1")
@@ -758,7 +827,12 @@ class AgentSdk:
         path = "/arf/v1/agent-cards"
         body = await self._authenticate_control_request(
             path,
-            {"agent_id": agent_id, "priority": priority, "vc_list": vc_list},
+            {
+                "request_id": str(uuid.uuid4()),
+                "agent_id": agent_id,
+                "priority": priority,
+                "vc_list": vc_list,
+            },
         )
         return await self._operation(
             "POST",
@@ -777,8 +851,7 @@ class AgentSdk:
         body = await self._authenticate_control_request(
             path,
             {
-                "request_id": f"urn:uuid:{uuid.uuid4()}",
-                "request_type": "agent_registration_update",
+                "request_id": str(uuid.uuid4()),
                 "agent_id": agent_id,
                 "update_items": list(update_items),
                 "credentials": list(credentials),
@@ -806,6 +879,7 @@ class AgentSdk:
         body = await self._authenticate_control_request(
             path,
             {
+                "request_id": str(uuid.uuid4()),
                 "task_id": task_id,
                 "agent_id": agent_id,
                 "task_description": task_description,
@@ -858,6 +932,7 @@ class AgentSdk:
         body = await self._authenticate_control_request(
             path,
             {
+                "request_id": str(uuid.uuid4()),
                 "agent_id": agent_id,
                 "target_agents": list(target_agent_ids),
                 "group_config": {
@@ -868,6 +943,12 @@ class AgentSdk:
             },
         )
         response = await self._runtime.request("POST", path, body)
+        if response.get("status") != "grouped":
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime group response status must be grouped",
+                field="status",
+            )
         info = GroupInfo(str(response["group_id"]), group_name)
         self._group_info[info.group_id] = info
         return info
@@ -1019,6 +1100,46 @@ class AgentSdk:
                 f"{sorted(overlap)}",
             )
         return {**body, **authentication}
+
+    @staticmethod
+    def _validate_identity_application(
+        owner: str,
+        name: str,
+        description: str,
+        metadata: Mapping[str, Any] | None,
+    ) -> None:
+        for field, value, maximum in (
+            ("owner", owner, 128),
+            ("name", name, 128),
+            ("description", description, 512),
+        ):
+            if not isinstance(value, str) or not (1 <= len(value) <= maximum):
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"{field} length must be in 1..{maximum}",
+                    field=field,
+                )
+        if not isinstance(metadata, Mapping):
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "metadata must be a JSON object",
+                field="metadata",
+            )
+        extra_fields = set(metadata).difference({"region", "os", "version"})
+        if extra_fields:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"metadata contains unsupported fields: {sorted(extra_fields)}",
+                field="metadata",
+            )
+        for field in ("region", "os", "version"):
+            value = metadata.get(field)
+            if not isinstance(value, str) or not value:
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"metadata.{field} must be a non-empty string",
+                    field=f"metadata.{field}",
+                )
 
     @staticmethod
     def _require_response_object(

@@ -51,6 +51,7 @@ class OkHttpRuntimeTransport(
     override suspend fun getUeAgentIp(): String = withContext(Dispatchers.IO) {
         val request = Request.Builder()
             .url(baseUrl + UE_INFO_PATH)
+            .header("Content-Type", "application/json")
             .get()
             .build()
         val payload = try {
