@@ -2,6 +2,26 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-24 — 补充 Windows PowerShell 双 WSL 联调命令
+
+### 修改原因
+
+- 第 5.1 章只有进入 Ubuntu 后执行的 Bash 命令，Windows 用户仍需自行判断如何选择 A/B 对应的 WSL 发行版、传入仓库路径和调用各实例的本地控制接口。
+- PowerShell 中 `curl` 可能是命令别名，且直接访问 WSL localhost 依赖系统端口转发配置；双实例联调需要明确请求实际进入哪个 Ubuntu 发行版。
+
+### 修改方式
+
+- Python 客户指南增加 Windows PowerShell 前置命令，使用 `wsl.exe --list --verbose` 确认发行版，并约定 Windows 仓库路径到 WSL 路径的映射。
+- 为启动 B、启动 A分别增加 `wsl.exe -d Ubuntu-Agent-B/A --cd ...` 命令，保留各自 Runtime HTTP 端口、MASQUE/QUIC 端口和本地控制端口。
+- 为 B 配置 A IP、A 配置 B IP以及触发 A 发送分别增加 PowerShell 命令；命令通过 `wsl.exe -d <发行版> -- curl` 在指定 Ubuntu 内执行，不依赖 Windows→WSL localhost 转发，也避免 PowerShell `curl` 别名差异。
+- 补充可选说明：确认 localhost 转发可用时可使用原生 `curl.exe` 请求相同 URL，并建议用单引号保护 JSON。
+
+### 验证内容
+
+- Windows 与 Bash 示例中的 Runtime、MASQUE、消息端口、控制端口、URL 和 Agent IP逐项一致。
+- README 中 JSON/JSONL 示例均通过标准解析，`git diff --check` 通过；本次仅修改文档，不修改脚本或 SDK 行为。
+- 原始《SDK设计文档》保持不变。
+
 ## 2026-08-24 — 双实例脚本恢复 UE 查询并增加 curl 交互控制
 
 ### 修改原因

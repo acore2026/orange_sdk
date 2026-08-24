@@ -518,6 +518,17 @@ A、B 必须位于不同 Linux 网络命名空间，例如两个网络已配置�
 只有两者不同时，收包结果才能排除同一 Linux 网络命名空间内的本地短路。两个
 Python 虚拟环境不同不能替代网络命名空间隔离。
 
+Windows PowerShell 先确认两个 WSL 发行版名称。以下命令假设它们分别为
+`Ubuntu-Agent-A` 和 `Ubuntu-Agent-B`，仓库位于 Windows
+`C:\work\orange_sdk`（WSL 路径 `/mnt/c/work/orange_sdk`）：
+
+```powershell
+wsl.exe --list --verbose
+$SdkPythonDir = "/mnt/c/work/orange_sdk/python"
+```
+
+如果实际发行版名称或仓库路径不同，请替换后续命令中的对应值。
+
 #### 第一步：先启动 B
 
 下面的地址和端口只是示例。`8082` 是 B 对应的 AgentRuntime HTTP 端口，
@@ -532,6 +543,20 @@ sudo -E .venv/bin/python examples/masque_two_instance_test.py \
   --local-vlan-ip 192.168.2.10 \
   --masque-url https://192.168.3.10:4434/.well-known/masque/ip \
   --message-port 4001 \
+  --control-port 18082
+```
+
+从 Windows PowerShell 启动 B：
+
+```powershell
+wsl.exe -d Ubuntu-Agent-B --cd $SdkPythonDir -- `
+  sudo -E .venv/bin/python examples/masque_two_instance_test.py `
+  --role B `
+  --runtime-ip 192.168.3.10 `
+  --runtime-port 8082 `
+  --local-vlan-ip 192.168.2.10 `
+  --masque-url https://192.168.3.10:4434/.well-known/masque/ip `
+  --message-port 4001 `
   --control-port 18082
 ```
 
@@ -562,6 +587,21 @@ sudo -E .venv/bin/python examples/masque_two_instance_test.py \
   --control-port 18081
 ```
 
+另开一个 Windows PowerShell 窗口启动 A，并重新设置当前窗口变量：
+
+```powershell
+$SdkPythonDir = "/mnt/c/work/orange_sdk/python"
+wsl.exe -d Ubuntu-Agent-A --cd $SdkPythonDir -- `
+  sudo -E .venv/bin/python examples/masque_two_instance_test.py `
+  --role A `
+  --runtime-ip 192.168.3.10 `
+  --runtime-port 8081 `
+  --local-vlan-ip 192.168.1.10 `
+  --masque-url https://192.168.3.10:4433/.well-known/masque/ip `
+  --message-port 4001 `
+  --control-port 18081
+```
+
 A 日志应回显 `agent_tun_ip=8.8.8.7`。两个实例都会继续运行，等待下面的 curl。
 
 #### 第三步：用 curl 告诉两个实例对端 Agent IP
@@ -574,11 +614,29 @@ curl -sS -X POST http://127.0.0.1:18082/test/peer \
   -d '{"peer_agent_ip":"8.8.8.7"}'
 ```
 
+对应的 Windows PowerShell 命令（明确在 B 发行版内调用 curl）：
+
+```powershell
+wsl.exe -d Ubuntu-Agent-B -- curl -sS -X POST `
+  http://127.0.0.1:18082/test/peer `
+  -H 'Content-Type: application/json' `
+  -d '{"peer_agent_ip":"8.8.8.7"}'
+```
+
 在 A 所在 Ubuntu 中执行，告诉 A：B 的 Agent IP 是 `8.8.8.8`：
 
 ```bash
 curl -sS -X POST http://127.0.0.1:18081/test/peer \
   -H 'Content-Type: application/json' \
+  -d '{"peer_agent_ip":"8.8.8.8"}'
+```
+
+对应的 Windows PowerShell 命令（明确在 A 发行版内调用 curl）：
+
+```powershell
+wsl.exe -d Ubuntu-Agent-A -- curl -sS -X POST `
+  http://127.0.0.1:18081/test/peer `
+  -H 'Content-Type: application/json' `
   -d '{"peer_agent_ip":"8.8.8.8"}'
 ```
 
@@ -594,6 +652,20 @@ curl -sS -X POST http://127.0.0.1:18081/test/send \
   -H 'Content-Type: application/json' \
   -d '{"type":"text","content":"hello B from A through MASQUE"}'
 ```
+
+对应的 Windows PowerShell 命令：
+
+```powershell
+wsl.exe -d Ubuntu-Agent-A -- curl -sS -X POST `
+  http://127.0.0.1:18081/test/send `
+  -H 'Content-Type: application/json' `
+  -d '{"type":"text","content":"hello B from A through MASQUE"}'
+```
+
+这里通过 `wsl.exe -d` 在指定发行版内部执行 curl，因此不会依赖 Windows 到 WSL
+的 localhost 端口转发。如果确认本机 WSL localhost 转发可用，也可以在 PowerShell
+中直接用 `curl.exe` 请求相同 URL；JSON 建议继续使用单引号包围，避免 PowerShell
+改写双引号。
 
 A 实例收到控制请求后固定向 `POST http://8.8.8.8:4001/message` 发送上面的 JSON。
 B 收到后应在控制台看到：
