@@ -957,7 +957,7 @@ class AgentSdk:
     async def create_offloading_session(
         self,
         agent_id: str,
-        task_type: str,
+        workload_type: str,
         sandbox_id: str | None = None,
         timeout_seconds: float = 30.0,
     ) -> OffloadingSession:
@@ -970,8 +970,9 @@ class AgentSdk:
             )
         assert self._runtime is not None
         body: dict[str, Any] = {
+            "request_id": str(uuid.uuid4()),
             "agent_id": agent_id,
-            "task_type": task_type,
+            "workload_type": workload_type,
         }
         if sandbox_id is not None:
             body["preferred_sandbox_id"] = sandbox_id

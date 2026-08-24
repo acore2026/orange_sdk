@@ -147,6 +147,10 @@ async def test_linux_agent_full_flow_executes_every_business_api():
         "capabilities": ["robot-control"],
         "test_vc_private_key_path": "~/lpx/cert/third-party/private-key.pem",
     }
+    assert (
+        sdk.create_offloading_session.await_args.kwargs["workload_type"]
+        == "video_rendering"
+    )
     for method_name in (
         "init",
         "apply_identity",

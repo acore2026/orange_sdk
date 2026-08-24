@@ -238,7 +238,7 @@ class AgentSdkGroupConfigTest {
 
         val session = sdk.createOffloadingSession(
             LOCAL_ID,
-            "video_rendering",
+            workloadType = "video_rendering",
             sandboxId = "sandbox-edge-1",
         )
         val upload = sdk.startVideoUpload(
@@ -256,6 +256,18 @@ class AgentSdkGroupConfigTest {
         assertEquals("camera-track-1", upload.trackId)
         assertEquals("processed-track-1", track.trackId)
         assertEquals("2", media.cameraId)
+        assertEquals(
+            setOf("request_id", "agent_id", "workload_type", "preferred_sandbox_id"),
+            runtime.lastBody!!.keys,
+        )
+        assertEquals(
+            "video_rendering",
+            runtime.lastBody!!["workload_type"]!!.jsonPrimitive.content,
+        )
+        UUID.fromString(runtime.lastBody!!["request_id"]!!.jsonPrimitive.content)
+        assertFalse(runtime.lastBody!!.containsKey("task_type"))
+        assertFalse(runtime.lastBody!!.containsKey("timestamp"))
+        assertFalse(runtime.lastBody!!.containsKey("proof"))
     }
 
     @Test

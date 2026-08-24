@@ -146,7 +146,7 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
         metadata={
             "region": args.region,
             "os": "Linux",
-            "version": "0.13.0",
+            "version": "0.14.0",
         },
     )
     print("[2 apply_identity]", profile.agent_id)
@@ -233,7 +233,7 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
 
     session = await sdk.create_offloading_session(
         profile.agent_id,
-        task_type=args.offloading_task_type,
+        workload_type=args.offloading_workload_type,
         sandbox_id=args.sandbox_id,
         timeout_seconds=args.offloading_timeout,
     )
@@ -343,7 +343,7 @@ def parser() -> argparse.ArgumentParser:
     )
     value.add_argument("--message-timeout", type=float, default=5.0)
     value.add_argument("--message-type", default="application/json")
-    value.add_argument("--offloading-task-type", default="video_rendering")
+    value.add_argument("--offloading-workload-type", default="video_rendering")
     value.add_argument("--sandbox-id")
     value.add_argument("--offloading-timeout", type=float, default=30.0)
     value.add_argument("--camera-id", type=int, default=0)

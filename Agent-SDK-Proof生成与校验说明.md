@@ -4,7 +4,7 @@
 |---|---|
 | 文档版本 | V1.0 |
 | 编制日期 | 2026-08-21 |
-| 适用版本 | Python Wheel 0.13.0、Android/RayNeoOS SDK |
+| 适用版本 | Python Wheel 0.14.0、Android/RayNeoOS SDK |
 | 适用对象 | SDK 开发者、AgentRuntime 开发者、核心网开发者、联调测试人员 |
 
 ## 1. 说明范围

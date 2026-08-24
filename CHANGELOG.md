@@ -2,6 +2,30 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-24 — 算力卸载请求对齐 ACN，其余 ACN 契约对齐 SDK
+
+### 修改原因
+
+- 本次契约裁决明确：只有 H-COMPUTE 应由 SDK 跟随 ACN 定义；其他差异均应由 `/root/acn/ACN消息接口定义.md` 跟随已确认的 SDK 契约。
+- Python 原 H-COMPUTE 只发送 `agent_id + task_type`，缺少 `request_id`；Android 除使用同样的旧字段外，还通过通用控制面认证层额外添加 `timestamp + proof`，与 ACN 用户面会话请求不兼容。
+- ACN 文档其余章节仍残留旧 proof 向量、旧邀请 `group_id`、仅含成员表的 N-12、Runtime WebSocket A2A 和缺少任务字段的发现消息，会导致 Runtime/核心网按过期结构实现。
+
+### 修改方式
+
+- Python Wheel 升级到 `0.14.0`；`create_offloading_session` 的公开参数改为 `workload_type`，请求体固定生成 `request_id + agent_id + workload_type`，按需增加 `preferred_sandbox_id`，不生成 `timestamp/proof`。Linux 全流程示例和命令行参数同步改为 `--offloading-workload-type`。
+- Android `createOffloadingSession` 的公开参数改为 `workloadType`，直接构造与 Python 相同的 H-COMPUTE 请求，不再调用会添加控制面 `timestamp/proof` 的 `authenticateControl`。
+- Python/Android 新增线路契约断言：校验 UUID `request_id`、`workload_type`、可选沙箱字段，并显式拒绝 `task_type/timestamp/proof`；Linux example 测试同步检查新参数。
+- 本地《Agent SDK HTTP 接口文档》升级到 V1.10.0，《SDK 设计文档-用户友好版》升级到 V5.3；两份文档说明 H-COMPUTE 的完整线路请求，并如实说明 A2A 当前不自动重试、不维护 `message_id` 去重缓存。原始《SDK设计文档》保持不变。
+- Git 仓库外的 `/root/acn/ACN消息接口定义.md` 升级到 3.28：除 H-COMPUTE 保留 ACN 裁决外，其余对齐 SDK 的 proof 双摘要分离 JWS、WebSocket 初始化、发现任务字段、邀请 `group_name`、完整 `acf_group_config`、N-13 `ACK/REJECT` 以及 SDK 间直接 HTTP A2A；删除会误导实现的过期定长 NAS 向量。
+
+### 验证内容
+
+- Python `compileall` 和全量测试通过（`64 passed`）；Wheel 和 sdist 构建成功，`agent_connect_sdk-0.14.0-py3-none-any.whl` 通过 `twine check`，全新虚拟环境安装显示版本 `0.14.0`，内建全流程自检输出 `FULL FLOW DEMO PASSED`，`pip check` 无缺失或冲突依赖。
+- Android JVM 单元测试共 `27 tests / 0 skipped / 0 failures / 0 errors`；Release AAR 和 example Debug APK 构建成功。
+- Wheel、Release AAR、example Debug APK 的 SHA-256 分别为 `c3426904b8b62385a56fac41aef9310468c22433535d268bba4da9893be1e870`、`bfcc3a39dcd4858c3acaf2ed6d2327b9fc755027408a79f0474e07302717e2b3`、`a7f37df62c2701f7a9c64da04474b5a69e15e8d2ed9b9fba95dfd4ef735edd78`。
+- HTTP 接口文档 21 个 JSON、用户友好版 4 个 JSON、Proof 说明 8 个 JSON 和 ACN 定义 81 个 JSON 全部通过标准解析；ACN 10 个 Mermaid 图全部通过语法渲染。
+- `git diff --check` 通过；原始《SDK设计文档》SHA-256仍为 `d2509f323338d0cdb948ceff36e32c3ae71d59c646916b687168b4c2e862947b`。
+
 ## 2026-08-24 — SDK 移除服务器实现并将物理视图适配层改为 AgentRuntime
 
 ### 修改原因

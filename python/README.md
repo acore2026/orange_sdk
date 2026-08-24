@@ -8,7 +8,7 @@ SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.13.0-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
+- `agent_connect_sdk-0.14.0-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 
@@ -42,7 +42,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.13.0-py3-none-any.whl
+dist/agent_connect_sdk-0.14.0-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -54,7 +54,7 @@ dist/agent_connect_sdk-0.13.0-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.13.0-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.14.0-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -68,14 +68,14 @@ python -m pip show agent-connect-sdk
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.13.0-py3-none-any.whl
+  ./agent_connect_sdk-0.14.0-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.13.0-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.14.0-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -324,7 +324,7 @@ profile = await sdk.apply_identity(
     owner="customer-a",
     name="Agent A",
     description="RayNeo edge agent",
-    metadata={"region": "CN", "os": "Linux", "version": "0.13.0"},
+    metadata={"region": "CN", "os": "Linux", "version": "0.14.0"},
 )
 
 ability = await sdk.get_network_ability(profile.agent_id)
@@ -444,7 +444,7 @@ POST http://<agent_ip>:<tcp_port>/A2A/message
 ```python
 session = await sdk.create_offloading_session(
     profile.agent_id,
-    task_type="video_rendering",
+    workload_type="video_rendering",
     sandbox_id="sandbox-edge-1",
 )
 

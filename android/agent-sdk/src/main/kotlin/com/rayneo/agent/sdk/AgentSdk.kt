@@ -550,7 +550,7 @@ class AgentSdk internal constructor(
 
     suspend fun createOffloadingSession(
         agentId: String,
-        taskType: String,
+        workloadType: String,
         sandboxId: String? = null,
         timeoutSeconds: Double = 30.0,
     ): OffloadingSession {
@@ -563,11 +563,12 @@ class AgentSdk internal constructor(
             )
         }
         val path = "/compute/v1/offloading-sessions"
-        val response = runtime!!.request("POST", path, authenticateControl(path, buildJsonObject {
+        val response = runtime!!.request("POST", path, buildJsonObject {
+            put("request_id", UUID.randomUUID().toString())
             put("agent_id", agentId)
-            put("task_type", taskType)
+            put("workload_type", workloadType)
             sandboxId?.let { put("preferred_sandbox_id", it) }
-        }))
+        })
         var session = OffloadingSession(
             response.requireString("session_id"),
             response["sandbox_id"]?.jsonPrimitive?.contentOrNull ?: "",

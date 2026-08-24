@@ -342,7 +342,7 @@ async def run_demo(
             owner="demo-owner",
             name="Agent A",
             description="wheel installation self-check",
-            metadata={"region": "CN", "os": "Linux", "version": "0.13.0"},
+            metadata={"region": "CN", "os": "Linux", "version": "0.14.0"},
         )
         show("2 apply_identity", profile.agent_id)
 
@@ -406,7 +406,7 @@ async def run_demo(
 
         session = await sdk.create_offloading_session(
             profile.agent_id,
-            task_type="video_rendering",
+            workload_type="video_rendering",
             sandbox_id="sandbox-demo",
         )
         upload = await sdk.start_video_upload(
