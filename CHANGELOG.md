@@ -2,6 +2,25 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-24 — 增加 Python 一键依赖安装清单
+
+### 修改原因
+
+- 客户从源码运行双实例 MASQUE 验证脚本时，需要手工查找 `setup.cfg` 中的依赖并安装，同时还要确保源码包 `agent_sdk` 可被 examples 导入。
+- 需要提供标准的 `pip install -r requirements.txt` 入口，减少首次安装步骤和漏装 `aioquic/pyroute2` 等运行依赖的风险。
+
+### 修改方式
+
+- 新增 `python/requirements.txt`，逐项列出与包元数据一致的正式运行依赖：`aiohttp`、`aioquic`、`cryptography`、`httpx` 和 `pyroute2`。
+- requirements 最后一行使用 `-e .` 安装当前源码目录，使 `python/examples` 可以直接导入 `agent_sdk`，无需额外设置 `PYTHONPATH`。
+- Python 客户指南增加创建虚拟环境并执行 `python -m pip install -r requirements.txt` 的完整命令，明确测试依赖仍通过 `-e '.[test]'` 单独安装；根 README 的快速验证入口同步增加 requirements 安装步骤。
+
+### 验证内容
+
+- `requirements.txt` 中五个三方依赖的名称和版本区间与 `python/setup.cfg` 的 `install_requires` 完全一致。
+- 已在全新 Python 虚拟环境中实际触发 `python -m pip install -r requirements.txt`；当前构建机访问 `files.pythonhosted.org` 时发生 TLS EOF，未能完成联网下载。依赖文件解析、包元数据一致性和源码导入由本地测试覆盖。
+- Python 全量测试通过（`70 passed`），`git diff --check` 通过；原始《SDK设计文档》保持不变。
+
 ## 2026-08-24 — 补充 Windows PowerShell 双 WSL 联调命令
 
 ### 修改原因

@@ -65,6 +65,25 @@ python -c 'import agent_sdk; print(agent_sdk.__version__)'
 python -m pip show agent-connect-sdk
 ```
 
+如果客户拿到的是源码目录，并准备运行本章的双实例 MASQUE 测试脚本，可以进入
+`python` 目录后直接安装 `requirements.txt`：
+
+```bash
+cd python
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+该文件列出 `aiohttp`、`aioquic`、`cryptography`、`httpx` 和 `pyroute2`，并通过
+`-e .` 安装当前源码中的 `agent_sdk`，因此 examples 无需手工设置
+`PYTHONPATH`。它只包含客户运行依赖；执行仓库测试时仍使用：
+
+```bash
+python -m pip install -e '.[test]'
+```
+
 `pip` 会自动安装 `aiohttp`、`aioquic`、`cryptography`、`httpx` 和 `pyroute2` 等依赖。如果客户环境不能访问公网，应同时交付依赖 wheel，并使用：
 
 ```bash

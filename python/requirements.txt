@@ -1,0 +1,11 @@
+# Agent Connect SDK runtime dependencies.
+# Run from this directory: python3 -m pip install -r requirements.txt
+
+aiohttp>=3.9,<4
+aioquic>=1.3,<2
+cryptography>=42,<47
+httpx>=0.25,<1
+pyroute2>=0.7,<1
+
+# Install this source checkout so examples can import agent_sdk.
+-e .
