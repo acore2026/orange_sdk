@@ -489,13 +489,18 @@ await sdk.deregister_identity(profile.agent_id, reason="retired")
 
 `examples/masque_two_instance_test.py` 是独立的透明三层链路验证脚本，不执行
 身份申请、Agent 发现、建群，不需要 `agent_id/group_id`，也不等待
-`acf_group_config`。它只使用已知的本机和对端 Agent IP：
+`acf_group_config`：
 
-1. A、B 分别创建自己的 Agent TUN，并连接各自的 AgentRuntime MASQUE/QUIC 端口。
-2. 脚本为唯一的对端 Agent IP安装主机路由，并只允许这一对源/目的 IP进入隧道。
-3. B 在 `http://<B Agent IP>:4001/message` 启动 HTTP Server。
-4. A 直接向该 URL 执行 `POST`；B 打印并落盘 `MESSAGE_RECEIVED`，返回
-   `{"status":"OK"}`，两端分别打印 `TEST_PASSED`。
+1. A、B 启动时分别请求本实例 AgentRuntime 的 `GET /v1/ue/info`，按与 SDK
+   `init()` 相同的规则选择唯一活动默认 IPv4 PDU Session，将其 `ipv4` 配置为
+   本机 Agent TUN IP，并在控制台和日志中输出 `UE_INFO_AGENT_TUN_IP`。
+2. 两个实例分别连接自己的 AgentRuntime MASQUE/QUIC 端口，并在本机 Agent IP
+   的 TCP 4001 端口启动 `POST /message`。
+3. 实例 A、B 各自开放一个仅绑定 `127.0.0.1` 的测试控制接口。用户通过
+   `POST /test/peer` 告诉每个实例对端 Agent IP；脚本此时才安装对端主机路由。
+4. 用户对 A 调用 `POST /test/send`；A 将该请求体作为消息，向
+   `http://<B Agent IP>:4001/message` 发送。B 打印并落盘 `MESSAGE_RECEIVED`，
+   返回 `{"status":"OK"}`。
 
 该脚本只用于验证 TUN→CONNECT-IP→服务器用户面→对端 TUN 的连通性。正式业务
 仍使用 `AgentSdk.send_message(group_id, target_agent_id, ...)` 和
@@ -509,79 +514,113 @@ A、B 必须位于不同 Linux 网络命名空间，例如两个网络已配置�
 `8.8.8.7` 和 `8.8.8.8` 同时是同一内核的本地地址时，A 到 B 可能被本机路由表
 直接交付，绕过 MASQUE 和 5GC。
 
-脚本启动时会打印 `/proc/self/ns/net` 的 `netns_id`。记录 B 的值，并通过 A 的
-`--peer-netns-id` 传回；如果 A 与 B 的 ID 相同，脚本会在发送前拒绝测试。两个
-Python 虚拟环境不同不能替代这个检查。
+脚本启动时会打印 `/proc/self/ns/net` 的 `netns_id`。请人工比较 A、B 的值；
+只有两者不同时，收包结果才能排除同一 Linux 网络命名空间内的本地短路。两个
+Python 虚拟环境不同不能替代网络命名空间隔离。
 
 #### 第一步：先启动 B
 
-下面的地址和端口只是示例。B 已知自己的 Agent IP 为 `8.8.8.8`、A 的 Agent IP
-为 `8.8.8.7`；`4434` 是 B 对应的 AgentRuntime MASQUE/QUIC 端口：
+下面的地址和端口只是示例。`8082` 是 B 对应的 AgentRuntime HTTP 端口，
+`4434` 是 B 对应的 AgentRuntime MASQUE/QUIC 端口；本机 Agent IP 不作为参数传入：
 
 ```bash
 cd python
 sudo -E .venv/bin/python examples/masque_two_instance_test.py \
   --role B \
+  --runtime-ip 192.168.3.10 \
+  --runtime-port 8082 \
   --local-vlan-ip 192.168.2.10 \
-  --local-agent-ip 8.8.8.8 \
-  --peer-agent-ip 8.8.8.7 \
   --masque-url https://192.168.3.10:4434/.well-known/masque/ip \
   --message-port 4001 \
-  --receive-timeout 300
+  --control-port 18082
 ```
 
-B 成功连接后会输出网络命名空间和监听 URL：
+B 成功查询并连接后会输出本机 Agent TUN IP 和控制地址：
 
 ```jsonl
-{"role":"B","event":"INSTANCE_STARTING","netns_id":4026533002,"local_agent_ip":"8.8.8.8","peer_agent_ip":"8.8.8.7"}
+{"role":"B","event":"UE_INFO_AGENT_TUN_IP","method":"GET","url":"http://192.168.3.10:8082/v1/ue/info","agent_tun_ip":"8.8.8.8","agent_tun_cidr":"8.8.8.8/32"}
 {"role":"B","event":"MESSAGE_SERVER_LISTENING","url":"http://8.8.8.8:4001/message"}
+{"role":"B","event":"INSTANCE_READY","local_agent_ip":"8.8.8.8","control_url":"http://127.0.0.1:18082"}
 ```
 
-保持 B 进程运行，只需复制其中的 `netns_id` 用于排除本地网络短路；不需要复制
-或传递任何 Agent ID。
+保持 B 进程运行，记下日志中的 `agent_tun_ip=8.8.8.8`。不需要复制或传递任何
+Agent ID。
 
-#### 第二步：启动 A 并发送
+#### 第二步：启动 A
 
-`4433` 替换为 A 对应的 AgentRuntime MASQUE/QUIC 端口：
+`8081` 和 `4433` 分别替换为 A 对应的 AgentRuntime HTTP 与 MASQUE/QUIC 端口：
 
 ```bash
 cd python
 sudo -E .venv/bin/python examples/masque_two_instance_test.py \
   --role A \
+  --runtime-ip 192.168.3.10 \
+  --runtime-port 8081 \
   --local-vlan-ip 192.168.1.10 \
-  --local-agent-ip 8.8.8.7 \
-  --peer-agent-ip 8.8.8.8 \
   --masque-url https://192.168.3.10:4433/.well-known/masque/ip \
   --message-port 4001 \
-  --peer-netns-id 4026533002 \
-  --message '{"type":"text","content":"hello B from A through MASQUE"}'
+  --control-port 18081
 ```
 
-A 固定请求 `POST http://8.8.8.8:4001/message`。B 收到后应在控制台看到：
+A 日志应回显 `agent_tun_ip=8.8.8.7`。两个实例都会继续运行，等待下面的 curl。
+
+#### 第三步：用 curl 告诉两个实例对端 Agent IP
+
+在 B 所在 Ubuntu 中执行，告诉 B：A 的 Agent IP 是 `8.8.8.7`：
+
+```bash
+curl -sS -X POST http://127.0.0.1:18082/test/peer \
+  -H 'Content-Type: application/json' \
+  -d '{"peer_agent_ip":"8.8.8.7"}'
+```
+
+在 A 所在 Ubuntu 中执行，告诉 A：B 的 Agent IP 是 `8.8.8.8`：
+
+```bash
+curl -sS -X POST http://127.0.0.1:18081/test/peer \
+  -H 'Content-Type: application/json' \
+  -d '{"peer_agent_ip":"8.8.8.8"}'
+```
+
+成功响应会包含 `status=OK`、本机/对端 Agent IP 和最终 `/message` URL。此时
+每个实例只为刚配置的对端 IP安装一个 `/32` 主机路由；再次调用可替换对端地址。
+
+#### 第四步：curl A，触发 A 向 B 发送消息
+
+在 A 所在 Ubuntu 中执行：
+
+```bash
+curl -sS -X POST http://127.0.0.1:18081/test/send \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"text","content":"hello B from A through MASQUE"}'
+```
+
+A 实例收到控制请求后固定向 `POST http://8.8.8.8:4001/message` 发送上面的 JSON。
+B 收到后应在控制台看到：
 
 ```jsonl
 {"role":"B","event":"MESSAGE_RECEIVED","method":"POST","path":"/message","source_ip":"8.8.8.7","local_url":"http://8.8.8.8:4001/message","payload":{"type":"text","content":"hello B from A through MASQUE"}}
-{"role":"B","event":"TEST_PASSED","proof":"MESSAGE_RECEIVED"}
 ```
 
 默认日志文件如下，也可以通过 `--log-file` 修改：
 
 ```text
-logs/masque-direct-a.log
-logs/masque-direct-b.log
+logs/masque-interactive-a.log
+logs/masque-interactive-b.log
 ```
 
 B 侧验证命令：
 
 ```bash
-grep -E 'MASQUE_CONNECTED|MESSAGE_RECEIVED|TEST_PASSED' \
-  logs/masque-direct-b.log
+grep -E 'UE_INFO_AGENT_TUN_IP|MASQUE_CONNECTED|MESSAGE_RECEIVED' \
+  logs/masque-interactive-b.log
 ```
 
-脚本为 A/B 自动使用不同的 TUN 名称、MASQUE TLS 客户端状态目录和日志文件。
-`--local-agent-ip`、`--peer-agent-ip`、`--message-port` 和两个不同的
-`--masque-url` 均由测试部署提供；脚本不会查询或推导 Agent ID。若部署启用了
-MASQUE 鉴权，为各实例增加对应的 `--masque-token`。
+也可在任一实例中执行 `curl -sS http://127.0.0.1:<控制端口>/test/status` 查看
+本机 Agent IP、当前对端 IP 和 MASQUE 状态。脚本为 A/B 自动使用不同的 TUN
+名称、MASQUE TLS 客户端状态目录和日志文件；Agent IP只来自
+`GET /v1/ue/info` 和人工 curl，不查询或推导 Agent ID。若部署启用了 MASQUE
+鉴权，为各实例增加对应的 `--masque-token`。
 
 ### 5.2 全接口真实端侧示例
 

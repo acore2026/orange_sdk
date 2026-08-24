@@ -2,6 +2,31 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-24 — 双实例脚本恢复 UE 查询并增加 curl 交互控制
+
+### 修改原因
+
+- 双实例验证仍应遵循 SDK 初始化时的地址来源：本机 Agent TUN IP必须由对应 AgentRuntime 的 `GET /v1/ue/info` 返回，不能作为脚本启动参数手工传入。
+- 对端 Agent IP在本次测试中由用户已知并手工指定，但实例必须先保持运行，便于分别查看 A/B 的本机 IP，再通过 curl 配置对端和控制发送时机。
+- 需要一条明确的 curl 请求触发 A向 B 的 `POST http://<B Agent IP>:4001/message`，并在 B 日志中保留可核验的收包正文和实际源地址。
+
+### 修改方式
+
+- 双实例脚本重新接收各自的 `runtime_ip + runtime_port`，复用 `HttpRuntimeTransport.get_ue_agent_ip()` 完整校验注册、NAS 安全状态及活动默认 IPv4 PDU Session；日志新增 `UE_INFO_AGENT_TUN_IP`，回显实际 `GET /v1/ue/info` URL、Agent TUN IP和 `/32` CIDR。
+- 删除启动参数 `--local-agent-ip/--peer-agent-ip`；本机地址只来自 UE 查询。A/B 建立 TUN 与 MASQUE 后常驻，并分别使用默认本地控制端口 `18081/18082`。
+- 新增本地测试控制接口：`POST /test/peer` 接收 `peer_agent_ip`，原子安装或替换唯一对端主机路由；`POST /test/send` 将 curl 的 JSON 请求体直接发送到已配置对端的 `POST /message`；`GET /test/status` 返回当前本机/对端 IP和 MASQUE 状态。
+- 对端未配置前，入站 `/message` 和发送控制请求均拒绝处理；配置完成后，TUN 上下行仍只允许当前本机/对端 Agent IP对，B 收包时校验真实 TCP 源地址并打印 `MESSAGE_RECEIVED`。
+- Python 客户指南更新为四步操作：启动 B、启动 A、分别 curl 配置对端 IP、curl A触发发送，并给出可直接复制的三条 curl 命令。
+- 单元测试改为覆盖 Runtime UE 查询及日志、对端路由替换、动态 IP包过滤、curl 配置接口、curl 发送的精确目标 URL/消息体以及 B 侧收包日志。
+
+### 验证内容
+
+- `python3 -m compileall -q src examples tests` 通过。
+- 双实例验证脚本测试通过（`6 passed`）；Python全量测试通过（`70 passed`）。
+- `masque_two_instance_test.py --help` 显示 Runtime、MASQUE、控制接口和日志参数，不再接收本机/对端 Agent IP或 Agent ID 参数。
+- README 中 JSON/JSONL 示例均通过标准解析，`git diff --check` 通过；原始《SDK设计文档》保持不变。
+- 当前工作区未连接用户的外部 AgentRuntime/MASQUE/UERANSIM 环境，真实链路结果需按三条 curl 在两个隔离 Ubuntu 网络环境中执行确认。
+
 ## 2026-08-24 — 双实例验证改为已知 Agent IP 直连 `/message`
 
 ### 修改原因
