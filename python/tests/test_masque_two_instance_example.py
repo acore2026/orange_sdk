@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
+import logging
+import socket
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 
@@ -23,85 +25,77 @@ def _load_example():
 
 
 def _arguments(module, tmp_path: Path, role: str, *extra: str):
-    values = [
-        "--role",
-        role,
-        "--runtime-ip",
-        "192.168.3.10",
-        "--runtime-port",
-        "8081" if role == "A" else "8082",
-        "--local-vlan-ip",
-        "192.168.1.10" if role == "A" else "192.168.2.10",
-        "--masque-url",
-        f"https://192.168.3.10:{4433 if role == 'A' else 4434}/masque",
-        "--state-dir",
-        str(tmp_path / f"state-{role.lower()}"),
-        "--app-log-file",
-        str(tmp_path / f"app-{role.lower()}.log"),
-        "--sdk-log-file",
-        str(tmp_path / f"sdk-{role.lower()}.log"),
-        *extra,
-    ]
-    return module.parser().parse_args(values)
-
-
-class FakeSdk:
-    def __init__(self, role: str) -> None:
-        agent_ip = "8.8.8.7" if role == "A" else "8.8.8.8"
-        agent_id = f"did:example:{role.lower()}"
-        self.init = AsyncMock(
-            return_value=SimpleNamespace(
-                masque_connected=True,
-                agent_tun_cidr=f"{agent_ip}/32",
-            )
-        )
-        self.apply_identity = AsyncMock(
-            return_value=SimpleNamespace(agent_id=agent_id)
-        )
-        self.create_group = AsyncMock(
-            return_value=SimpleNamespace(group_id="g1")
-        )
-        self.get_group_snapshot = AsyncMock(
-            return_value=SimpleNamespace(
-                generation=1,
-                members_by_agent_id={"did:example:b": SimpleNamespace()},
-            )
-        )
-        self.send_message = AsyncMock(
-            return_value=SimpleNamespace(message_id="message-1", delivered=True)
-        )
-        self.deregister_identity = AsyncMock()
-        self.close = AsyncMock()
-        self.network_listener = None
-        self.group_listener = None
-
-    def register_network_message_listener(self, listener):
-        self.network_listener = listener
-        return lambda: None
-
-    def register_group_message_listener(self, listener):
-        self.group_listener = listener
-        return lambda: None
-
-
-def test_parser_applies_distinct_role_defaults(tmp_path):
-    module = _load_example()
-    a = module._apply_role_defaults(
-        _arguments(module, tmp_path, "A", "--target-agent-id", "did:example:b")
+    return module.parser().parse_args(
+        [
+            "--role",
+            role,
+            "--local-vlan-ip",
+            "192.168.1.10" if role == "A" else "192.168.2.10",
+            "--local-agent-ip",
+            "8.8.8.7" if role == "A" else "8.8.8.8",
+            "--peer-agent-ip",
+            "8.8.8.8" if role == "A" else "8.8.8.7",
+            "--masque-url",
+            f"https://192.168.3.10:{4433 if role == 'A' else 4434}/masque",
+            "--state-dir",
+            str(tmp_path / f"state-{role.lower()}"),
+            "--log-file",
+            str(tmp_path / f"direct-{role.lower()}.log"),
+            *extra,
+        ]
     )
+
+
+def _logger() -> logging.Logger:
+    logger = logging.getLogger(f"masque-direct-test-{id(object())}")
+    logger.handlers.clear()
+    logger.addHandler(logging.NullHandler())
+    return logger
+
+
+def _ipv4_packet(source: str, destination: str) -> bytes:
+    packet = bytearray(20)
+    packet[0] = 0x45
+    packet[2:4] = (20).to_bytes(2, "big")
+    packet[8] = 64
+    packet[9] = 6
+    packet[12:16] = socket.inet_aton(source)
+    packet[16:20] = socket.inet_aton(destination)
+    return bytes(packet)
+
+
+class FakeTun:
+    def __init__(self, reads: list[bytes] | None = None) -> None:
+        self._reads = list(reads or [])
+        self.writes: list[bytes] = []
+
+    async def read(self) -> bytes:
+        return self._reads.pop(0) if self._reads else b""
+
+    async def write(self, packet: bytes) -> None:
+        self.writes.append(packet)
+
+
+class FakeMasque:
+    def __init__(self) -> None:
+        self.sent: list[bytes] = []
+
+    async def send_packet(self, packet: bytes) -> None:
+        self.sent.append(packet)
+
+
+def test_parser_requires_ips_but_has_no_agent_id_or_group_arguments(tmp_path):
+    module = _load_example()
+    a = module._apply_role_defaults(_arguments(module, tmp_path, "A"))
     b = module._apply_role_defaults(_arguments(module, tmp_path, "B"))
 
-    assert (a.tun_name, a.tcp_port, a.udp_port) == ("agent_tun_a", 4001, 28443)
-    assert (b.tun_name, b.tcp_port, b.udp_port) == ("agent_tun_b", 4001, 28443)
-    assert a.state_dir != b.state_dir
-    assert a.sdk_log_file != b.sdk_log_file
-
-
-def test_role_a_requires_target_agent_id(tmp_path):
-    module = _load_example()
-    args = module._apply_role_defaults(_arguments(module, tmp_path, "A"))
-    with pytest.raises(ValueError, match="target-agent-id"):
-        module._validate_args(args)
+    assert (a.local_agent_ip, a.peer_agent_ip) == ("8.8.8.7", "8.8.8.8")
+    assert (b.local_agent_ip, b.peer_agent_ip) == ("8.8.8.8", "8.8.8.7")
+    assert a.message_port == b.message_port == 4001
+    assert a.tun_name == "agent_tun_a"
+    assert b.tun_name == "agent_tun_b"
+    assert not hasattr(a, "target_agent_id")
+    assert not hasattr(a, "runtime_ip")
 
 
 def test_same_network_namespace_is_rejected(tmp_path):
@@ -114,8 +108,6 @@ def test_same_network_namespace_is_rejected(tmp_path):
             module,
             tmp_path,
             "A",
-            "--target-agent-id",
-            "did:example:b",
             "--peer-netns-id",
             str(current_netns),
         )
@@ -124,76 +116,104 @@ def test_same_network_namespace_is_rejected(tmp_path):
         module._validate_args(args)
 
 
-async def test_role_a_creates_group_and_sends_message(tmp_path):
+async def test_uplink_only_forwards_packets_from_local_to_peer():
     module = _load_example()
-    args = _arguments(
-        module,
-        tmp_path,
-        "A",
-        "--target-agent-id",
-        "did:example:b",
-        "--expected-agent-ip",
-        "8.8.8.7",
-        "--message",
-        '{"content":"hello B"}',
-    )
-    sdk = FakeSdk("A")
+    valid = _ipv4_packet("8.8.8.7", "8.8.8.8")
+    invalid = _ipv4_packet("8.8.8.7", "8.8.8.9")
+    tun = FakeTun([invalid, valid])
+    masque = FakeMasque()
 
-    await module.run_instance(args, sdk=sdk)
+    await module._pump_uplink(
+        tun=tun,
+        masque=masque,
+        local_agent_ip="8.8.8.7",
+        peer_agent_ip="8.8.8.8",
+        mtu=1280,
+        logger=_logger(),
+        role="A",
+    )
 
-    sdk.init.assert_awaited_once()
-    sdk.create_group.assert_awaited_once_with(
-        "did:example:a",
-        ["did:example:b"],
-        group_name="masque-two-instance-test",
-        scope="private",
-        max_members=2,
-    )
-    sdk.send_message.assert_awaited_once_with(
-        "g1",
-        "did:example:b",
-        {"content": "hello B"},
-        timeout_seconds=10.0,
-        message_type="text",
-        task_id="masque-two-instance-test",
-    )
-    sdk.close.assert_awaited_once()
-    assert '"event": "MASQUE_CONNECTED"' in Path(args.app_log_file).read_text(
-        encoding="utf-8"
-    )
-    assert '"event": "A2A_MESSAGE_DELIVERED"' in Path(
-        args.app_log_file
-    ).read_text(encoding="utf-8")
+    assert masque.sent == [valid]
 
 
-async def test_role_b_prints_and_logs_received_message(tmp_path):
+async def test_downlink_only_writes_packets_from_peer_to_local():
     module = _load_example()
-    args = _arguments(
-        module,
-        tmp_path,
-        "B",
-        "--expected-agent-ip",
-        "8.8.8.8",
-        "--receive-timeout",
-        "2",
-        "--post-receive-linger",
-        "0",
-    )
-    sdk = FakeSdk("B")
+    valid = _ipv4_packet("8.8.8.7", "8.8.8.8")
+    invalid = _ipv4_packet("8.8.8.9", "8.8.8.8")
+    tun = FakeTun()
 
-    running = asyncio.create_task(module.run_instance(args, sdk=sdk))
-    for _ in range(20):
-        if sdk.group_listener is not None and sdk.apply_identity.await_count:
-            break
-        await asyncio.sleep(0)
-    assert sdk.group_listener is not None
-    await sdk.group_listener.on_group_message(
-        "g1", "did:example:a", {"content": "hello B"}
-    )
-    await running
+    for packet in (invalid, valid):
+        await module._write_downlink(
+            packet,
+            tun=tun,
+            local_agent_ip="8.8.8.8",
+            peer_agent_ip="8.8.8.7",
+            mtu=1280,
+            logger=_logger(),
+            role="B",
+        )
 
-    log_text = Path(args.app_log_file).read_text(encoding="utf-8")
-    assert '"event": "A2A_MESSAGE_RECEIVED"' in log_text
+    assert tun.writes == [valid]
+
+
+async def test_a_posts_json_to_peer_ip_port_4001_message(tmp_path):
+    module = _load_example()
+    args = module._apply_role_defaults(
+        _arguments(
+            module,
+            tmp_path,
+            "A",
+            "--message",
+            '{"content":"hello B"}',
+        )
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "http://8.8.8.8:4001/message"
+        assert json.loads(request.content) == {"content": "hello B"}
+        return httpx.Response(200, json={"status": "OK"})
+
+    await module._post_message(
+        args,
+        module._configure_logger("A", str(tmp_path / "sender.log")),
+        transport=httpx.MockTransport(handler),
+    )
+
+    log_text = (tmp_path / "sender.log").read_text(encoding="utf-8")
+    assert '"event": "MESSAGE_SENDING"' in log_text
+    assert '"event": "MESSAGE_DELIVERED"' in log_text
+
+
+async def test_b_message_endpoint_prints_and_logs_received_json(tmp_path):
+    module = _load_example()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    received_event = asyncio.Event()
+    logger = module._configure_logger("B", str(tmp_path / "receiver.log"))
+    server = module.MessageServer(
+        role="B",
+        local_agent_ip="127.0.0.1",
+        peer_agent_ip="127.0.0.1",
+        port=port,
+        logger=logger,
+        received_event=received_event,
+    )
+    await server.start()
+    try:
+        async with httpx.AsyncClient(trust_env=False) as client:
+            response = await client.post(
+                f"http://127.0.0.1:{port}/message",
+                json={"content": "hello B"},
+            )
+        assert response.json() == {"status": "OK"}
+        assert received_event.is_set()
+        assert server.last_message == {"content": "hello B"}
+    finally:
+        await server.close()
+
+    log_text = (tmp_path / "receiver.log").read_text(encoding="utf-8")
+    assert '"event": "MESSAGE_SERVER_LISTENING"' in log_text
+    assert '"event": "MESSAGE_RECEIVED"' in log_text
+    assert '"path": "/message"' in log_text
     assert '"payload": {"content": "hello B"}' in log_text
-    assert '"event": "TEST_PASSED"' in log_text
-    sdk.close.assert_awaited_once()

@@ -487,15 +487,19 @@ await sdk.deregister_identity(profile.agent_id, reason="retired")
 
 ### 5.1 Windows/Ubuntu 双实例 MASQUE 消息测试
 
-`examples/masque_two_instance_test.py` 只执行这次联调需要的最短真实流程：
+`examples/masque_two_instance_test.py` 是独立的透明三层链路验证脚本，不执行
+身份申请、Agent 发现、建群，不需要 `agent_id/group_id`，也不等待
+`acf_group_config`。它只使用已知的本机和对端 Agent IP：
 
-1. A、B 分别调用 `sdk.init()`，从各自 AgentRuntime 查询 UE IP并建立各自的
-   CONNECT-IP 会话；初始化返回后打印 `MASQUE_CONNECTED`。
-2. B 申请身份、打印 `agent_id`，常驻等待邀请、群组配置和 A2A 消息。
-3. A 使用 B 打印的 `agent_id` 创建双成员群组，等待已验签
-   `acf_group_config` 自动缓存和安装路由，再调用 `sdk.send_message()`。
-4. B 的 `/A2A/message` listener 收到消息后在控制台和文件中打印
-   `A2A_MESSAGE_RECEIVED`，随后打印 `TEST_PASSED`。
+1. A、B 分别创建自己的 Agent TUN，并连接各自的 AgentRuntime MASQUE/QUIC 端口。
+2. 脚本为唯一的对端 Agent IP安装主机路由，并只允许这一对源/目的 IP进入隧道。
+3. B 在 `http://<B Agent IP>:4001/message` 启动 HTTP Server。
+4. A 直接向该 URL 执行 `POST`；B 打印并落盘 `MESSAGE_RECEIVED`，返回
+   `{"status":"OK"}`，两端分别打印 `TEST_PASSED`。
+
+该脚本只用于验证 TUN→CONNECT-IP→服务器用户面→对端 TUN 的连通性。正式业务
+仍使用 `AgentSdk.send_message(group_id, target_agent_id, ...)` 和
+`POST /A2A/message`，不应把验证脚本的直连 IP接口当作 SDK 北向接口。
 
 #### 网络隔离前提
 
@@ -511,81 +515,73 @@ Python 虚拟环境不同不能替代这个检查。
 
 #### 第一步：先启动 B
 
-下面的地址和端口只是示例。`8082` 是 B 对应的 AgentRuntime HTTP/WebSocket
-端口，`4434` 是 B 对应的 AgentRuntime MASQUE/QUIC 端口：
+下面的地址和端口只是示例。B 已知自己的 Agent IP 为 `8.8.8.8`、A 的 Agent IP
+为 `8.8.8.7`；`4434` 是 B 对应的 AgentRuntime MASQUE/QUIC 端口：
 
 ```bash
 cd python
 sudo -E .venv/bin/python examples/masque_two_instance_test.py \
   --role B \
-  --runtime-ip 192.168.3.10 \
-  --runtime-port 8082 \
   --local-vlan-ip 192.168.2.10 \
+  --local-agent-ip 8.8.8.8 \
+  --peer-agent-ip 8.8.8.7 \
   --masque-url https://192.168.3.10:4434/.well-known/masque/ip \
-  --expected-agent-ip 8.8.8.8 \
-  --tcp-port 4001 \
-  --udp-port 28443 \
+  --message-port 4001 \
   --receive-timeout 300
 ```
 
-B 成功连接后会输出两条后续需要的信息：
+B 成功连接后会输出网络命名空间和监听 URL：
 
 ```jsonl
-{"role":"B","event":"INSTANCE_STARTING","netns_id":4026533002}
-{"role":"B","event":"IDENTITY_READY","agent_id":"did:...agent-b..."}
+{"role":"B","event":"INSTANCE_STARTING","netns_id":4026533002,"local_agent_ip":"8.8.8.8","peer_agent_ip":"8.8.8.7"}
+{"role":"B","event":"MESSAGE_SERVER_LISTENING","url":"http://8.8.8.8:4001/message"}
 ```
 
-保持 B 进程运行，复制其中的 `netns_id` 和 `agent_id`。
+保持 B 进程运行，只需复制其中的 `netns_id` 用于排除本地网络短路；不需要复制
+或传递任何 Agent ID。
 
 #### 第二步：启动 A 并发送
 
-`8081` 和 `4433` 分别替换为 A 对应的 AgentRuntime 控制端口和 MASQUE 端口：
+`4433` 替换为 A 对应的 AgentRuntime MASQUE/QUIC 端口：
 
 ```bash
 cd python
 sudo -E .venv/bin/python examples/masque_two_instance_test.py \
   --role A \
-  --runtime-ip 192.168.3.10 \
-  --runtime-port 8081 \
   --local-vlan-ip 192.168.1.10 \
+  --local-agent-ip 8.8.8.7 \
+  --peer-agent-ip 8.8.8.8 \
   --masque-url https://192.168.3.10:4433/.well-known/masque/ip \
-  --expected-agent-ip 8.8.8.7 \
-  --tcp-port 4001 \
-  --udp-port 28443 \
-  --target-agent-id '替换为B打印的agent_id' \
+  --message-port 4001 \
   --peer-netns-id 4026533002 \
   --message '{"type":"text","content":"hello B from A through MASQUE"}'
 ```
 
-应用不传 B 的 IP、端口或 URL。A 的 `send_message()` 只用
-`group_id + target_agent_id` 查询已验签群组缓存，并固定请求
-`POST /A2A/message`。B 收到后应在控制台看到：
+A 固定请求 `POST http://8.8.8.8:4001/message`。B 收到后应在控制台看到：
 
 ```jsonl
-{"role":"B","event":"A2A_MESSAGE_RECEIVED","group_id":"g...","sender_agent_id":"did:...agent-a...","payload":{"type":"text","content":"hello B from A through MASQUE"}}
-{"role":"B","event":"TEST_PASSED","proof":"A2A_MESSAGE_RECEIVED"}
+{"role":"B","event":"MESSAGE_RECEIVED","method":"POST","path":"/message","source_ip":"8.8.8.7","local_url":"http://8.8.8.8:4001/message","payload":{"type":"text","content":"hello B from A through MASQUE"}}
+{"role":"B","event":"TEST_PASSED","proof":"MESSAGE_RECEIVED"}
 ```
 
-默认日志文件如下，各实例也可以通过 `--app-log-file` 和 `--sdk-log-file` 修改：
+默认日志文件如下，也可以通过 `--log-file` 修改：
 
 ```text
-logs/masque-pair-a-app.log
-logs/masque-pair-a-sdk.log
-logs/masque-pair-b-app.log
-logs/masque-pair-b-sdk.log
+logs/masque-direct-a.log
+logs/masque-direct-b.log
 ```
 
 B 侧验证命令：
 
 ```bash
-grep -E 'A2A_MESSAGE_RECEIVED|TEST_PASSED' logs/masque-pair-b-app.log
-grep -E 'HTTP/3 CONNECT-IP|/A2A/message' logs/masque-pair-b-sdk.log
+grep -E 'MASQUE_CONNECTED|MESSAGE_RECEIVED|TEST_PASSED' \
+  logs/masque-direct-b.log
 ```
 
-脚本为 A/B 自动使用不同的 TUN 名称、密钥状态目录和日志文件。业务 TCP/UDP
-端口默认仍是 `4001/28443`，必须与核心网下发群组配置中的本机成员端口一致；
-AgentRuntime 控制端口和 MASQUE/QUIC 端口通过各实例参数分别传入。若部署启用了
-MASQUE 鉴权，再为各实例增加 `--masque-token`。
+脚本为 A/B 自动使用不同的 TUN 名称、MASQUE TLS 客户端状态目录和日志文件。
+`--local-agent-ip`、`--peer-agent-ip`、`--message-port` 和两个不同的
+`--masque-url` 均由测试部署提供；脚本不会查询或推导 Agent ID。若部署启用了
+MASQUE 鉴权，为各实例增加对应的 `--masque-token`。
 
 ### 5.2 全接口真实端侧示例
 

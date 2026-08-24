@@ -2,6 +2,30 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-24 — 双实例验证改为已知 Agent IP 直连 `/message`
+
+### 修改原因
+
+- 双实例脚本只用于验证端侧 TUN、MASQUE CONNECT-IP、服务器用户面和对端 TUN 是否连通，不需要覆盖身份、发现、建群或业务 SDK 寻址流程。
+- 上一版要求 B 先申请并输出 `agent_id`，A 再建群、等待 `acf_group_config` 后调用 `send_message()`，引入了与本次网络验证无关的控制面前置条件。
+- 已确认验证协议为：A 已知 B 的 Agent IP，直接向 `http://<B Agent IP>:4001/message` 发送 JSON；B 打印日志证明收到。
+
+### 修改方式
+
+- 重写 `python/examples/masque_two_instance_test.py`，删除 AgentRuntime 控制端口、Agent ID、身份申请、邀请、群组配置、群组 ID 和 `AgentSdk.send_message()` 依赖。
+- A/B 直接传入 `local_agent_ip + peer_agent_ip + masque_url`；脚本创建 `/32` 或 `/128` Agent TUN、安装唯一对端主机路由、建立各自 CONNECT-IP 会话，并只转发这对 Agent IP之间的报文。
+- 两端都在本机 Agent IP 的 TCP 4001 端口注册 `POST /message`；角色 A 向对端固定 URL发送 JSON，角色 B 校验 TCP 源地址等于 A 的 Agent IP，打印并落盘 `MESSAGE_RECEIVED`，返回 `{"status":"OK"}`。
+- 保留网络命名空间防短路检查、独立 TUN/密钥目录和本地滚动日志；客户指南中的 B/A 命令、参数、日志名称和验收标志全部改为 IP直连测试语义，并明确该 `/message` 仅是验证接口，不替代正式 SDK 的 `/A2A/message`。
+- 重写脚本测试，覆盖无 Agent ID/Runtime 参数、相同网络命名空间拒绝、IP包双向过滤、A 请求的精确 URL/方法/JSON、B `/message` 响应与收包日志。
+
+### 验证内容
+
+- `python3 -m compileall -q src examples tests` 通过。
+- 双实例验证脚本测试通过（`6 passed`）；Python 全量测试通过（`70 passed`）。
+- `masque_two_instance_test.py --help` 不再包含 Agent ID、群组或 AgentRuntime 控制面参数，固定消息端口默认值为 `4001`。
+- 当前工作区未连接用户的外部 AgentRuntime/MASQUE/UERANSIM 环境，真实 A→服务器用户面→B 结果仍需在两个隔离 Ubuntu 网络环境中执行确认。
+- `git diff --check` 通过；原始《SDK设计文档》保持不变。
+
 ## 2026-08-24 — 新增 Ubuntu A/B 双实例 MASQUE 消息联调脚本
 
 ### 修改原因

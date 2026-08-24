@@ -7,17 +7,17 @@ import logging
 import os
 import sys
 from datetime import datetime, timezone
-from ipaddress import ip_interface
+from ipaddress import ip_address
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Mapping
 
-from agent_sdk import (
-    AgentSdk,
-    NetworkMessageAction,
-    NetworkMessageType,
-    __version__,
-)
+import httpx
+from aiohttp import web
+
+from agent_sdk.masque import AioquicConnectIpTransport
+from agent_sdk.routes import Pyroute2RouteBackend
+from agent_sdk.tun import LinuxTunDevice, validate_ip_packet
 
 
 def _json_object(value: str) -> Mapping[str, Any]:
@@ -37,6 +37,15 @@ def _netns_id() -> int | None:
         return None
 
 
+def _host_cidr(address: str) -> str:
+    parsed = ip_address(address)
+    return f"{parsed}/{32 if parsed.version == 4 else 128}"
+
+
+def _http_host(address: str) -> str:
+    return f"[{address}]" if ip_address(address).version == 6 else address
+
+
 def _emit(logger: logging.Logger, role: str, event: str, **fields: Any) -> None:
     record = {
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -47,10 +56,10 @@ def _emit(logger: logging.Logger, role: str, event: str, **fields: Any) -> None:
     logger.info(json.dumps(record, ensure_ascii=False, default=str))
 
 
-def _configure_app_logger(role: str, file_path: str) -> logging.Logger:
+def _configure_logger(role: str, file_path: str) -> logging.Logger:
     destination = Path(file_path).expanduser().resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger(f"masque_two_instance_test.{role}.{os.getpid()}")
+    logger = logging.getLogger(f"masque_direct_test.{role}.{os.getpid()}")
     logger.setLevel(logging.INFO)
     logger.propagate = False
     logger.handlers.clear()
@@ -69,91 +78,212 @@ def _configure_app_logger(role: str, file_path: str) -> logging.Logger:
     return logger
 
 
-class PairNetworkListener:
-    def __init__(self, role: str, logger: logging.Logger) -> None:
-        self._role = role
-        self._logger = logger
-
-    async def on_network_message(
-        self, message_type: NetworkMessageType, payload: Mapping[str, Any]
-    ) -> NetworkMessageAction:
-        if message_type is NetworkMessageType.GROUP_INVITATION:
-            _emit(
-                self._logger,
-                self._role,
-                "GROUP_INVITATION_ACCEPTED",
-                group_name=(payload.get("group_config") or {}).get("group_name")
-                if isinstance(payload.get("group_config"), Mapping)
-                else None,
-            )
-            return NetworkMessageAction.ACCEPT
-        if message_type is NetworkMessageType.GROUP_CONFIG:
-            _emit(
-                self._logger,
-                self._role,
-                "GROUP_CONFIG_COMMITTED",
-                group_id=payload.get("group_id"),
-            )
-            return NetworkMessageAction.ACK
-        _emit(
-            self._logger,
-            self._role,
-            "NETWORK_MESSAGE_REJECTED",
-            message_type=str(message_type),
-        )
-        return NetworkMessageAction.REJECT
-
-
-class PairGroupListener:
+class MessageServer:
     def __init__(
         self,
+        *,
         role: str,
+        local_agent_ip: str,
+        peer_agent_ip: str,
+        port: int,
         logger: logging.Logger,
         received_event: asyncio.Event,
     ) -> None:
         self._role = role
+        self._local_agent_ip = str(ip_address(local_agent_ip))
+        self._peer_agent_ip = str(ip_address(peer_agent_ip))
+        self._port = port
         self._logger = logger
         self._received_event = received_event
-        self.last_message: tuple[str, str, Mapping[str, Any]] | None = None
+        self._runner: web.AppRunner | None = None
+        self.last_message: Mapping[str, Any] | None = None
 
-    async def on_group_message(
-        self,
-        group_id: str,
-        sender_agent_id: str,
-        payload: Mapping[str, Any],
-    ) -> None:
-        self.last_message = (group_id, sender_agent_id, dict(payload))
+    async def _message(self, request: web.Request) -> web.Response:
+        remote = request.remote
+        try:
+            normalized_remote = str(ip_address(remote)) if remote else ""
+        except ValueError:
+            normalized_remote = ""
+        if normalized_remote != self._peer_agent_ip:
+            _emit(
+                self._logger,
+                self._role,
+                "MESSAGE_REJECTED",
+                reason="unexpected_source_ip",
+                source_ip=remote,
+            )
+            return web.json_response(
+                {"status": "ERROR", "detail": "unexpected source Agent IP"},
+                status=403,
+            )
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response(
+                {"status": "ERROR", "detail": "invalid JSON"}, status=400
+            )
+        if not isinstance(payload, Mapping):
+            return web.json_response(
+                {"status": "ERROR", "detail": "JSON object required"}, status=400
+            )
+        self.last_message = dict(payload)
         _emit(
             self._logger,
             self._role,
-            "A2A_MESSAGE_RECEIVED",
-            group_id=group_id,
-            sender_agent_id=sender_agent_id,
+            "MESSAGE_RECEIVED",
+            method="POST",
+            path="/message",
+            source_ip=normalized_remote,
+            local_url=f"http://{_http_host(self._local_agent_ip)}:{self._port}/message",
             payload=dict(payload),
         )
         self._received_event.set()
+        return web.json_response({"status": "OK"})
+
+    async def start(self) -> None:
+        app = web.Application(client_max_size=1024 * 1024)
+        app.router.add_post("/message", self._message)
+        self._runner = web.AppRunner(app)
+        await self._runner.setup()
+        site = web.TCPSite(self._runner, self._local_agent_ip, self._port)
+        try:
+            await site.start()
+        except Exception:
+            await self.close()
+            raise
+        _emit(
+            self._logger,
+            self._role,
+            "MESSAGE_SERVER_LISTENING",
+            url=f"http://{_http_host(self._local_agent_ip)}:{self._port}/message",
+        )
+
+    async def close(self) -> None:
+        if self._runner is not None:
+            await self._runner.cleanup()
+            self._runner = None
+
+
+async def _pump_uplink(
+    *,
+    tun: LinuxTunDevice,
+    masque: AioquicConnectIpTransport,
+    local_agent_ip: str,
+    peer_agent_ip: str,
+    mtu: int,
+    logger: logging.Logger,
+    role: str,
+) -> None:
+    while True:
+        packet = await tun.read()
+        if not packet:
+            return
+        try:
+            source, destination = validate_ip_packet(packet, mtu)
+        except ValueError as exc:
+            _emit(logger, role, "IP_PACKET_DROPPED", direction="uplink", reason=str(exc))
+            continue
+        if source != local_agent_ip or destination != peer_agent_ip:
+            _emit(
+                logger,
+                role,
+                "IP_PACKET_DROPPED",
+                direction="uplink",
+                reason="outside_test_pair",
+                source_ip=source,
+                destination_ip=destination,
+            )
+            continue
+        await masque.send_packet(packet)
+
+
+async def _write_downlink(
+    packet: bytes,
+    *,
+    tun: LinuxTunDevice,
+    local_agent_ip: str,
+    peer_agent_ip: str,
+    mtu: int,
+    logger: logging.Logger,
+    role: str,
+) -> None:
+    try:
+        source, destination = validate_ip_packet(packet, mtu)
+    except ValueError as exc:
+        _emit(logger, role, "IP_PACKET_DROPPED", direction="downlink", reason=str(exc))
+        return
+    if source != peer_agent_ip or destination != local_agent_ip:
+        _emit(
+            logger,
+            role,
+            "IP_PACKET_DROPPED",
+            direction="downlink",
+            reason="outside_test_pair",
+            source_ip=source,
+            destination_ip=destination,
+        )
+        return
+    await tun.write(packet)
+
+
+async def _post_message(
+    args: argparse.Namespace,
+    logger: logging.Logger,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> None:
+    url = f"http://{_http_host(args.peer_agent_ip)}:{args.message_port}/message"
+    _emit(
+        logger,
+        args.role,
+        "MESSAGE_SENDING",
+        method="POST",
+        url=url,
+        payload=dict(args.message),
+    )
+    async with httpx.AsyncClient(
+        timeout=args.message_timeout,
+        trust_env=False,
+        transport=transport,
+    ) as client:
+        response = await client.post(url, json=dict(args.message))
+        response.raise_for_status()
+        result = response.json()
+    if not isinstance(result, Mapping) or result.get("status") != "OK":
+        raise RuntimeError(f"peer returned an invalid response: {result!r}")
+    _emit(
+        logger,
+        args.role,
+        "MESSAGE_DELIVERED",
+        url=url,
+        response=dict(result),
+    )
 
 
 def _apply_role_defaults(args: argparse.Namespace) -> argparse.Namespace:
     role = args.role.upper()
     args.role = role
     suffix = role.lower()
-    args.tcp_port = args.tcp_port or 4001
-    args.udp_port = args.udp_port or 28443
     args.tun_name = args.tun_name or f"agent_tun_{suffix}"
-    args.agent_name = args.agent_name or f"MASQUE-Test-Agent-{role}"
-    args.owner = args.owner or f"masque-test-owner-{suffix}"
-    args.state_dir = args.state_dir or f"./state/masque-pair-{suffix}"
-    args.app_log_file = args.app_log_file or f"./logs/masque-pair-{suffix}-app.log"
-    args.sdk_log_file = args.sdk_log_file or f"./logs/masque-pair-{suffix}-sdk.log"
+    args.state_dir = args.state_dir or f"./state/masque-direct-{suffix}"
+    args.log_file = args.log_file or f"./logs/masque-direct-{suffix}.log"
     return args
 
 
 def _validate_args(args: argparse.Namespace) -> None:
-    if args.role == "A" and not args.target_agent_id:
-        raise ValueError("role A requires --target-agent-id printed by role B")
-    if args.group_timeout <= 0 or args.message_timeout <= 0:
-        raise ValueError("group and message timeouts must be greater than zero")
+    ip_address(args.local_vlan_ip)
+    local_agent_ip = ip_address(args.local_agent_ip)
+    peer_agent_ip = ip_address(args.peer_agent_ip)
+    if local_agent_ip.version != peer_agent_ip.version:
+        raise ValueError("local and peer Agent IPs must use the same address family")
+    if local_agent_ip == peer_agent_ip:
+        raise ValueError("local and peer Agent IPs must be different")
+    if args.message_timeout <= 0:
+        raise ValueError("message timeout must be greater than zero")
+    if not 1 <= args.message_port <= 65535:
+        raise ValueError("message port must be in 1..65535")
+    if args.send_delay < 0:
+        raise ValueError("send delay must be zero or greater")
     if args.role == "B" and args.receive_timeout < 0:
         raise ValueError("receive timeout must be zero or greater")
     if args.post_receive_linger < 0:
@@ -165,217 +295,190 @@ def _validate_args(args: argparse.Namespace) -> None:
         and args.peer_netns_id == current_netns
     ):
         raise ValueError(
-            "A and B are in the same Linux network namespace; the kernel can "
-            "short-circuit Agent IP traffic locally, so this cannot prove the "
-            "MASQUE/5GC path"
+            "A and B are in the same Linux network namespace; local routing can "
+            "bypass MASQUE, so this result would not prove the server path"
         )
-
-
-async def _wait_for_group(
-    sdk: AgentSdk,
-    group_id: str,
-    target_agent_id: str,
-    timeout: float,
-):
-    deadline = asyncio.get_running_loop().time() + timeout
-    while True:
-        snapshot = await sdk.get_group_snapshot(group_id)
-        if snapshot is not None and target_agent_id in snapshot.members_by_agent_id:
-            return snapshot
-        if asyncio.get_running_loop().time() >= deadline:
-            raise TimeoutError(
-                "timed out waiting for the signed acf_group_config containing "
-                f"target {target_agent_id}"
-            )
-        await asyncio.sleep(0.2)
-
-
-async def _initialize_and_apply_identity(
-    sdk: AgentSdk,
-    args: argparse.Namespace,
-    logger: logging.Logger,
-):
-    initialized = await sdk.init(
-        args.runtime_ip,
-        args.runtime_port,
-        args.local_vlan_ip,
-        args.tcp_port,
-        args.udp_port,
-        masque_server_url=args.masque_url,
-        masque_authorization=(
-            f"Bearer {args.masque_token}" if args.masque_token else None
-        ),
-        tun_name=args.tun_name,
-        tun_mtu=args.tun_mtu,
-        log_file_path=args.sdk_log_file,
-        log_level=args.log_level,
-    )
-    if not initialized.masque_connected:
-        raise RuntimeError("SDK init returned without an active MASQUE connection")
-    agent_ip = str(ip_interface(initialized.agent_tun_cidr).ip)
-    if args.expected_agent_ip and agent_ip != args.expected_agent_ip:
-        raise RuntimeError(
-            f"AgentRuntime returned Agent IP {agent_ip}, expected {args.expected_agent_ip}"
-        )
-    _emit(
-        logger,
-        args.role,
-        "MASQUE_CONNECTED",
-        masque_url=args.masque_url,
-        agent_tun_cidr=initialized.agent_tun_cidr,
-        tun_name=args.tun_name,
-    )
-
-    profile = await sdk.apply_identity(
-        owner=args.owner,
-        name=args.agent_name,
-        description=f"WSL Ubuntu MASQUE two-instance test role {args.role}",
-        metadata={"region": args.region, "os": "Linux", "version": __version__},
-    )
-    _emit(
-        logger,
-        args.role,
-        "IDENTITY_READY",
-        agent_id=profile.agent_id,
-        instruction=(
-            "copy this agent_id into role A --target-agent-id"
-            if args.role == "B"
-            else None
-        ),
-    )
-    return initialized, profile
-
-
-async def run_role_a(
-    sdk: AgentSdk,
-    args: argparse.Namespace,
-    logger: logging.Logger,
-) -> None:
-    _, profile = await _initialize_and_apply_identity(sdk, args, logger)
-    group = await sdk.create_group(
-        profile.agent_id,
-        [args.target_agent_id],
-        group_name=args.group_name,
-        scope="private",
-        max_members=2,
-    )
-    _emit(logger, args.role, "GROUP_CREATED", group_id=group.group_id)
-    snapshot = await _wait_for_group(
-        sdk,
-        group.group_id,
-        args.target_agent_id,
-        args.group_timeout,
-    )
-    _emit(
-        logger,
-        args.role,
-        "GROUP_READY",
-        group_id=group.group_id,
-        generation=snapshot.generation,
-        target_agent_id=args.target_agent_id,
-    )
-    receipt = await sdk.send_message(
-        group.group_id,
-        args.target_agent_id,
-        args.message,
-        timeout_seconds=args.message_timeout,
-        message_type=args.message_type,
-        task_id=args.task_id,
-    )
-    if not receipt.delivered:
-        raise RuntimeError("role B did not return status=OK")
-    _emit(
-        logger,
-        args.role,
-        "A2A_MESSAGE_DELIVERED",
-        group_id=group.group_id,
-        target_agent_id=args.target_agent_id,
-        message_id=receipt.message_id,
-    )
-    if args.deregister_on_exit:
-        await sdk.deregister_identity(profile.agent_id, reason="retired")
-        _emit(logger, args.role, "IDENTITY_DEREGISTERED", agent_id=profile.agent_id)
-
-
-async def run_role_b(
-    sdk: AgentSdk,
-    args: argparse.Namespace,
-    logger: logging.Logger,
-    received_event: asyncio.Event,
-) -> None:
-    _, profile = await _initialize_and_apply_identity(sdk, args, logger)
-    _emit(
-        logger,
-        args.role,
-        "WAITING_FOR_A2A_MESSAGE",
-        receive_timeout_seconds=args.receive_timeout,
-    )
-    try:
-        if args.receive_timeout == 0:
-            await received_event.wait()
-        else:
-            await asyncio.wait_for(received_event.wait(), args.receive_timeout)
-    except TimeoutError as exc:
-        raise TimeoutError(
-            "role B timed out before receiving an A2A message through MASQUE"
-        ) from exc
-    _emit(logger, args.role, "TEST_PASSED", proof="A2A_MESSAGE_RECEIVED")
-    if args.post_receive_linger:
-        await asyncio.sleep(args.post_receive_linger)
-    if args.deregister_on_exit:
-        await sdk.deregister_identity(profile.agent_id, reason="retired")
-        _emit(logger, args.role, "IDENTITY_DEREGISTERED", agent_id=profile.agent_id)
 
 
 async def run_instance(
     args: argparse.Namespace,
     *,
-    sdk: AgentSdk | None = None,
+    http_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
     args = _apply_role_defaults(args)
     _validate_args(args)
+    args.local_agent_ip = str(ip_address(args.local_agent_ip))
+    args.peer_agent_ip = str(ip_address(args.peer_agent_ip))
+
     state_dir = Path(args.state_dir).expanduser().resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
     previous_state_home = os.environ.get("XDG_STATE_HOME")
     os.environ["XDG_STATE_HOME"] = str(state_dir)
-    logger = _configure_app_logger(args.role, args.app_log_file)
-    current_netns = _netns_id()
+    logger = _configure_logger(args.role, args.log_file)
     _emit(
         logger,
         args.role,
         "INSTANCE_STARTING",
         pid=os.getpid(),
-        netns_id=current_netns,
-        state_dir=str(state_dir),
-        sdk_log_file=str(Path(args.sdk_log_file).expanduser().resolve()),
+        netns_id=_netns_id(),
+        local_agent_ip=args.local_agent_ip,
+        peer_agent_ip=args.peer_agent_ip,
     )
-    if args.peer_netns_id is None:
+
+    tun: LinuxTunDevice | None = None
+    route_backend: Pyroute2RouteBackend | None = None
+    route_installed = False
+    masque: AioquicConnectIpTransport | None = None
+    pump_task: asyncio.Task[None] | None = None
+    message_server: MessageServer | None = None
+    received_event = asyncio.Event()
+    try:
+        tun = await LinuxTunDevice.create(
+            args.tun_name,
+            _host_cidr(args.local_agent_ip),
+            args.tun_mtu,
+        )
+        masque = AioquicConnectIpTransport(
+            server_url=args.masque_url,
+            authorization=(
+                f"Bearer {args.masque_token}" if args.masque_token else None
+            ),
+            local_address=args.local_vlan_ip,
+            logger=logger,
+        )
+
+        async def downlink(packet: bytes) -> None:
+            assert tun is not None
+            await _write_downlink(
+                packet,
+                tun=tun,
+                local_agent_ip=args.local_agent_ip,
+                peer_agent_ip=args.peer_agent_ip,
+                mtu=args.tun_mtu,
+                logger=logger,
+                role=args.role,
+            )
+
+        await masque.start(downlink)
+        if not masque.connected:
+            raise RuntimeError("MASQUE CONNECT-IP did not become connected")
         _emit(
             logger,
             args.role,
-            "NETNS_CHECK_REQUIRED",
-            message=(
-                "compare A/B netns_id values; they must differ to prove traffic "
-                "did not short-circuit inside one Linux network namespace"
-            ),
+            "MASQUE_CONNECTED",
+            masque_url=args.masque_url,
+            tun_name=tun.name,
+            tun_cidr=tun.cidr,
         )
 
-    active_sdk = sdk or AgentSdk()
-    received_event = asyncio.Event()
-    network_listener = PairNetworkListener(args.role, logger)
-    group_listener = PairGroupListener(args.role, logger, received_event)
-    unregister_network = active_sdk.register_network_message_listener(network_listener)
-    unregister_group = active_sdk.register_group_message_listener(group_listener)
-    try:
+        pump_task = asyncio.create_task(
+            _pump_uplink(
+                tun=tun,
+                masque=masque,
+                local_agent_ip=args.local_agent_ip,
+                peer_agent_ip=args.peer_agent_ip,
+                mtu=args.tun_mtu,
+                logger=logger,
+                role=args.role,
+            ),
+            name=f"masque-direct-uplink-{args.role.lower()}",
+        )
+        route_backend = Pyroute2RouteBackend(tun.name, args.local_agent_ip)
+        await route_backend.add(_host_cidr(args.peer_agent_ip))
+        route_installed = True
+        _emit(
+            logger,
+            args.role,
+            "PEER_ROUTE_READY",
+            peer_cidr=_host_cidr(args.peer_agent_ip),
+            tun_name=tun.name,
+        )
+
+        message_server = MessageServer(
+            role=args.role,
+            local_agent_ip=args.local_agent_ip,
+            peer_agent_ip=args.peer_agent_ip,
+            port=args.message_port,
+            logger=logger,
+            received_event=received_event,
+        )
+        await message_server.start()
+
         if args.role == "A":
-            await run_role_a(active_sdk, args, logger)
+            if args.send_delay:
+                await asyncio.sleep(args.send_delay)
+            await _post_message(args, logger, transport=http_transport)
+            _emit(logger, args.role, "TEST_PASSED", proof="MESSAGE_DELIVERED")
         else:
-            await run_role_b(active_sdk, args, logger, received_event)
+            _emit(
+                logger,
+                args.role,
+                "WAITING_FOR_MESSAGE",
+                url=(
+                    f"http://{_http_host(args.local_agent_ip)}:"
+                    f"{args.message_port}/message"
+                ),
+                receive_timeout_seconds=args.receive_timeout,
+            )
+            try:
+                if args.receive_timeout == 0:
+                    await received_event.wait()
+                else:
+                    await asyncio.wait_for(received_event.wait(), args.receive_timeout)
+            except TimeoutError as exc:
+                raise TimeoutError("B timed out waiting for POST /message") from exc
+            _emit(logger, args.role, "TEST_PASSED", proof="MESSAGE_RECEIVED")
+            if args.post_receive_linger:
+                await asyncio.sleep(args.post_receive_linger)
     finally:
         try:
-            unregister_group()
-            unregister_network()
-            await active_sdk.close()
+            if message_server is not None:
+                try:
+                    await message_server.close()
+                except Exception as exc:
+                    _emit(
+                        logger,
+                        args.role,
+                        "CLEANUP_ERROR",
+                        resource="message_server",
+                        error=str(exc),
+                    )
+            if route_backend is not None and route_installed:
+                try:
+                    await route_backend.remove(_host_cidr(args.peer_agent_ip))
+                except Exception as exc:
+                    _emit(
+                        logger,
+                        args.role,
+                        "CLEANUP_ERROR",
+                        resource="peer_route",
+                        error=str(exc),
+                    )
+            if pump_task is not None:
+                pump_task.cancel()
+                await asyncio.gather(pump_task, return_exceptions=True)
+            if masque is not None:
+                try:
+                    await masque.close()
+                except Exception as exc:
+                    _emit(
+                        logger,
+                        args.role,
+                        "CLEANUP_ERROR",
+                        resource="masque",
+                        error=str(exc),
+                    )
+            if tun is not None:
+                try:
+                    await tun.close()
+                except Exception as exc:
+                    _emit(
+                        logger,
+                        args.role,
+                        "CLEANUP_ERROR",
+                        resource="tun",
+                        error=str(exc),
+                    )
             _emit(logger, args.role, "INSTANCE_CLOSED")
         finally:
             if previous_state_home is None:
@@ -387,35 +490,26 @@ async def run_instance(
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(
         description=(
-            "Run one side of a real two-instance Agent SDK MASQUE/A2A test. "
-            "Start role B first, copy its agent_id, then start role A."
+            "Direct MASQUE path test without Agent ID or group APIs. Start B "
+            "first; A POSTs JSON to http://<B Agent IP>:4001/message."
         )
     )
     value.add_argument("--role", required=True, type=str.upper, choices=("A", "B"))
-    value.add_argument("--runtime-ip", required=True)
-    value.add_argument("--runtime-port", required=True, type=int)
     value.add_argument("--local-vlan-ip", required=True)
+    value.add_argument("--local-agent-ip", required=True)
+    value.add_argument("--peer-agent-ip", required=True)
     value.add_argument("--masque-url", required=True)
     value.add_argument("--masque-token")
-    value.add_argument("--tcp-port", type=int)
-    value.add_argument("--udp-port", type=int)
+    value.add_argument("--message-port", type=int, default=4001)
     value.add_argument("--tun-name")
     value.add_argument("--tun-mtu", type=int, default=1280)
-    value.add_argument("--expected-agent-ip")
-    value.add_argument("--agent-name")
-    value.add_argument("--owner")
-    value.add_argument("--region", default="CN")
-    value.add_argument("--target-agent-id")
-    value.add_argument("--group-name", default="masque-two-instance-test")
-    value.add_argument("--task-id", default="masque-two-instance-test")
-    value.add_argument("--message-type", default="text")
     value.add_argument(
         "--message",
         type=_json_object,
-        default={"type": "text", "content": "hello from Agent A through MASQUE"},
+        default={"type": "text", "content": "hello B from A through MASQUE"},
     )
-    value.add_argument("--group-timeout", type=float, default=60.0)
     value.add_argument("--message-timeout", type=float, default=10.0)
+    value.add_argument("--send-delay", type=float, default=1.0)
     value.add_argument(
         "--receive-timeout",
         type=float,
@@ -426,25 +520,18 @@ def parser() -> argparse.ArgumentParser:
         "--post-receive-linger",
         type=float,
         default=2.0,
-        help="seconds role B keeps listeners alive after receipt so status=OK is flushed",
+        help="seconds B keeps /message alive after receipt so status=OK is flushed",
     )
     value.add_argument(
         "--peer-netns-id",
         type=int,
         help=(
-            "network namespace ID printed by the peer; the script rejects an "
-            "equal value because that cannot prove the MASQUE path"
+            "network namespace ID printed by the peer; equal IDs are rejected "
+            "because they cannot prove the MASQUE path"
         ),
     )
     value.add_argument("--state-dir")
-    value.add_argument("--app-log-file")
-    value.add_argument("--sdk-log-file")
-    value.add_argument(
-        "--log-level",
-        choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
-        default="INFO",
-    )
-    value.add_argument("--deregister-on-exit", action="store_true")
+    value.add_argument("--log-file")
     return value
 
 
@@ -455,5 +542,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
     except Exception as error:
-        print(f"MASQUE TWO-INSTANCE TEST FAILED: {error}", file=sys.stderr)
+        print(f"MASQUE DIRECT TEST FAILED: {error}", file=sys.stderr)
         raise SystemExit(1) from error
