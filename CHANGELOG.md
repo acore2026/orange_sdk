@@ -2,6 +2,29 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-24 — 用户友好版补齐 MASQUE 物理视图与 Proof 声明
+
+### 修改原因
+
+- 用户友好版虽然已经描述 CONNECT-IP 数据泵，但原物理视图只用一张简图概括端到端路径，未清楚区分端侧配置、服务器 Proxy/UE 适配配置和必须经过的 5GC 用户面路径。
+- 原文只有 proof 双摘要公式摘要，缺少线上声明字段、proofOptions 与业务文档的精确边界、RFC 7797 分离 JWS 编码、可信公钥选择和当前防重放能力边界，无法直接支持跨端联调。
+- 原物理图同时表达部署和报文方向，节点与连线容易拥挤；需要按架构图的层级和单一阅读方向重新组织。
+
+### 修改方式
+
+- 将本地《SDK设计文档-用户友好版》升级到 V5.1；原始《SDK设计文档》保持不变。
+- 物理视图拆为“部署拓扑”和“A 经 5GC 用户面发送到 B”两张 Mermaid 图：明确设备 A/B 的 Agent TUN 与物理 IP、双 Wi-Fi/交换机、独立 CONNECT-IP 会话、每 UE Adapter、`uesimtun0/1`、UERANSIM gNB、N3/GTP-U 和 5GC UPF。
+- 明确内层包在端侧已经使用 Agent IP，服务器不做隐式 SNAT/DNAT；A 的包必须从 `uesimtun0` 进入 UERANSIM/5GC，再从 `uesimtun1` 出来并由会话 B 回传，禁止宿主本地路由短路。
+- 增加 SDK 内部自动配置与 SDK 外部部署配置责任表，说明 `masque_server_url` 已包含 QUIC 服务端口，`local_udp_port` 是 Agent 业务端口，并明确服务端无需安装端侧 SDK。
+- 增加完整 proof 章节：保留 `verification_method/proof_purpose` 字段名，声明当前为 ACN JsonWebSignature2020 兼容 Profile；说明 proof 五个字段、场景用途、排序紧凑 JSON、`proofHash || documentHash`、ES256 原始 `r || s`、可信公钥来源、旧 DER 兼容分支及基础验签不包含时间窗/重放缓存。
+- 同步纠正文档中已超出当前实现的防重放表述：群组配置只拒绝不比已提交快照更新的时间戳，A2A 当前未维护 `message_id` 去重缓存。
+
+### 验证内容
+
+- 用户友好版全部 11 个 Mermaid 图通过 Mermaid CLI 语法解析并生成 SVG；新增两张物理图另行生成 PNG 完成布局检查。
+- 文档中的 4 个 JSON 代码块全部通过标准 JSON 解析；`git diff --check` 通过。
+- 《SDK设计文档-用户友好版》继续命中 `.gitignore`，不会进入远端；原始《SDK设计文档》SHA-256 仍为 `d2509f323338d0cdb948ceff36e32c3ae71d59c646916b687168b4c2e862947b`。
+
 ## 2026-08-21 — 新增 Proof 生成与校验独立说明
 
 ### 修改原因
