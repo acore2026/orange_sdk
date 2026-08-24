@@ -2,6 +2,26 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-24 — 纠正 MASQUE 物理视图的双 AgentRuntime 端口拓扑
+
+### 修改原因
+
+- 旧物理视图在 Wi-Fi/交换机与 AgentRuntime 之间绘制了一个共享 `MASQUE Proxy` 节点，错误暗示设备 A、B 先汇聚到同一个代理会话，再由代理选择 AgentRuntime。
+- 实际组网是设备 A、B 分别连接服务器上 AgentRuntime A、B 的两个独立 MASQUE/QUIC 端口；两个会话各自绑定对应 UE 路由域和 `uesimtun0/1`。
+
+### 修改方式
+
+- 本地《SDK设计文档-用户友好版》升级到 V5.3.2；部署拓扑删除共享 Proxy 方框，从交换机画出两条 CONNECT-IP 分叉线，分别直连带独立背景的 AgentRuntime A/端口 A 和 AgentRuntime B/端口 B。
+- 同步修正 A→5GC→B 报文图、逻辑视图、初始化时序、配置责任表和场景时序：A 的 Datagram 直达 AgentRuntime A 的 MASQUE 端口 A，经 `uesimtun0`、UERANSIM/5GC、`uesimtun1` 后，由 AgentRuntime B 的端口 B 回传给 B。
+- 独立《SDK MASQUE CONNECT-IP 架构图》删除共享 Proxy 子图，改成交换机后的两条分叉线和两个 AgentRuntime MASQUE 端口，并清理内层路径中的 Proxy 入站/出站节点。
+- 服务器实现责任边界保持不变：AgentRuntime、UERANSIM 和 5GC 均为外部系统，本 SDK 不实现或修改服务器代码；原始《SDK设计文档》保持不变。
+
+### 验证内容
+
+- 用户友好版全部 10 个 Mermaid 图均通过 Mermaid CLI 11.15.0 语法渲染；物理部署图另行生成 PNG 并确认两条分叉线、两个独立 UE 路由域及端口 A/B 无重叠或截断。
+- 独立 HTML 架构图完成 Google Chrome 无头浏览器截图检查，确认共享 Proxy 节点已移除，设备 A/B 分别进入 AgentRuntime A/B 的 MASQUE 端口。
+- `git diff --check` 通过；原始《SDK设计文档》SHA-256 仍为 `d2509f323338d0cdb948ceff36e32c3ae71d59c646916b687168b4c2e862947b`。
+
 ## 2026-08-24 — 纠正 H-COMPUTE 签名契约，保留 timestamp 和 proof
 
 ### 修改原因
