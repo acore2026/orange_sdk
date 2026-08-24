@@ -56,6 +56,8 @@ var (
 // On IPv6, the minimum MTU of a link is 1280 bytes.
 const minMTU = 1280
 
+var contextIDZero = quicvarint.Append([]byte{}, 0)
+
 // Conn is a connection that proxies IP packets over HTTP/3.
 type Conn struct {
 	str    http3Stream

@@ -4,7 +4,6 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from importlib.resources import files
 from pathlib import Path
 
 from cryptography import x509
@@ -13,13 +12,6 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from .errors import AgentSdkError, ErrorCode
-
-
-EMBEDDED_MASQUE_SERVER_NAME = "masque.agent.internal"
-
-
-def embedded_masque_root_ca_pem() -> bytes:
-    return files("agent_sdk").joinpath("certs/masque-root-ca.pem").read_bytes()
 
 
 @dataclass(frozen=True, slots=True)

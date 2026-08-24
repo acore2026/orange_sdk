@@ -19,10 +19,7 @@ from aioquic.quic.connection import QuicConnection
 from aioquic.quic.events import ConnectionTerminated, QuicEvent
 
 from .errors import AgentSdkError, ErrorCode
-from .identity import (
-    EMBEDDED_MASQUE_SERVER_NAME,
-    ClientTlsIdentityStore,
-)
+from .identity import ClientTlsIdentityStore
 from .logging_utils import log_event
 
 
@@ -220,7 +217,7 @@ class AioquicConnectIpTransport:
         configuration = QuicConfiguration(
             is_client=True,
             alpn_protocols=H3_ALPN,
-            server_name=self._server_name or EMBEDDED_MASQUE_SERVER_NAME,
+            server_name=self._server_name or host,
             max_datagram_frame_size=65536,
             verify_mode=ssl.CERT_NONE,
         )
@@ -239,7 +236,7 @@ class AioquicConnectIpTransport:
             logging.INFO,
             "masque_tls_identity_ready",
             client_public_key_sha256=identity.public_key_sha256,
-            server_name=self._server_name or EMBEDDED_MASQUE_SERVER_NAME,
+            server_name=self._server_name or host,
             server_certificate_verification="disabled",
         )
         try:

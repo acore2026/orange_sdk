@@ -9,7 +9,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from agent_sdk.errors import AgentSdkError
-from agent_sdk.identity import ClientTlsIdentityStore, embedded_masque_root_ca_pem
+from agent_sdk.identity import ClientTlsIdentityStore
 from agent_sdk.sdk import AgentSdk
 
 
@@ -42,11 +42,6 @@ def test_partial_client_tls_identity_is_rejected(tmp_path):
     (directory / "client-key.pem").write_text("broken", encoding="utf-8")
     with pytest.raises(AgentSdkError, match="incomplete"):
         ClientTlsIdentityStore(directory).ensure()
-
-
-def test_embedded_masque_root_is_a_ca_certificate():
-    certificate = x509.load_pem_x509_certificate(embedded_masque_root_ca_pem())
-    assert certificate.extensions.get_extension_for_class(x509.BasicConstraints).value.ca
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission semantics required")

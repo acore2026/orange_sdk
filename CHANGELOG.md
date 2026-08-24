@@ -2,6 +2,32 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-24 — SDK 移除服务器实现并将物理视图适配层改为 AgentRuntime
+
+### 修改原因
+
+- MASQUE Proxy、服务器 AgentRuntime、UERANSIM 和 5GC 已明确由外部系统负责，端侧 SDK 不应继续交付服务器程序、配置模板、证书或服务器专用测试。
+- 旧 Wheel 仍包含 `MasqueProxyServer`、服务器 CLI 和 Linux UE TUN 适配代码，与“SDK 只实现端侧 Client”的责任边界冲突。
+- 物理视图使用 `UE Adapter A/B` 描述服务器路径，与实际由 AgentRuntime 对接 `uesimtun0/1` 的组网表达不一致。
+
+### 修改方式
+
+- Python Wheel 升级到 `0.13.0`；删除服务器 `proxy.py/cli.py`、服务器控制台命令、配置模板、服务器示例、三组服务端专用测试和服务端证书部署材料，只保留 `masque.py` CONNECT-IP Client。
+- 删除 Python 和 Android 中未使用的预置 MASQUE Root CA；两端 Client 的 TLS SNI 改为直接使用 `masque_server_url` 的主机名，不再绑定历史服务端名称。Android vendored CONNECT-IP 依赖裁剪为 Client 子集，删除其中的 Proxy/请求处理源码和依赖它的本地服务端测试，再重新编译 ARM64 `libmasque_core.so`。
+- 根 README、Python/Android 指南明确仓库只交付端侧 SDK；客户只配置 AgentRuntime 地址、MASQUE URL 和可选鉴权值，不安装或配置任何服务器程序。
+- 本地《SDK设计文档-用户友好版》升级到 V5.2：删除服务器配置、转发伪代码、服务器开发树和服务器进程视图；物理视图及 A→5GC→B 路径中的 `Adapter A/B` 改为 `AgentRuntime A/B`。
+- 独立《SDK MASQUE CONNECT-IP 架构图》同步显示 `Proxy → AgentRuntime A/B → uesimtun0/1 → UERANSIM/5GC`，并把服务器标为外部系统而非 SDK 交付物。
+- 工作区内被忽略的旧服务端私钥移动到系统回收目录 `/root/.local/share/Trash/files/orange-sdk-masque-server-key-20260824.pem`，未永久删除。
+
+### 验证内容
+
+- Python `compileall` 和全量测试通过（`64 passed`）；Android Native Go 测试通过，Android JVM 单元测试 `27 tests / 0 skipped / 0 failures / 0 errors`，Release AAR 构建成功。
+- `agent_connect_sdk-0.13.0-py3-none-any.whl` 通过 `twine check`；全新虚拟环境安装版本为 `0.13.0`，`agent-sdk-self-check` 输出 `FULL FLOW DEMO PASSED`，`pip check` 无依赖问题。
+- Wheel 内容检查确认不包含 `proxy.py`、`cli.py`、服务端控制台命令或 MASQUE Root CA；Wheel SHA-256 为 `5d180e9ef51a51597ce214546e812362af37fa2307d56a158629f7bc603e76ee`。
+- Android ARM64 Native 库和 Release AAR SHA-256 分别为 `1283a9c8f0376cc7069f381fcd699f8753f9b62949bd5549cfe34e0c71fb2ea2`、`229a0587bd7eacbdb1e5f3e5404218534f9247a78db7ad6789d871327f3bf5c5`；Native 库不再包含历史服务端名称。
+- 用户友好版 10 个 Mermaid 图全部成功渲染，4 个 JSON 示例通过标准解析；独立 HTML 架构图完成浏览器截图检查，未发现重叠或截断。
+- `git diff --check` 通过；原始《SDK设计文档》SHA-256 仍为 `d2509f323338d0cdb948ceff36e32c3ae71d59c646916b687168b4c2e862947b`。
+
 ## 2026-08-24 — 用户友好版补齐 MASQUE 物理视图与 Proof 声明
 
 ### 修改原因

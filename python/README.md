@@ -8,18 +8,19 @@ SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.12.0-py3-none-any.whl`：SDK wheel。
+- `agent_connect_sdk-0.13.0-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
-- `examples/masque-proxy.example.json`：服务器 MASQUE Proxy 配置模板。
-- `../deployment/masque-tls/`：现有 MASQUE Server 可直接加载的 POC 服务端证书与私钥；私钥不进入 wheel。
+
+本仓库不交付 MASQUE Server、AgentRuntime、UERANSIM 适配器、服务器证书或服务器
+启动命令。服务器侧如何解封装、选择 UE 和接入 5GC 由外部系统负责。
 
 运行环境：
 
 - Linux x86_64 或 aarch64，Python 3.10 及以上。
 - 端侧具备 `/dev/net/tun`，进程具有 root 或 `CAP_NET_ADMIN` 权限。
-- 服务器侧已启动 UERANSIM，能够看到对应的 `uesimtun` 接口。
-- 端侧可以通过 UDP 访问 MASQUE Proxy，默认示例端口为 `4433`。
+- 外部系统已经提供可用的 MASQUE CONNECT-IP 地址和必要的鉴权信息。
+- 端侧可以通过 UDP 访问该地址，示例端口为 `4433`。
 - 端侧可以通过 HTTP 访问 AgentRuntime。
 
 Android/RayNeoOS 使用 AAR 和 `VpnService`，不使用本 wheel，参见仓库 `android/README.md`。
@@ -41,7 +42,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.12.0-py3-none-any.whl
+dist/agent_connect_sdk-0.13.0-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -53,7 +54,7 @@ dist/agent_connect_sdk-0.12.0-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.12.0-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.13.0-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -61,21 +62,20 @@ python -m pip install ./agent_connect_sdk-0.12.0-py3-none-any.whl
 ```bash
 python -c 'import agent_sdk; print(agent_sdk.__version__)'
 python -m pip show agent-connect-sdk
-agent-masque-proxy --help
 ```
 
 `pip` 会自动安装 `aiohttp`、`aioquic`、`cryptography`、`httpx` 和 `pyroute2` 等依赖。如果客户环境不能访问公网，应同时交付依赖 wheel，并使用：
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.12.0-py3-none-any.whl
+  ./agent_connect_sdk-0.13.0-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.12.0-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.13.0-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -123,97 +123,26 @@ A 向 B 发送消息时的内层报文是 `8.8.8.7 -> 8.8.8.8`，完整路径为
 
 不需要在端侧或应用层做 SNAT/DNAT。端侧 Agent TUN 使用自己的 UE IP，因此业务包进入隧道时源地址已经是 `8.8.8.7` 或 `8.8.8.8`。
 
-### 3.1 SDK 外：服务器准备 UERANSIM
+### 3.1 外部服务边界
 
-先启动核心网和两个 UERANSIM UE，确认接口和地址：
+端侧客户不安装、配置或启动任何服务器程序。本 SDK 只要求部署方提供以下连接信息：
 
-```bash
-ip -br address show uesimtun0
-ip -br address show uesimtun1
-```
-
-预期分别包含设备 A、B 的 UE IP。不要在服务器上为两个 `uesimtun` 创建 Linux bridge、跨接口直连路由或 NAT 规则，否则报文可能绕过核心网 U 面。
-
-### 3.2 SDK 外：配置 MASQUE TLS 证书
-
-MASQUE 服务端仍需配置证书和私钥才能建立 TLS 1.3/HTTP/3 连接。服务器可
-继续使用仓库 `deployment/masque-tls/` 中的测试证书和私钥；不需要修改
-服务器代码，只需填入它已有的证书路径配置：
-
-```yaml
-connectIP:
-  tlsCertFile: '/etc/agent-sdk/masque-server-cert.pem'
-  tlsKeyFile: '/etc/agent-sdk/masque-server-key.pem'
-```
-
-当前封闭内测构建不校验 MASQUE 服务端证书链、有效期或名称，因此也可以
-对接其他自签名证书；TLS 流量仍会加密，端侧仍会出示自动生成的客户端证书。
-该配置不适用于生产环境，连接时日志会记录
-`masque_server_certificate_verification_disabled`。服务端私钥只部署在
-服务器，不包含在客户 Wheel 或 Android AAR。
-
-服务器防火墙需要放行 QUIC 使用的 UDP 端口：
-
-```bash
-sudo ufw allow 4433/udp
-```
-
-如果不使用 `ufw`，请在实际防火墙中配置等价规则。
-
-### 3.3 SDK 外：配置 MASQUE Proxy
-
-复制 `examples/masque-proxy.example.json`，每台设备使用不同的不可预测 token：
-
-```json
-{
-  "listen_host": "192.168.3.10",
-  "listen_port": 4433,
-  "certificate_path": "/etc/agent-sdk/masque-cert.pem",
-  "private_key_path": "/etc/agent-sdk/masque-key.pem",
-  "log_file_path": "/var/log/agent-sdk/masque-proxy.log",
-  "log_level": "INFO",
-  "log_max_bytes": 10485760,
-  "log_backup_count": 5,
-  "clients": [
-    {
-      "token": "replace-with-secret-for-device-a",
-      "agent_ip": "8.8.8.7",
-      "ue_interface": "uesimtun0",
-      "allowed_peer_cidrs": ["8.8.8.8/32"],
-      "mtu": 1280
-    },
-    {
-      "token": "replace-with-secret-for-device-b",
-      "agent_ip": "8.8.8.8",
-      "ue_interface": "uesimtun1",
-      "allowed_peer_cidrs": ["8.8.8.7/32"],
-      "mtu": 1280
-    }
-  ]
-}
-```
-
-字段含义：
-
-| 字段 | 含义 |
+| 外部输入 | 端侧用途 |
 |---|---|
-| `token` | CONNECT-IP 会话凭据，必须和对应端侧配置一致 |
-| `agent_ip` | 该会话允许使用的唯一内层源/目的 Agent IP |
-| `ue_interface` | 该设备绑定的 UERANSIM TUN；A 必须进入 `uesimtun0`，B 必须进入 `uesimtun1` |
-| `allowed_peer_cidrs` | 允许通信的对端 Agent 地址范围 |
-| `mtu` | 内层 IP 包最大长度，必须和端侧一致 |
+| `agent_runtime_ip + agent_runtime_port` | 查询本 UE 信息并建立控制面 WebSocket |
+| `masque_server_url` | 建立 HTTP/3 CONNECT-IP 数据隧道；URL 已包含服务端 UDP 端口 |
+| `masque_authorization` | 外部服务要求时携带的会话鉴权值 |
 
-Proxy 日志写入 `log_file_path`，默认每个文件最大 10 MiB、保留 5 个历史文件。
+MASQUE Proxy、AgentRuntime、UERANSIM、`uesimtun0/1` 和 5GC UPF 都是外部系统。
+它们如何部署、如何将 CONNECT-IP 会话映射到 UE、如何配置服务器证书和用户面规则，
+不属于 Wheel、AAR 或本仓库的实现范围。SDK 不提供服务器程序、配置模板、证书、
+启动命令或 TUN 接入模块。
 
-服务器安装同一个 wheel 后启动：
+端到端联调只约定可观察结果：设备 A 的内层包进入外部系统时为
+`8.8.8.7 → 8.8.8.8`，外部系统应使它经 UE A/5GC/UE B 后返回设备 B；SDK 不对
+服务器内部进程、命名空间或转发实现作假设。
 
-```bash
-sudo -E agent-masque-proxy --config /etc/agent-sdk/masque-proxy.json
-```
-
-该进程需要访问 `uesimtun*` 和 raw socket，通常使用 root 启动；生产环境可按安全策略授予最小 capability。Proxy 按 token 绑定唯一 `agent_ip + uesimtun`，不会根据用户输入临时选择接口。
-
-### 3.4 SDK 内：端侧 `init` 配置
+### 3.2 SDK 内：端侧 `init` 配置
 
 设备 A 的初始化示例：
 
@@ -246,8 +175,8 @@ SDK 初始化时调用
 本机信息。SDK 要求 `nas.registered=true`、`nas.state=session_ready`、
 `nas.security_context=true`，然后选择唯一活动的默认 IPv4 PDU Session，
 将其 `ipv4` 作为 Agent TUN IP 并按点到点 TUN 配置为 `/32`。例如
-`ipv4="8.8.8.7"` 对应 `result.agent_tun_cidr="8.8.8.7/32"`。该 IP 必须与
-MASQUE Proxy 的 `agent_ip + uesimtun` 映射一致。
+`ipv4="8.8.8.7"` 对应 `result.agent_tun_cidr="8.8.8.7/32"`。外部系统必须为
+该地址提供对应的 CONNECT-IP/5GC 路径，但端侧用户不配置这条服务器映射。
 
 不要传对端 IP、端口或路由。SDK 在收到合法的 `acf_group_config` 后自动获得并维护这些信息。
 
@@ -293,7 +222,7 @@ Upgrade: websocket
 只有 WebSocket 握手成功，`init()` 才返回。该长连接负责全部核心网主动下行；
 端侧不再开放 `/agent/group-invitation` 或 `/agent/group-moq-info` 回调接口。
 
-### 3.5 本地日志
+### 3.3 本地日志
 
 SDK 使用 UTF-8 文本日志，每行包含时间、级别、logger 名称和一个 JSON 事件。默认记录：
 
@@ -301,8 +230,7 @@ SDK 使用 UTF-8 文本日志，每行包含时间、级别、logger 名称和�
 - SDK 发往 AgentRuntime、对端 Agent 的 HTTP 请求及其响应。
 - AgentRuntime WebSocket 的连接、群组通知、邀请和关联响应，以及对端
   `/A2A/message` 的 HTTP 入站请求及响应。
-- 客户端和服务器端 HTTP/3 CONNECT-IP 请求、响应状态和协商结果。
-- MASQUE Proxy 的启动和关闭。
+- 端侧 Client 的 HTTP/3 CONNECT-IP 请求、响应状态和协商结果。
 
 查看实时日志：
 
@@ -319,7 +247,7 @@ grep -E '"event":"(http_error|function_error)"|"status_code":[45][0-9][0-9]' \
 
 `authorization`、token、密码、签名、`proof/jws`、公私钥、DID key、VC 和 credentials 会写成 `[REDACTED]`。业务消息结构和非敏感字段保留，便于定位问题。日志目录必须预先允许 SDK 进程写入；无法创建日志文件时，`init()` 返回 `LOG_SETUP_FAILED`。
 
-### 3.6 SDK 内建的消息签名和验签
+### 3.4 SDK 内建的消息签名和验签
 
 用户不配置密钥，也不实现安全回调。第一次 `init()` 会生成一套独立于
 MASQUE TLS 的 P-256 消息签名密钥：
@@ -396,7 +324,7 @@ profile = await sdk.apply_identity(
     owner="customer-a",
     name="Agent A",
     description="RayNeo edge agent",
-    metadata={"region": "CN", "os": "Linux", "version": "0.12.0"},
+    metadata={"region": "CN", "os": "Linux", "version": "0.13.0"},
 )
 
 ability = await sdk.get_network_ability(profile.agent_id)
@@ -618,11 +546,11 @@ AgentRuntime 下发 `acf_group_config`，不会让用户填写对端 IP 或端�
 | `TUN_CREATE_FAILED` | `/dev/net/tun` 是否存在；进程是否具备 `CAP_NET_ADMIN` |
 | `LOG_SETUP_FAILED` | 日志目录是否存在或可创建；SDK 进程是否具有写权限 |
 | `RUNTIME_UNREACHABLE` | AgentRuntime HTTP IP/端口和物理网络连通性 |
-| `MASQUE_CONNECT_FAILED` | UDP 4433、防火墙、服务端 TLS 配置、客户端密钥目录权限和 token |
-| `CONNECT_IP_NEGOTIATION_FAILED` | Proxy 是否支持 HTTP/3 Datagram 和 CONNECT-IP |
+| `MASQUE_CONNECT_FAILED` | `masque_server_url` 的 UDP 可达性、客户端密钥目录权限和外部服务鉴权值；服务端问题交由外部系统维护方处理 |
+| `CONNECT_IP_NEGOTIATION_FAILED` | 外部服务是否支持 HTTP/3 Datagram 和 CONNECT-IP |
 | `GROUP_NOT_ACTIVE` | 是否已收到并成功验签 `acf_group_config` |
 | `TARGET_NOT_IN_GROUP` | `target_agent_id` 是否存在于该群组最新快照 |
-| 消息未经过 5GC | token 到 `uesimtun` 映射是否正确；服务器是否存在 bridge/NAT/短路路由 |
+| 消息未经过 5GC | 将端侧日志和抓包交给外部 AgentRuntime/MASQUE/5GC 维护方定位；SDK 不包含服务器转发实现 |
 | 日志出现证书校验关闭警告 | 当前为封闭内测安全配置；不得将该构建用于生产网络 |
 
 开发者运行测试：

@@ -25,6 +25,11 @@ and ROUTE_ADVERTISEMENT capsule handling, bidirectional packet pumps, and TUN fd
 replacement. It binds the QUIC UDP socket to `localVlanIp` and calls
 `AgentVpnService.protectQuicSocket(fd)` before connecting, preventing VPN recursion.
 
+This repository ships only the endpoint SDK and CONNECT-IP client. It does not
+ship a MASQUE server, AgentRuntime server, UERANSIM adapter, server certificate,
+or server startup/configuration command. The deployment team supplies the
+external MASQUE URL and optional authorization value.
+
 This internal-test build keeps TLS 1.3 encryption but does not verify the MASQUE
 server certificate chain, validity, or name. The native core logs an explicit
 warning on every connection. On first connection it creates an Ed25519 client
@@ -129,7 +134,8 @@ The application does not provide an Agent TUN IP. `GET /v1/ue/info` must report
 `nas.registered=true`, `nas.state=session_ready`, a ready security context, and
 one active default IPv4 PDU Session. The SDK uses that session's `ipv4` locally
 as `/32`; the address must match the device's `agent_ip + uesimtun` mapping on
-the MASQUE Proxy. The effective CIDR is available as
+the external AgentRuntime/MASQUE/5GC system. That mapping is not configured by
+the Android application or this SDK. The effective CIDR is available as
 `SdkInitResult.agentTunCidr`.
 
 Core-network downlink frames use `kind + request_id + message_type +

@@ -2,17 +2,15 @@
 
 本仓库包含 Linux/Python SDK 和 Android/RayNeoOS SDK。
 
-当前 Linux/Python 版本可以构建为 `agent-connect-sdk` wheel。客户安装 wheel 后即可导入 `agent_sdk`，端侧通过 TUN + MASQUE CONNECT-IP 接入 UERANSIM/5GC。发送消息时应用提供 `group_id`、`target_agent_id`、消息类型、任务 ID 和消息体；IP、端口和路由始终由 SDK 缓存解析。
+当前 Linux/Python 版本可以构建为 `agent-connect-sdk` wheel。客户安装 wheel 后即可导入 `agent_sdk`，端侧通过 TUN + MASQUE CONNECT-IP 接入外部 AgentRuntime/MASQUE 服务。发送消息时应用提供 `group_id`、`target_agent_id`、消息类型、任务 ID 和消息体；IP、端口和路由始终由 SDK 缓存解析。仓库只交付端侧 Client，不包含 MASQUE Server、UERANSIM 适配器或服务器启动命令。
 
-完整的 wheel 构建、客户安装、MASQUE 服务器/端侧配置、全流程调用示例、函数清单和故障排查见：
+完整的 wheel 构建、客户安装、端侧 MASQUE 参数、全流程调用示例、函数清单和故障排查见：
 
 - [Linux/Python 客户使用指南](python/README.md)
 - [离线全流程示例](python/examples/full_flow_demo.py)
 - [真实 Linux 全接口调用示例](python/examples/linux_agent.py)
-- [MASQUE Proxy 配置模板](python/examples/masque-proxy.example.json)
 - [Android/RayNeoOS 使用说明](android/README.md)
 - [Proof 生成与校验说明](Agent-SDK-Proof生成与校验说明.md)
-- [MASQUE 服务端证书部署材料](deployment/masque-tls/README.md)
 
 当前封闭内测构建保留 MASQUE TLS 1.3 加密，但关闭服务端证书链和名称校验；
 连接时会记录明确的安全警告。SDK 首次启动仍会在端侧私有目录生成并复用

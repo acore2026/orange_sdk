@@ -22,8 +22,6 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 )
 
-const EmbeddedServerName = "masque.agent.internal"
-
 type Configuration struct {
 	ServerURL         string
 	Authorization     string
@@ -88,7 +86,7 @@ func Start(tunFD, udpFD int, cfg Configuration) (*Tunnel, error) {
 	log.Printf("WARNING: MASQUE server certificate verification is disabled (internal-test-only)")
 	tlsConfig := &tls.Config{
 		MinVersion:         tls.VersionTLS13,
-		ServerName:         EmbeddedServerName,
+		ServerName:         parsedURL.Hostname(),
 		InsecureSkipVerify: true, // Internal test profile: accept any server certificate.
 		Certificates:       []tls.Certificate{identity.Certificate},
 		NextProtos:         []string{http3.NextProtoH3},

@@ -7,9 +7,22 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/dunglas/httpsfv"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/yosida95/uritemplate/v3"
 )
+
+const requestProtocol = "connect-ip"
+
+var capsuleProtocolHeaderValue string
+
+func init() {
+	value, err := httpsfv.Marshal(httpsfv.NewItem(true))
+	if err != nil {
+		panic(fmt.Sprintf("failed to marshal capsule protocol header value: %v", err))
+	}
+	capsuleProtocolHeaderValue = value
+}
 
 // Dial dials a proxied connection to a target server.
 func Dial(ctx context.Context, conn *http3.ClientConn, template *uritemplate.Template) (*Conn, *http.Response, error) {
