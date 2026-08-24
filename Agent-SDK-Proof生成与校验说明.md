@@ -2,8 +2,8 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 文档版本 | V1.0 |
-| 编制日期 | 2026-08-21 |
+| 文档版本 | V1.1 |
+| 编制日期 | 2026-08-24 |
 | 适用版本 | Python Wheel 0.14.0、Android/RayNeoOS SDK |
 | 适用对象 | SDK 开发者、AgentRuntime 开发者、核心网开发者、联调测试人员 |
 
@@ -11,7 +11,7 @@
 
 本文说明 Agent SDK 当前使用的消息级 `proof` 生成和校验方法，覆盖以下三类消息：
 
-1. SDK 发往 AgentRuntime 的非身份申请控制面写请求；
+1. SDK 发往 AgentRuntime 的非身份申请控制面写请求以及 H-COMPUTE 算力卸载请求；
 2. 核心网通过 AgentRuntime 下发的 `acf_group_config` 群组配置；
 3. Agent 之间通过 `POST /A2A/message` 发送的定向消息。
 
@@ -82,7 +82,7 @@ SDK 生成的 proof 格式如下：
 
 不同消息的待签业务文档如下：
 
-- 非身份申请控制请求：HTTP 请求体去掉 `request_id`，加入 SDK 生成的
+- 非身份申请控制请求和 H-COMPUTE：HTTP 请求体去掉 `request_id`，加入 SDK 生成的
   `timestamp`，并且不包含 `proof`；
 - A2A 消息：包含 `message_id/group_id/type/timestamp/payload/src_agent_id/
   dst_agent_id/task_id`，不包含 `proof`；

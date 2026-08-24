@@ -563,12 +563,12 @@ class AgentSdk internal constructor(
             )
         }
         val path = "/compute/v1/offloading-sessions"
-        val response = runtime!!.request("POST", path, buildJsonObject {
+        val response = runtime!!.request("POST", path, authenticateControl(path, buildJsonObject {
             put("request_id", UUID.randomUUID().toString())
             put("agent_id", agentId)
             put("workload_type", workloadType)
             sandboxId?.let { put("preferred_sandbox_id", it) }
-        })
+        }))
         var session = OffloadingSession(
             response.requireString("session_id"),
             response["sandbox_id"]?.jsonPrimitive?.contentOrNull ?: "",

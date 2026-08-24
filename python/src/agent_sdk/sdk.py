@@ -969,16 +969,18 @@ class AgentSdk:
                 field="timeout_seconds",
             )
         assert self._runtime is not None
-        body: dict[str, Any] = {
+        path = "/compute/v1/offloading-sessions"
+        request: dict[str, Any] = {
             "request_id": str(uuid.uuid4()),
             "agent_id": agent_id,
             "workload_type": workload_type,
         }
         if sandbox_id is not None:
-            body["preferred_sandbox_id"] = sandbox_id
+            request["preferred_sandbox_id"] = sandbox_id
+        body = await self._authenticate_control_request(path, request)
         response = await self._runtime.request(
             "POST",
-            "/compute/v1/offloading-sessions",
+            path,
             body,
         )
         expires_at = response.get("expires_at")

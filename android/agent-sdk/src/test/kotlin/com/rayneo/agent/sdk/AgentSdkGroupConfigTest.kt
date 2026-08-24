@@ -257,7 +257,10 @@ class AgentSdkGroupConfigTest {
         assertEquals("processed-track-1", track.trackId)
         assertEquals("2", media.cameraId)
         assertEquals(
-            setOf("request_id", "agent_id", "workload_type", "preferred_sandbox_id"),
+            setOf(
+                "request_id", "agent_id", "workload_type", "preferred_sandbox_id",
+                "timestamp", "proof",
+            ),
             runtime.lastBody!!.keys,
         )
         assertEquals(
@@ -266,8 +269,15 @@ class AgentSdkGroupConfigTest {
         )
         UUID.fromString(runtime.lastBody!!["request_id"]!!.jsonPrimitive.content)
         assertFalse(runtime.lastBody!!.containsKey("task_type"))
-        assertFalse(runtime.lastBody!!.containsKey("timestamp"))
-        assertFalse(runtime.lastBody!!.containsKey("proof"))
+        assertEquals(
+            "2026-08-21T09:00:00Z",
+            runtime.lastBody!!["timestamp"]!!.jsonPrimitive.content,
+        )
+        assertEquals(
+            "test-proof",
+            runtime.lastBody!!["proof"]!!.jsonObject["jws"]!!
+                .jsonPrimitive.content,
+        )
     }
 
     @Test

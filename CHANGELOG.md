@@ -2,6 +2,26 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-24 — 纠正 H-COMPUTE 签名契约，保留 timestamp 和 proof
+
+### 修改原因
+
+- 上一提交 `fd369ae` 正确将算力卸载业务字段改为 `request_id + agent_id + workload_type`，但错误地将 Android 已有的 `timestamp + proof` 视为应删除字段，并使 Python 也绕过了控制请求签名层。
+- 最终契约明确 H-COMPUTE 虽属于用户面/IP 业务且不进入控制面 NAS，仍必须用端侧设备私钥生成 `timestamp + proof` 进行请求防篡改。
+
+### 修改方式
+
+- Python `create_offloading_session` 和 Android `createOffloadingSession` 恢复调用各自的控制请求认证器；线路请求体固定包含 `request_id`、`agent_id`、`workload_type`、`timestamp`、`proof`，并可选包含 `preferred_sandbox_id`。旧 `task_type` 仍被禁止。
+- H-COMPUTE 复用已有 ACN JsonWebSignature2020 兼容 Profile：`proof_purpose=authentication`，签名业务文档排除 `request_id` 和整个 `proof`，包含 `timestamp`及其他实际出现的算力请求字段。
+- 两端契约测试改为必须出现 `timestamp + proof`，同时继续校验 UUID `request_id`、`workload_type`和旧字段排除。
+- 《Agent SDK HTTP 接口文档》升级到 V1.10.1，用户友好版设计文档升级到 V5.3.1，Proof 说明升级到 V1.1；Git 仓库外的 `/root/acn/ACN消息接口定义.md` 升级到 3.29，三处都明确 H-COMPUTE 必须签名。原始《SDK设计文档》保持不变。
+
+### 验证内容
+
+- Python `compileall` 和全量测试通过（`64 passed`）；Android JVM 单元测试 `27 tests / 0 skipped / 0 failures / 0 errors`，Release AAR 和 example Debug APK 构建成功。
+- `agent_connect_sdk-0.14.0-py3-none-any.whl` 通过 `twine check`；全新虚拟环境安装显示 `0.14.0`，全流程自检输出 `FULL FLOW DEMO PASSED`，`pip check` 无缺失或冲突依赖。
+- Wheel、Release AAR、example Debug APK 的 SHA-256 分别为 `82c974de47843af2e591c10064cfb33d9b6d4ddf3afe2f1d12634c5446b5df69`、`91d25869862d4f03292f65ab74febc916bf46a88d49fbf1c9dce421e0d10d692`、`aef1fb102599e59a6a49c8c6d220f86a207ed1547d3a57b86d60734ec8da84b5`。
+
 ## 2026-08-24 — 算力卸载请求对齐 ACN，其余 ACN 契约对齐 SDK
 
 ### 修改原因

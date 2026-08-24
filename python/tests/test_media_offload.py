@@ -20,14 +20,16 @@ async def test_offloading_session_and_video_use_media_adapter(sdk_fixture):
         "agent_id",
         "workload_type",
         "preferred_sandbox_id",
+        "timestamp",
+        "proof",
     }
     assert body["agent_id"] == "did:example:agent-a"
     assert body["workload_type"] == "video_rendering"
     assert body["preferred_sandbox_id"] == "sandbox-edge-1"
     uuid.UUID(body["request_id"])
     assert "task_type" not in body
-    assert "timestamp" not in body
-    assert "proof" not in body
+    assert body["timestamp"] == "2026-08-19T00:00:00Z"
+    assert body["proof"] == {"jws": "test-proof"}
     upload = await sdk.start_video_upload(
         session.session_id,
         camera_id=2,
