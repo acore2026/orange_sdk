@@ -9,6 +9,7 @@
 - [Linux/Python 客户使用指南](python/README.md)
 - [离线全流程示例](python/examples/full_flow_demo.py)
 - [真实 Linux 全接口调用示例](python/examples/linux_agent.py)
+- [A/B 双实例 MASQUE 消息联调脚本](python/examples/masque_two_instance_test.py)
 - [Android/RayNeoOS 使用说明](android/README.md)
 - [Proof 生成与校验说明](Agent-SDK-Proof生成与校验说明.md)
 

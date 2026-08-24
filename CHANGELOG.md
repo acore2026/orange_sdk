@@ -2,6 +2,30 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-24 — 新增 Ubuntu A/B 双实例 MASQUE 消息联调脚本
+
+### 修改原因
+
+- 现有 `linux_agent.py` 用于演示全部 SDK 北向接口，包含能力、发现和媒体流程，不适合快速验证两个真实端侧实例的 MASQUE 建连及 A→B 消息交付。
+- 在同一个 Linux 网络命名空间启动两个实例时，两个 Agent TUN IP 都属于本机，Linux 可能直接本地交付 A→B 流量；只看到 B 收包不能证明报文经过 MASQUE、UERANSIM 和 5GC。
+- 联调需要清楚给出 B 先启动、A 使用 B 的 Agent ID 建群、SDK 自动解析群组端点、B 打印收包证据的完整操作方式。
+
+### 修改方式
+
+- 新增 `python/examples/masque_two_instance_test.py`，同一脚本通过 `--role A/B` 运行两端：两端分别执行真实 `sdk.init()` 和身份申请；B 自动接受邀请并等待消息；A 创建双成员群组、等待已验签 `acf_group_config` 后调用 `send_message()`。
+- B 收到消息时向控制台和本地滚动日志写入结构化 `A2A_MESSAGE_RECEIVED`，随后写入 `TEST_PASSED`；A 只有收到 B 的 `status=OK` 才记录 `A2A_MESSAGE_DELIVERED`。
+- 脚本分别配置 A/B 的 AgentRuntime 控制端口、MASQUE URL/QUIC 端口、TUN 名称、状态目录和日志文件，并可用 `--expected-agent-ip` 校验 `/v1/ue/info` 返回值。业务消息仍只传 `group_id + target_agent_id`，不向用户暴露对端 IP、端口或路由。
+- 增加网络命名空间 ID 输出及 `--peer-netns-id` 同空间拒绝检查，避免把内核本地短路误判为 MASQUE 联通；Python 客户指南补充 Windows/Ubuntu 两实例启动命令、日志位置和验收标志，根 README 增加脚本入口。
+- 新增脚本测试，覆盖 A/B 独立默认配置、A 目标 ID 必填、A 建群并发送、B 打印和落盘收包证据以及 SDK 关闭。
+
+### 验证内容
+
+- `python3 -m compileall -q src examples tests` 通过。
+- Python 全量测试通过（`69 passed`）。
+- `masque_two_instance_test.py --help` 可正常运行并显示 A/B、Runtime/MASQUE、网络命名空间、消息和日志参数。
+- 当前工作区未连接用户的外部 AgentRuntime/MASQUE/UERANSIM 环境，因此真实 A→5GC→B 结果需按客户指南在两个隔离 Ubuntu 网络环境中执行确认。
+- `git diff --check` 通过；原始《SDK设计文档》保持不变。
+
 ## 2026-08-24 — 将 MASQUE 端口分叉点移入服务器内部
 
 ### 修改原因

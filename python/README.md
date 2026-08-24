@@ -11,6 +11,7 @@ SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_
 - `agent_connect_sdk-0.14.0-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
+- `examples/masque_two_instance_test.py`：在两个隔离的 Ubuntu 实例中验证 A 经 MASQUE/5GC 向 B 发送消息，B 在控制台和本地文件记录收包证据。
 
 本仓库不交付 MASQUE Server、AgentRuntime、UERANSIM 适配器、服务器证书或服务器
 启动命令。服务器侧如何解封装、选择 UE 和接入 5GC 由外部系统负责。
@@ -483,6 +484,110 @@ await sdk.deregister_identity(profile.agent_id, reason="retired")
 普通进程退出不要注销身份；下次启动可从安全存储恢复已验证的 `AgentProfile`，再调用 `set_local_profile_for_restore(profile)`。
 
 ## 5. 可直接运行的真实端侧示例
+
+### 5.1 Windows/Ubuntu 双实例 MASQUE 消息测试
+
+`examples/masque_two_instance_test.py` 只执行这次联调需要的最短真实流程：
+
+1. A、B 分别调用 `sdk.init()`，从各自 AgentRuntime 查询 UE IP并建立各自的
+   CONNECT-IP 会话；初始化返回后打印 `MASQUE_CONNECTED`。
+2. B 申请身份、打印 `agent_id`，常驻等待邀请、群组配置和 A2A 消息。
+3. A 使用 B 打印的 `agent_id` 创建双成员群组，等待已验签
+   `acf_group_config` 自动缓存和安装路由，再调用 `sdk.send_message()`。
+4. B 的 `/A2A/message` listener 收到消息后在控制台和文件中打印
+   `A2A_MESSAGE_RECEIVED`，随后打印 `TEST_PASSED`。
+
+#### 网络隔离前提
+
+A、B 必须位于不同 Linux 网络命名空间，例如两个网络已配置完成且都能访问服务器
+的 WSL Ubuntu 实例，或者两个已配置外部连通性的 `ip netns`。仅在同一个 Ubuntu
+中打开两个终端、创建两个 venv 或启动两个普通进程不构成网络隔离：当
+`8.8.8.7` 和 `8.8.8.8` 同时是同一内核的本地地址时，A 到 B 可能被本机路由表
+直接交付，绕过 MASQUE 和 5GC。
+
+脚本启动时会打印 `/proc/self/ns/net` 的 `netns_id`。记录 B 的值，并通过 A 的
+`--peer-netns-id` 传回；如果 A 与 B 的 ID 相同，脚本会在发送前拒绝测试。两个
+Python 虚拟环境不同不能替代这个检查。
+
+#### 第一步：先启动 B
+
+下面的地址和端口只是示例。`8082` 是 B 对应的 AgentRuntime HTTP/WebSocket
+端口，`4434` 是 B 对应的 AgentRuntime MASQUE/QUIC 端口：
+
+```bash
+cd python
+sudo -E .venv/bin/python examples/masque_two_instance_test.py \
+  --role B \
+  --runtime-ip 192.168.3.10 \
+  --runtime-port 8082 \
+  --local-vlan-ip 192.168.2.10 \
+  --masque-url https://192.168.3.10:4434/.well-known/masque/ip \
+  --expected-agent-ip 8.8.8.8 \
+  --tcp-port 4001 \
+  --udp-port 28443 \
+  --receive-timeout 300
+```
+
+B 成功连接后会输出两条后续需要的信息：
+
+```jsonl
+{"role":"B","event":"INSTANCE_STARTING","netns_id":4026533002}
+{"role":"B","event":"IDENTITY_READY","agent_id":"did:...agent-b..."}
+```
+
+保持 B 进程运行，复制其中的 `netns_id` 和 `agent_id`。
+
+#### 第二步：启动 A 并发送
+
+`8081` 和 `4433` 分别替换为 A 对应的 AgentRuntime 控制端口和 MASQUE 端口：
+
+```bash
+cd python
+sudo -E .venv/bin/python examples/masque_two_instance_test.py \
+  --role A \
+  --runtime-ip 192.168.3.10 \
+  --runtime-port 8081 \
+  --local-vlan-ip 192.168.1.10 \
+  --masque-url https://192.168.3.10:4433/.well-known/masque/ip \
+  --expected-agent-ip 8.8.8.7 \
+  --tcp-port 4001 \
+  --udp-port 28443 \
+  --target-agent-id '替换为B打印的agent_id' \
+  --peer-netns-id 4026533002 \
+  --message '{"type":"text","content":"hello B from A through MASQUE"}'
+```
+
+应用不传 B 的 IP、端口或 URL。A 的 `send_message()` 只用
+`group_id + target_agent_id` 查询已验签群组缓存，并固定请求
+`POST /A2A/message`。B 收到后应在控制台看到：
+
+```jsonl
+{"role":"B","event":"A2A_MESSAGE_RECEIVED","group_id":"g...","sender_agent_id":"did:...agent-a...","payload":{"type":"text","content":"hello B from A through MASQUE"}}
+{"role":"B","event":"TEST_PASSED","proof":"A2A_MESSAGE_RECEIVED"}
+```
+
+默认日志文件如下，各实例也可以通过 `--app-log-file` 和 `--sdk-log-file` 修改：
+
+```text
+logs/masque-pair-a-app.log
+logs/masque-pair-a-sdk.log
+logs/masque-pair-b-app.log
+logs/masque-pair-b-sdk.log
+```
+
+B 侧验证命令：
+
+```bash
+grep -E 'A2A_MESSAGE_RECEIVED|TEST_PASSED' logs/masque-pair-b-app.log
+grep -E 'HTTP/3 CONNECT-IP|/A2A/message' logs/masque-pair-b-sdk.log
+```
+
+脚本为 A/B 自动使用不同的 TUN 名称、密钥状态目录和日志文件。业务 TCP/UDP
+端口默认仍是 `4001/28443`，必须与核心网下发群组配置中的本机成员端口一致；
+AgentRuntime 控制端口和 MASQUE/QUIC 端口通过各实例参数分别传入。若部署启用了
+MASQUE 鉴权，再为各实例增加 `--masque-token`。
+
+### 5.2 全接口真实端侧示例
 
 `examples/linux_agent.py` 是连接真实 AgentRuntime、MASQUE 和对端 Agent 的
 全流程示例，不再只执行 `init` 后常驻。它依次调用初始化、身份申请/恢复、
