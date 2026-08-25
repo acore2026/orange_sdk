@@ -75,6 +75,7 @@ class ConnectIpQuicProtocol(QuicConnectionProtocol):
         self.response: asyncio.Future[int] = asyncio.get_running_loop().create_future()
         self.packets: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=1024)
         self.connect_stream_id: int | None = None
+        self._keep_alive_uid = 0
 
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, ConnectionTerminated):
@@ -173,6 +174,11 @@ class ConnectIpQuicProtocol(QuicConnectionProtocol):
         self.http.send_datagram(self.connect_stream_id, b"\x00" + packet)
         self.transmit()
 
+    def send_keep_alive(self) -> None:
+        self._keep_alive_uid += 1
+        self._quic.send_ping(self._keep_alive_uid)
+        self.transmit()
+
 
 class AioquicConnectIpTransport:
     def __init__(
@@ -184,18 +190,23 @@ class AioquicConnectIpTransport:
         authorization: str | None = None,
         local_address: str | None = None,
         connect_timeout: float = 10.0,
+        keep_alive_interval: float = 15.0,
         logger: logging.Logger | None = None,
         identity_store: ClientTlsIdentityStore | None = None,
     ) -> None:
+        if keep_alive_interval <= 0:
+            raise ValueError("keep_alive_interval must be greater than zero")
         self._url = urlparse(server_url)
         self._server_name = server_name
         self._ca = ca_certificate_pem
         self._authorization = authorization
         self._local_address = local_address
         self._connect_timeout = connect_timeout
+        self._keep_alive_interval = keep_alive_interval
         self._context: Any = None
         self._protocol: ConnectIpQuicProtocol | None = None
         self._receive_task: asyncio.Task[None] | None = None
+        self._keep_alive_task: asyncio.Task[None] | None = None
         self._connected = False
         self._logger = logger or logging.getLogger(__name__)
         self._identity_store = identity_store or ClientTlsIdentityStore()
@@ -284,6 +295,15 @@ class AioquicConnectIpTransport:
             self._receive_task = asyncio.create_task(
                 self._receive_loop(on_packet), name="connect-ip-receive"
             )
+            self._keep_alive_task = asyncio.create_task(
+                self._keep_alive_loop(), name="connect-ip-keep-alive"
+            )
+            log_event(
+                self._logger,
+                logging.INFO,
+                "masque_keep_alive_started",
+                interval_seconds=self._keep_alive_interval,
+            )
         except AgentSdkError:
             await self.close()
             raise
@@ -302,8 +322,28 @@ class AioquicConnectIpTransport:
         while True:
             packet = await self._protocol.packets.get()
             if packet is None:
+                self._connected = False
                 return
             await on_packet(packet)
+
+    async def _keep_alive_loop(self) -> None:
+        while self._connected:
+            await asyncio.sleep(self._keep_alive_interval)
+            protocol = self._protocol
+            if not self._connected or protocol is None:
+                return
+            try:
+                protocol.send_keep_alive()
+            except Exception as exc:
+                self._connected = False
+                log_event(
+                    self._logger,
+                    logging.WARNING,
+                    "masque_keep_alive_failed",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                return
 
     async def send_packet(self, packet: bytes) -> None:
         if not self._connected or self._protocol is None:
@@ -316,6 +356,10 @@ class AioquicConnectIpTransport:
 
     async def close(self) -> None:
         self._connected = False
+        if self._keep_alive_task is not None:
+            self._keep_alive_task.cancel()
+            await asyncio.gather(self._keep_alive_task, return_exceptions=True)
+            self._keep_alive_task = None
         if self._receive_task is not None:
             self._receive_task.cancel()
             await asyncio.gather(self._receive_task, return_exceptions=True)

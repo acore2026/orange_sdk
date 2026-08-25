@@ -2,6 +2,24 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-25 — 增加 MASQUE QUIC 空闲连接保活
+
+### 修改原因
+
+- A/B 双实例脚本完成 `GET /v1/ue/info`、CONNECT-IP、TUN 和消息监听后，如果用户尚未通过 curl 配置对端或发送报文，aioquic 默认会在约 60 秒无 QUIC 流量后以 `Idle timeout` 关闭连接。
+- 连接终止后，transport 的 `connected` 状态未及时变为 `false`，不利于脚本和上层 SDK 准确判断数据面状态。
+
+### 修改方式
+
+- Python `AioquicConnectIpTransport` 内置 15 秒 QUIC PING 保活任务；CONNECT-IP 成功后自动启动，关闭 transport 时自动取消，无需用户新增配置。
+- 收到 QUIC 终止事件后，接收循环立即清除 `connected` 状态；保活发送异常记录 `masque_keep_alive_failed` 日志。
+- Python MASQUE 双实例说明增加保活日志、默认间隔和进一步排查边界说明。
+
+### 验证内容
+
+- 新增测试覆盖保活间隔校验、连接期间周期发送 PING、PING 发送失败及 QUIC 关闭后的连接状态清除。
+- Python 源码编译和全量测试通过（`74 passed`），`agent_connect_sdk-0.14.0-py3-none-any.whl` 构建成功，`git diff --check` 通过；原始《SDK设计文档》保持不变。
+
 ## 2026-08-25 — 修复 requirements 源码安装对 wheel 的强制依赖
 
 ### 修改原因

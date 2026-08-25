@@ -714,6 +714,12 @@ grep -E 'UE_INFO_AGENT_TUN_IP|MASQUE_CONNECTED|MESSAGE_RECEIVED' \
 `GET /v1/ue/info` 和人工 curl，不查询或推导 Agent ID。若部署启用了 MASQUE
 鉴权，为各实例增加对应的 `--masque-token`。
 
+MASQUE Client 建立 CONNECT-IP 后会每 15 秒发送一次 QUIC PING 保活。因此在等待
+人工配置对端 IP 或执行发送 curl 时，连接不会因为 aioquic 默认的 60 秒空闲超时
+而关闭。日志出现 `masque_keep_alive_started` 表示保活任务已经启动；如果仍出现
+`connect_ip_connection_closed`，应检查服务器是否配置了与 QUIC idle timeout 无关的
+硬性会话时限或 UDP 中间设备是否丢弃长连接。
+
 ### 5.2 全接口真实端侧示例
 
 `examples/linux_agent.py` 是连接真实 AgentRuntime、MASQUE 和对端 Agent 的
