@@ -78,7 +78,8 @@ python -m pip install -r requirements.txt
 
 该文件列出 `aiohttp`、`aioquic`、`cryptography`、`httpx` 和 `pyroute2`，并通过
 `-e .` 安装当前源码中的 `agent_sdk`，因此 examples 无需手工设置
-`PYTHONPATH`。它只包含客户运行依赖；执行仓库测试时仍使用：
+`PYTHONPATH`。源码的 PEP 517/PEP 660 构建只要求 `setuptools>=68`，不要求软件源
+额外提供 `wheel` 包。它只包含客户运行依赖；执行仓库测试时仍使用：
 
 ```bash
 python -m pip install -e '.[test]'

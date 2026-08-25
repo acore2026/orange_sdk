@@ -2,6 +2,26 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-25 — 修复 requirements 源码安装对 wheel 的强制依赖
+
+### 修改原因
+
+- 客户执行 `python -m pip install -r requirements.txt` 时，`-e .` 会创建隔离构建环境；原 `pyproject.toml` 将 `wheel` 声明为强制构建依赖。
+- 客户当前 Python 软件源可以解析 `setuptools`，但不提供 `wheel`，导致 pip 在安装 SDK 及运行依赖之前以 `No matching distribution found for wheel` 失败。
+- 基于 setuptools 的 PEP 517/PEP 660 构建不需要在 `build-system.requires` 中显式声明 `wheel`。
+
+### 修改方式
+
+- 从 `python/pyproject.toml` 的 `build-system.requires` 中移除多余的 `wheel`，仅保留 `setuptools>=68`。
+- 保留 `requirements.txt` 的 `-e .`，客户仍可通过一条 `pip install -r requirements.txt` 同时安装运行依赖和当前 SDK 源码。
+- Python README 明确源码构建的软件源要求，避免把发行格式名称 wheel 与必须安装的同名构建包混淆。
+
+### 验证内容
+
+- `pyproject.toml` 解析结果确认构建依赖仅包含 `setuptools>=68`，不再请求 `wheel`。
+- Python 源码编译和全量测试通过（`70 passed`）；在不额外下载构建依赖的环境中成功生成 `agent_connect_sdk-0.14.0-py3-none-any.whl`；`requirements.txt` 与 `setup.cfg` 的五个运行依赖保持一致，`git diff --check` 通过。
+- 原始《SDK设计文档》保持不变。
+
 ## 2026-08-24 — 增加 Python 一键依赖安装清单
 
 ### 修改原因
