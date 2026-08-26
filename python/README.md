@@ -11,6 +11,7 @@ SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_
 - `agent_connect_sdk-0.14.0-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
+- `examples/interactive_linux_agent.py`：复用真实 Linux 全流程参数，每按一次回车只调用下一个 SDK 接口。
 - `examples/masque_two_instance_test.py`：在两个隔离的 Ubuntu 实例中验证 A 经 MASQUE/5GC 向 B 发送消息，B 在控制台和本地文件记录收包证据。
 
 本仓库不交付 MASQUE Server、AgentRuntime、UERANSIM 适配器、服务器证书或服务器
@@ -756,6 +757,33 @@ AgentRuntime 下发 `acf_group_config`，不会让用户填写对端 IP 或端�
 该全流程默认注销本次申请的身份。需要保留身份时传 `--keep-identity`，并把
 验证后的 `AgentProfile` 安全持久化；传 `--stay-running` 可在流程完成后继续
 接收消息。签名和验签全部由 SDK 内部执行。
+
+### 5.3 按回车逐接口调用的真实测试 Demo
+
+`examples/interactive_linux_agent.py` 使用与 `linux_agent.py` 完全相同的真实部署
+参数和调用顺序，但每次先显示即将调用的函数、对应 HTTP 接口或本地动作；按回车
+后只执行当前一步，打印返回结果后再等待下一次回车。输入 `q`、`quit` 或 `exit`
+可以终止，SDK 仍会自动释放已经创建的资源。
+
+```bash
+sudo -E .venv/bin/python examples/interactive_linux_agent.py \
+  --runtime-ip 192.168.3.10 \
+  --runtime-port 8080 \
+  --local-vlan-ip 192.168.1.10 \
+  --agent-name 'Agent A' \
+  --owner 'customer-a' \
+  --masque-url https://192.168.3.10:4433/.well-known/masque/ip \
+  --required-skill text \
+  --group-name customer-demo \
+  --message '{"type":"text","content":"hello"}' \
+  --log-file ./logs/interactive-agent-a.log
+```
+
+示例不会直接在 asyncio 事件循环中执行阻塞式 `input()`，而是把终端读取放到工作
+线程。因此等待用户按回车期间，MASQUE QUIC PING 保活、AgentRuntime 下行
+WebSocket、A2A HTTP 监听仍然正常工作。交互步骤覆盖监听器注册、`init`、身份申请/
+恢复、网络能力、能力注册/更新、发现、建组、群组缓存、消息发送、算力卸载、媒体
+句柄操作、身份注销和 `close`。
 
 ## 6. 函数清单
 

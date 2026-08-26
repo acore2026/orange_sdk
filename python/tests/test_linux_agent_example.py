@@ -137,8 +137,12 @@ async def test_linux_agent_full_flow_executes_every_business_api():
         get_processed_video_stream=AsyncMock(return_value=stream),
         deregister_identity=AsyncMock(return_value=SimpleNamespace(success=True)),
     )
+    steps = []
 
-    await module.run_full_flow(sdk, args)
+    async def before_step(interface_name, description):
+        steps.append((interface_name, description))
+
+    await module.run_full_flow(sdk, args, before_step=before_step)
 
     sdk.set_local_profile_for_restore.assert_called_once_with(profile)
     assert sdk.register_capabilities.await_args.kwargs == {
@@ -171,3 +175,24 @@ async def test_linux_agent_full_flow_executes_every_business_api():
     upload.resume.assert_awaited_once()
     upload.stop.assert_awaited_once()
     stream.recv.assert_awaited_once()
+    assert [name for name, _ in steps] == [
+        "sdk.init",
+        "sdk.apply_identity",
+        "sdk.set_local_profile_for_restore",
+        "sdk.get_network_ability",
+        "sdk.register_capabilities",
+        "sdk.update_capabilities",
+        "sdk.discover_agents",
+        "sdk.create_group",
+        "sdk.get_group_snapshot",
+        "sdk.send_message",
+        "sdk.create_offloading_session",
+        "sdk.start_video_upload",
+        "upload.pause",
+        "upload.resume",
+        "sdk.get_processed_video_stream",
+        "stream.recv",
+        "upload.stop",
+        "sdk.deregister_identity",
+    ]
+    assert all(description for _, description in steps)

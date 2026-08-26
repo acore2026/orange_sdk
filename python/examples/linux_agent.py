@@ -3,10 +3,20 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any
 
 from agent_sdk import AgentSdk, NetworkMessageAction, NetworkMessageType
+
+
+StepHook = Callable[[str, str], Awaitable[None]]
+
+
+async def _before_step(
+    hook: StepHook | None, interface_name: str, description: str
+) -> None:
+    if hook is not None:
+        await hook(interface_name, description)
 
 
 class NetworkListener:
@@ -119,7 +129,16 @@ async def _wait_for_group(sdk: AgentSdk, group_id: str, timeout: float):
         await asyncio.sleep(0.2)
 
 
-async def run_full_flow(sdk: AgentSdk, args) -> None:
+async def run_full_flow(
+    sdk: AgentSdk, args, *, before_step: StepHook | None = None
+) -> None:
+    await _before_step(
+        before_step,
+        "sdk.init",
+        "GET /v1/ue/info，建立下行 WebSocket、Agent TUN、消息服务和 MASQUE；"
+        f"Runtime=http://{args.runtime_ip}:{args.runtime_port}，"
+        f"local_vlan_ip={args.local_vlan_ip}，MASQUE={args.masque_url}",
+    )
     initialized = await sdk.init(
         args.runtime_ip,
         args.runtime_port,
@@ -139,6 +158,12 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
     )
     print("[1 init]", initialized)
 
+    await _before_step(
+        before_step,
+        "sdk.apply_identity",
+        "POST /idm/v1/identity-applications 申请 Agent 数字身份和 vc0；"
+        f"owner={args.owner!r}，name={args.agent_name!r}",
+    )
     profile = await sdk.apply_identity(
         owner=args.owner,
         name=args.agent_name,
@@ -157,12 +182,30 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
 
     # Normally used after loading a verified profile on process restart. Applying
     # the just-issued profile here keeps this full API example executable.
+    await _before_step(
+        before_step,
+        "sdk.set_local_profile_for_restore",
+        "将已验证的 AgentProfile 写入 SDK 本地状态；该步骤不发送 HTTP；"
+        f"agent_id={profile.agent_id}",
+    )
     sdk.set_local_profile_for_restore(profile)
     print("[3 set_local_profile_for_restore]", profile.agent_id)
 
+    await _before_step(
+        before_step,
+        "sdk.get_network_ability",
+        "POST /idm/v1/network-ability 获取运营商网络能力凭证 vc1；"
+        f"agent_id={profile.agent_id}",
+    )
     ability = await sdk.get_network_ability(profile.agent_id)
     print("[4 get_network_ability]", ability.abilities)
 
+    await _before_step(
+        before_step,
+        "sdk.register_capabilities",
+        "POST /arf/v1/agent-cards 发布 Agent 能力凭证；"
+        f"priority={args.priority}，test_capabilities={args.test_capability or []}",
+    )
     registered = await sdk.register_capabilities(
         profile.agent_id,
         priority=args.priority,
@@ -175,6 +218,12 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
     ability_vc_id = ability.ability_vc.get("id")
     if not isinstance(ability_vc_id, str) or not ability_vc_id:
         raise RuntimeError("network ability vc1 does not contain a non-empty id")
+    await _before_step(
+        before_step,
+        "sdk.update_capabilities",
+        "POST /arf/v1/agent-cards-update 更新 Agent 能力属性；"
+        f"update_skill={args.update_skill!r}",
+    )
     updated = await sdk.update_capabilities(
         profile.agent_id,
         update_items=[
@@ -188,6 +237,12 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
     )
     print("[6 update_capabilities]", updated.success)
 
+    await _before_step(
+        before_step,
+        "sdk.discover_agents",
+        "POST /arf/v1/agent-discoveries 发现满足技能条件的 Agent；"
+        f"task_id={args.task_id!r}，required_skills={args.required_skill or ['text']}",
+    )
     discovered = await sdk.discover_agents(
         task_id=args.task_id,
         agent_id=profile.agent_id,
@@ -205,6 +260,12 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
             )
         target_agent_id = discovered[0].agent_id
 
+    await _before_step(
+        before_step,
+        "sdk.create_group",
+        "POST /acf/v1/agents-grouping 邀请目标 Agent 并创建群组；"
+        f"target_agent_id={target_agent_id}，group_name={args.group_name!r}",
+    )
     group = await sdk.create_group(
         profile.agent_id,
         [target_agent_id],
@@ -214,6 +275,12 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
     )
     print("[8 create_group]", group.group_id)
 
+    await _before_step(
+        before_step,
+        "sdk.get_group_snapshot",
+        "等待 WebSocket 群组配置通知并读取 SDK 群组缓存；"
+        f"group_id={group.group_id}，timeout={args.group_timeout}s",
+    )
     snapshot = await _wait_for_group(sdk, group.group_id, args.group_timeout)
     if target_agent_id not in snapshot.members_by_agent_id:
         raise RuntimeError(
@@ -221,6 +288,13 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
         )
     print("[9 get_group_snapshot]", snapshot.generation)
 
+    await _before_step(
+        before_step,
+        "sdk.send_message",
+        "从群组缓存解析目标 IP/端口并 POST /A2A/message；"
+        f"group_id={group.group_id}，target_agent_id={target_agent_id}，"
+        f"message={args.message}",
+    )
     receipt = await sdk.send_message(
         group.group_id,
         target_agent_id,
@@ -231,6 +305,13 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
     )
     print("[10 send_message]", receipt.message_id, receipt.delivered)
 
+    await _before_step(
+        before_step,
+        "sdk.create_offloading_session",
+        "POST /compute/v1/offloading-sessions 创建算力卸载会话；"
+        f"workload_type={args.offloading_workload_type!r}，"
+        f"sandbox_id={args.sandbox_id!r}",
+    )
     session = await sdk.create_offloading_session(
         profile.agent_id,
         workload_type=args.offloading_workload_type,
@@ -239,6 +320,13 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
     )
     print("[11 create_offloading_session]", session.session_id, session.state)
 
+    await _before_step(
+        before_step,
+        "sdk.start_video_upload",
+        "通过媒体适配器启动视频上传；"
+        f"camera_id={args.camera_id}，{args.video_width}x{args.video_height}"
+        f"@{args.video_fps}，bitrate={args.video_bitrate_kbps}kbps",
+    )
     upload = await sdk.start_video_upload(
         session.session_id,
         camera_id=args.camera_id,
@@ -247,22 +335,56 @@ async def run_full_flow(sdk: AgentSdk, args) -> None:
         fps=args.video_fps,
         bitrate_kbps=args.video_bitrate_kbps,
     )
+    await _before_step(
+        before_step,
+        "upload.pause",
+        "暂停当前视频上传句柄",
+    )
     await upload.pause()
+    print("[12a upload.pause]", upload.track_id, upload.state)
+    await _before_step(
+        before_step,
+        "upload.resume",
+        "恢复当前视频上传句柄",
+    )
     await upload.resume()
-    print("[12 start_video_upload]", upload.track_id, upload.state)
+    print("[12b upload.resume]", upload.track_id, upload.state)
 
+    await _before_step(
+        before_step,
+        "sdk.get_processed_video_stream",
+        "获取算力侧处理后的视频流；"
+        f"session_id={session.session_id}，timeout={args.processed_stream_timeout}s",
+    )
     stream = await sdk.get_processed_video_stream(
         session.session_id, timeout_seconds=args.processed_stream_timeout
     )
+    await _before_step(
+        before_step,
+        "stream.recv",
+        "从处理后视频流读取一帧",
+    )
     frame = await stream.recv()
+    print("[13a stream.recv]", frame)
+    await _before_step(
+        before_step,
+        "upload.stop",
+        "停止视频上传句柄",
+    )
     await upload.stop()
-    print("[13 get_processed_video_stream]", frame, upload.state)
+    print("[13b upload.stop]", upload.track_id, upload.state)
 
     if args.stay_running:
         print("[14 stay_running] press Ctrl+C to close the SDK")
         await asyncio.Event().wait()
 
     if not args.keep_identity:
+        await _before_step(
+            before_step,
+            "sdk.deregister_identity",
+            "POST /acn-agent/v1/agent-deletions 注销本次申请的身份；"
+            f"agent_id={profile.agent_id}，reason={args.deregister_reason}",
+        )
         deregistered = await sdk.deregister_identity(
             profile.agent_id, reason=args.deregister_reason
         )
