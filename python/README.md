@@ -12,6 +12,8 @@ SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/interactive_linux_agent.py`：复用真实 Linux 全流程参数，每按一次回车只调用下一个 SDK 接口。
+- `examples/agent_a_test.py`：A 按 B 的能力发现 B、邀请 B 建组，随后通过群组缓存向 B 发送消息。
+- `examples/agent_b_test.py`：B 发布能力、自动接受 A 的邀请，并打印收到的群组消息。
 - `examples/masque_two_instance_test.py`：在两个隔离的 Ubuntu 实例中验证 A 经 MASQUE/5GC 向 B 发送消息，B 在控制台和本地文件记录收包证据。
 
 本仓库不交付 MASQUE Server、AgentRuntime、UERANSIM 适配器、服务器证书或服务器
@@ -784,6 +786,58 @@ sudo -E .venv/bin/python examples/interactive_linux_agent.py \
 WebSocket、A2A HTTP 监听仍然正常工作。交互步骤覆盖监听器注册、`init`、身份申请/
 恢复、网络能力、能力注册/更新、发现、建组、群组缓存、消息发送、算力卸载、媒体
 句柄操作、身份注销和 `close`。
+
+### 5.4 A 按能力发现 B、建组并发送消息
+
+本测试使用两个独立脚本。B 必须先启动并完成能力发布；A 随后以
+`required_skills=[target_capability]` 调用能力发现，用发现到的 B Agent ID 创建
+群组，等待 WebSocket 群组配置写入 SDK 缓存，最后调用
+`send_message(group_id, target_agent_id, ...)`。应用不传 B 的 IP 和端口；SDK 从
+群组配置缓存解析目标端点。
+
+先在设备 B 启动：
+
+```bash
+cd /path/to/orange_sdk/python
+sudo -E .venv/bin/python examples/agent_b_test.py \
+  --runtime-ip 192.168.3.10 \
+  --runtime-port 8089 \
+  --local-vlan-ip 192.168.2.10 \
+  --masque-url https://192.168.3.10:8444/.well-known/masque/ip \
+  --capability text \
+  --exit-after-message \
+  --log-file ./logs/agent-b-test.log
+```
+
+逐次按回车，直到 B 输出 `B_READY`。然后在设备 A 启动：
+
+```bash
+cd /path/to/orange_sdk/python
+sudo -E .venv/bin/python examples/agent_a_test.py \
+  --runtime-ip 192.168.3.10 \
+  --runtime-port 8088 \
+  --local-vlan-ip 192.168.1.10 \
+  --masque-url https://192.168.3.10:8443/.well-known/masque/ip \
+  --target-capability text \
+  --group-name agent-a-b-test-group \
+  --message '{"type":"text","content":"hello Agent B from Agent A"}' \
+  --log-file ./logs/agent-a-test.log
+```
+
+A 端同样每按一次回车只执行当前显示的下一项操作。能力发现结果中存在多个相同
+能力的 Agent 时，可增加 `--target-agent-id <B的Agent ID>` 精确选择。建组邀请和
+群组配置是网络下行事务，两个脚本会立即处理，不额外等待回车，避免阻塞建组流程。
+
+成功判据如下：
+
+- A 输出 `TARGET_B_SELECTED`、`GROUP_CONFIG_READY` 和 `MESSAGE_DELIVERED`；
+- B 输出 `GROUP_INVITATION_ACCEPTED`、`GROUP_CONFIG_APPLIED` 和
+  `B_MESSAGE_RECEIVED`；
+- A 的发送调用中只有 `group_id` 和 `target_agent_id`，没有由用户提供的 B IP/端口。
+
+测试能力 VC 默认由 B 使用 `~/lpx/cert/third-party/private-key.pem` 签发。
+密钥在其他位置时，B 传 `--third-party-private-key`。需要无人值守执行时增加
+`--no-prompt`；B 不传 `--exit-after-message` 时，在收到第一条消息后继续常驻。
 
 ## 6. 函数清单
 

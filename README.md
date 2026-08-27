@@ -10,6 +10,8 @@
 - [离线全流程示例](python/examples/full_flow_demo.py)
 - [真实 Linux 全接口调用示例](python/examples/linux_agent.py)
 - [按回车逐接口调用的 Linux 交互示例](python/examples/interactive_linux_agent.py)
+- [Agent A：按能力发现、建组并发送消息](python/examples/agent_a_test.py)
+- [Agent B：发布能力、接受建组并接收消息](python/examples/agent_b_test.py)
 - [A/B 双实例 MASQUE 消息联调脚本](python/examples/masque_two_instance_test.py)
 - [Android/RayNeoOS 使用说明](android/README.md)
 - [Proof 生成与校验说明](Agent-SDK-Proof生成与校验说明.md)
