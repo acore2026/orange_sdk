@@ -2,6 +2,25 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-27 — 封闭联调暂时关闭 SDK 入站 proof 验签
+
+### 修改原因
+
+- 当前优先完成 AgentRuntime、核心网和 Agent A/B 用户面联调，群组配置与 A2A proof 的签名口径仍在同步；SDK 本地验签会在业务字段、缓存和链路验证前提前拦截消息。
+- Runtime/核心网仍要求控制请求签名，因此不能删除出站 `signature/proof` 或改变请求体。
+
+### 修改方式
+
+- Python 默认使用明确的 no-op 群组配置/A2A verifier；Android 公共 `AgentSdk.create` 及内部默认值同步切换为 no-op verifier。
+- 只绕过 `acf_group_config.proof` 与 A2A 入站 `proof` 校验，原有字段检查、目标检查、群组成员解析、缓存、路由和 listener 调用全部保留。
+- 身份申请、控制面请求和 A2A 出站签名继续使用设备 P-256 私钥；真实验签实现、核心网内置公钥和单元测试继续保留，便于联调后恢复。
+- Python 初始化日志新增 `inbound_signature_verification_disabled` 警告并标注 `internal-test-only`。
+
+### 验证内容
+
+- Python 新增无签名群组配置/A2A verifier 放行测试，并运行源码编译与全量测试。
+- Android 按当前联调优先要求不等待全量构建；完成 Python/Android 默认依赖注入和代码静态检查。该配置明确禁止用于生产环境。
+
 ## 2026-08-27 — 三方能力认证公钥改为 SDK 包内相对资源
 
 ### 修改原因

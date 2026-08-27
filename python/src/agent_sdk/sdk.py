@@ -59,11 +59,11 @@ from .rest_server import AiohttpLocalServer
 from .routes import GroupRouteManager, Pyroute2RouteBackend, RouteBackend
 from .runtime import HttpPeerMessenger, HttpRuntimeTransport
 from .security import (
-    CoreNetworkProofVerifier,
     DeviceControlRequestAuthenticator,
     DeviceMessageSigner,
     DeviceSigningIdentityStore,
-    DidKeyMessageSignatureVerifier,
+    DisabledMessageSignatureVerifier,
+    DisabledProofVerifier,
 )
 from .tun import LinuxTunDevice, validate_ip_packet
 
@@ -174,7 +174,9 @@ class AgentSdk:
         self._logger.propagate = False
         self._pending_logs: list[tuple[int, str, bool, dict[str, Any]]] = []
         self._device_identity_store = DeviceSigningIdentityStore()
-        self._proof_verifier = _proof_verifier or CoreNetworkProofVerifier()
+        self._group_config_verification_enabled = _proof_verifier is not None
+        self._a2a_verification_enabled = _message_signature_verifier is not None
+        self._proof_verifier = _proof_verifier or DisabledProofVerifier()
         self._control_request_authenticator = (
             _control_request_authenticator
             or DeviceControlRequestAuthenticator(self._device_identity_store)
@@ -183,7 +185,7 @@ class AgentSdk:
             self._device_identity_store
         )
         self._message_signature_verifier = (
-            _message_signature_verifier or DidKeyMessageSignatureVerifier()
+            _message_signature_verifier or DisabledMessageSignatureVerifier()
         )
         self._peer_messenger = peer_messenger or HttpPeerMessenger(logger=self._logger)
         self._tun_factory = tun_factory or LinuxTunDevice.create
@@ -319,6 +321,22 @@ class AgentSdk:
                 "log_backup_count": log_backup_count,
             },
         )
+        if not (
+            self._group_config_verification_enabled
+            and self._a2a_verification_enabled
+        ):
+            self._log(
+                logging.WARNING,
+                "inbound_signature_verification_disabled",
+                security_profile="internal-test-only",
+                group_config_proof_verification=(
+                    "enabled" if self._group_config_verification_enabled else "disabled"
+                ),
+                a2a_proof_verification=(
+                    "enabled" if self._a2a_verification_enabled else "disabled"
+                ),
+                outbound_signing="enabled",
+            )
         try:
             if self._state not in {"NEW", "CLOSED"}:
                 raise AgentSdkError(

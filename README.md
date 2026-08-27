@@ -20,7 +20,9 @@
 连接时会记录明确的安全警告。SDK 首次启动仍会在端侧私有目录生成并复用
 自己的 Ed25519 MASQUE 客户端证书/私钥；同时生成独立的 P-256 消息签名
 密钥。控制面和 A2A 消息由 SDK 自动签名，核心网群组配置使用 AAR/Wheel
-内预置的核心网 P-256 公钥验签，应用不配置密钥或安全回调。除 MASQUE 的
+内预置的核心网 P-256 公钥验签代码仍保留，但本次封闭联调构建已关闭群组配置
+和 A2A 入站 proof 验签；应用不配置密钥或安全回调。出站签名字段保持不变，
+便于 Runtime/核心网继续按现有契约处理。除 MASQUE 的
 HTTPS/HTTP/3 外，SDK 与 AgentRuntime、对端 Agent 的接口统一使用 HTTP。
 Android AAR 已包含真实的 ARM64 `libmasque_core.so`，不再要求客户另行提供
 Native Core。

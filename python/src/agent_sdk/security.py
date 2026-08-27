@@ -565,6 +565,22 @@ class DidKeyMessageSignatureVerifier:
         )
 
 
+class DisabledProofVerifier:
+    """Internal-test verifier that deliberately accepts all group configs."""
+
+    async def verify_group_config(self, payload: Mapping[str, Any]) -> None:
+        del payload
+
+
+class DisabledMessageSignatureVerifier:
+    """Internal-test verifier that deliberately accepts all A2A messages."""
+
+    async def verify_a2a(
+        self, payload: Mapping[str, Any], expected_did_key: str
+    ) -> None:
+        del payload, expected_did_key
+
+
 class RejectUnconfiguredControlRequestAuthenticator:
     async def authenticate(
         self, path: str, payload: Mapping[str, Any]

@@ -16,11 +16,21 @@ from agent_sdk.security import (
     DeviceSigningIdentity,
     DeviceSigningIdentityStore,
     DidKeyMessageSignatureVerifier,
+    DisabledMessageSignatureVerifier,
+    DisabledProofVerifier,
     _proof_signing_bytes,
     canonical_json,
     embedded_core_network_public_key_pem,
     identity_application_signing_bytes,
 )
+
+
+async def test_internal_test_verifiers_accept_unsigned_inbound_messages():
+    await DisabledProofVerifier().verify_group_config({"group_id": "g1"})
+    await DisabledMessageSignatureVerifier().verify_a2a(
+        {"payload": {"text": "unsigned"}},
+        "not-a-did-key",
+    )
 
 
 def test_device_signing_identity_is_generated_once_and_persisted(tmp_path: Path):

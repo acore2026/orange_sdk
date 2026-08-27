@@ -15,6 +15,12 @@
 2. 核心网通过 AgentRuntime 下发的 `acf_group_config` 群组配置；
 3. Agent 之间通过 `POST /A2A/message` 发送的定向消息。
 
+> 联调状态说明（2026-08-27）：Python Wheel 和 Android AAR 当前默认收包路径已
+> 暂停核心网群组配置 proof 与 A2A proof 的验签，只保留字段校验、缓存、路由和
+> 投递。本文的验签算法、内置公钥和实现代码仍保留，供恢复安全开关及双方对齐
+> 使用。所有出站签名继续按本文生成，HTTP/NAS 字段名没有变化。该联调 Profile
+> 不得用于生产环境。
+
 本文不覆盖以下两类签名：
 
 - `POST /idm/v1/identity-applications` 使用的 `signature`。该接口采用
@@ -239,7 +245,8 @@ function create_proof(unsecuredDocument, privateKey, purpose, verificationMethod
 
 ### 6.1 主格式校验步骤
 
-当前 Python 和 Android SDK 按以下顺序校验：
+保留的 Python 和 Android 验签实现按以下顺序校验；当前联调 Profile 默认不调用
+该实现：
 
 1. 从消息顶层取得 `proof`，要求它是 JSON 对象；
 2. 要求 `proof.type == "JsonWebSignature2020"`；
@@ -391,9 +398,10 @@ Python 和 Android 测试使用以下 proofOptions：
 
 ### 8.2 核心网群组配置
 
-SDK 收到 `ACN_AGENT_GROUPING_NOTIFICATION` 后，先使用内置核心网公钥校验
-`payload.proof`，预期 `proof_purpose=assertionMethod`。只有 proof 校验成功，
-SDK 才解析成员、校验本机 Agent TUN IP 和端口、提交群组快照并安装动态路由。
+安全验签恢复后，SDK 收到 `ACN_AGENT_GROUPING_NOTIFICATION` 会先使用内置
+核心网公钥校验 `payload.proof`，预期
+`proof_purpose=assertionMethod`。当前联调 Profile 跳过该调用，直接继续解析
+成员、校验本机 Agent TUN IP 和端口、提交群组快照并安装动态路由。
 
 群组成员里的 `did_key` 不能用于验证承载这些成员信息的同一条群组配置，否则会
 形成消息自带公钥、自证消息有效的错误信任链。
@@ -404,8 +412,9 @@ SDK 才解析成员、校验本机 Agent TUN IP 和端口、提交群组快照�
 `proof_purpose=authentication` 生成 proof，随后发送到从已提交群组缓存解析出的
 `agent_ip:tcp_port`。
 
-接收端根据 `group_id + src_agent_id` 从已验签群组快照取得发送方 `did_key`，
-解析为 P-256 公钥后校验 proof。验签通过后才把 `payload` 交给应用 listener。
+安全验签恢复后，接收端根据 `group_id + src_agent_id` 从群组快照取得发送方
+`did_key`，解析为 P-256 公钥后校验 proof。当前联调 Profile 跳过该验签，在
+目标、成员和消息字段校验通过后把 `payload` 交给应用 listener。
 
 ## 9. 完整性范围和上层安全边界
 

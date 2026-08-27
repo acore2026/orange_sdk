@@ -271,7 +271,7 @@ grep -E '"event":"(http_error|function_error)"|"status_code":[45][0-9][0-9]' \
 
 `authorization`、token、密码、签名、`proof/jws`、公私钥、DID key、VC 和 credentials 会写成 `[REDACTED]`。业务消息结构和非敏感字段保留，便于定位问题。日志目录必须预先允许 SDK 进程写入；无法创建日志文件时，`init()` 返回 `LOG_SETUP_FAILED`。
 
-### 3.4 SDK 内建的消息签名和验签
+### 3.4 SDK 内建的消息签名和联调验签策略
 
 用户不配置密钥，也不实现安全回调。第一次 `init()` 会生成一套独立于
 MASQUE TLS 的 P-256 消息签名密钥：
@@ -309,9 +309,11 @@ JWSInput     = BASE64URL(protectedHeader) || "." || verifyData
 Wheel 只预置 `/root/lpx/cert/core-network/public-key.pem` 对应的核心网公钥，
 SPKI DER SHA-256 指纹为
 `86:D4:77:77:67:4E:79:77:88:A9:61:18:8A:C9:B8:A4:CD:34:DF:15:F4:61:FC:1C:E9:BA:89:D2:15:01:6C:CD`。
-核心网私钥不会进入 SDK。`acf_group_config` 必须携带
-`proof_purpose=assertionMethod` 的有效签名，否则 SDK 拒绝缓存成员和安装路由。
-A2A 收包则使用已验签群组配置中的发送方 P-256 `did:key` 验签。
+核心网私钥不会进入 SDK。验签实现和内置公钥继续保留，便于后续恢复；当前
+封闭联调 Profile 不执行 `acf_group_config.proof` 和 A2A `proof` 的入站验签，
+收到消息后直接进入原有字段校验、成员缓存或业务投递流程。SDK 初始化日志会
+输出 `inbound_signature_verification_disabled` 警告。控制面和 A2A 出站签名仍
+照常生成，HTTP/NAS 字段及签名算法没有变化。该 Profile 不得用于生产环境。
 
 ## 4. 应用如何调用 SDK
 
@@ -325,7 +327,7 @@ class NetworkListener:
     async def on_network_message(self, message_type, payload):
         if message_type is NetworkMessageType.GROUP_INVITATION:
             return NetworkMessageAction.ACCEPT
-        # GROUP_CONFIG 到达监听器前已经由 SDK 验签、缓存并安装路由。
+        # 联调 Profile 不验 proof；到达监听器前仍会校验字段、缓存并安装路由。
         return NetworkMessageAction.ACK
 
 
@@ -340,9 +342,9 @@ sdk.register_group_message_listener(GroupListener())
 ```
 
 应用不传入签名器、验签器或私钥。首次 `init()` 时 SDK 自动生成 P-256
-设备密钥并持久化；之后控制面请求和 A2A 消息都复用该私钥签名。核心网下发
-的 `acf_group_config.proof` 使用 Wheel 内置的核心网 P-256 公钥验签，对端
-A2A 消息使用已验签群组配置中的 `did_key` 验签。
+设备密钥并持久化；之后控制面请求和 A2A 消息都复用该私钥签名。当前封闭联调
+构建不会校验核心网下发 `acf_group_config.proof` 或对端 A2A `proof`；完整验签
+实现仍保留在 SDK 内，但不接入默认收包路径。
 
 ### 4.2 身份、能力、发现和建群
 
@@ -462,7 +464,7 @@ print(receipt.message_id, receipt.delivered)
 POST http://<agent_ip>:<tcp_port>/A2A/message
 ```
 
-这个 HTTP 包由系统路由送入 Agent TUN，再通过 CONNECT-IP 和 5GC U 面到达对端。群组配置不存在、目标不在群组或配置验签失败时，SDK 会拒绝发送，不会回退到用户提供的地址。
+这个 HTTP 包由系统路由送入 Agent TUN，再通过 CONNECT-IP 和 5GC U 面到达对端。群组配置不存在或目标不在群组时，SDK 会拒绝发送，不会回退到用户提供的地址；当前联调 Profile 不会因 proof 验签失败拒绝消息。
 
 ### 4.4 计算和视频卸载
 
@@ -761,7 +763,7 @@ AgentRuntime 下发 `acf_group_config`，不会让用户填写对端 IP 或端�
 
 该全流程默认注销本次申请的身份。需要保留身份时传 `--keep-identity`，并把
 验证后的 `AgentProfile` 安全持久化；传 `--stay-running` 可在流程完成后继续
-接收消息。签名和验签全部由 SDK 内部执行。
+接收消息。出站签名全部由 SDK 内部执行；当前联调 Profile 暂停入站验签。
 
 ### 5.3 按回车逐接口调用的真实测试 Demo
 
@@ -900,7 +902,7 @@ ss -lunp | grep <MASQUE端口>
 | `RUNTIME_UNREACHABLE` | AgentRuntime HTTP IP/端口和物理网络连通性 |
 | `MASQUE_CONNECT_FAILED` | `masque_server_url` 的 UDP 可达性、客户端密钥目录权限和外部服务鉴权值；服务端问题交由外部系统维护方处理 |
 | `CONNECT_IP_NEGOTIATION_FAILED` | 外部服务是否支持 HTTP/3 Datagram 和 CONNECT-IP |
-| `GROUP_NOT_ACTIVE` | 是否已收到并成功验签 `acf_group_config` |
+| `GROUP_NOT_ACTIVE` | 是否已收到并成功应用 `acf_group_config` |
 | `TARGET_NOT_IN_GROUP` | `target_agent_id` 是否存在于该群组最新快照 |
 | 消息未经过 5GC | 将端侧日志和抓包交给外部 AgentRuntime/MASQUE/5GC 维护方定位；SDK 不包含服务器转发实现 |
 | 日志出现证书校验关闭警告 | 当前为封闭内测安全配置；不得将该构建用于生产网络 |

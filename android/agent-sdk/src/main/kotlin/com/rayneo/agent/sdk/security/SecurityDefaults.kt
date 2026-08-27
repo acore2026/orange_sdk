@@ -7,6 +7,14 @@ import com.rayneo.agent.sdk.transport.MessageSigner
 import com.rayneo.agent.sdk.transport.ProofVerifier
 import kotlinx.serialization.json.JsonObject
 
+internal object DisabledProofVerifier : ProofVerifier {
+    override suspend fun verifyGroupConfig(payload: JsonObject) = Unit
+}
+
+internal object DisabledMessageSignatureVerifier : MessageSignatureVerifier {
+    override suspend fun verifyA2a(payload: JsonObject, expectedDidKey: String) = Unit
+}
+
 internal class RejectUnconfiguredProofVerifier : ProofVerifier {
     override suspend fun verifyGroupConfig(payload: JsonObject) {
         throw AgentSdkException(

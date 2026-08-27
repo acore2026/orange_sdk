@@ -41,10 +41,12 @@ On the first `initialize`, the SDK also creates a separate P-256 message-signing
 key in Android Keystore under alias `agent-sdk-device-signing-v1`. The private
 key is non-exportable. Identity registration automatically sends its Base64
 SubjectPublicKeyInfo public key; control-plane and A2A messages are signed by
-the SDK. The AAR embeds the pinned core-network P-256 public key and uses it to
-verify `acf_group_config.proof`; peer A2A messages are verified with the
-`did_key` from that verified group snapshot. Applications do not supply proof
-verifiers, authenticators, signers, public keys, or production private keys.
+the SDK. The AAR retains the pinned core-network P-256 public key and verifier
+implementation, but this internal interoperability build bypasses inbound
+`acf_group_config.proof` and peer A2A `proof` verification. Outbound signing is
+unchanged. Applications do not supply proof verifiers, authenticators, signers,
+public keys, or production private keys. This profile must not be used in
+production.
 The explicit lab-only capability issuer import described below is the sole
 exception.
 

@@ -15,9 +15,9 @@ import com.rayneo.agent.sdk.model.OffloadingSession
 import com.rayneo.agent.sdk.model.OperationResult
 import com.rayneo.agent.sdk.model.SdkInitResult
 import com.rayneo.agent.sdk.security.AndroidDeviceSecurity
+import com.rayneo.agent.sdk.security.DisabledMessageSignatureVerifier
+import com.rayneo.agent.sdk.security.DisabledProofVerifier
 import com.rayneo.agent.sdk.security.RejectUnconfiguredMessageSigner
-import com.rayneo.agent.sdk.security.RejectUnconfiguredMessageSignatureVerifier
-import com.rayneo.agent.sdk.security.RejectUnconfiguredProofVerifier
 import com.rayneo.agent.sdk.security.TestCapabilityVcIssuer
 import com.rayneo.agent.sdk.server.TcpJsonLocalServer
 import com.rayneo.agent.sdk.transport.GroupMessageListener
@@ -62,11 +62,11 @@ import java.util.UUID
 class AgentSdk internal constructor(
     private val tunnelController: TunnelController,
     private val masqueTransport: MasqueTransport,
-    private val proofVerifier: ProofVerifier = RejectUnconfiguredProofVerifier(),
+    private val proofVerifier: ProofVerifier = DisabledProofVerifier,
     private val controlRequestAuthenticator: ControlRequestAuthenticator? = null,
     private val devicePublicKeyProvider: DevicePublicKeyProvider? = null,
     private val messageSigner: MessageSigner = RejectUnconfiguredMessageSigner,
-    private val messageSignatureVerifier: MessageSignatureVerifier = RejectUnconfiguredMessageSignatureVerifier,
+    private val messageSignatureVerifier: MessageSignatureVerifier = DisabledMessageSignatureVerifier,
     private val peerMessenger: PeerMessenger = OkHttpPeerMessenger(),
     private val runtimeFactory: (String, Int) -> RuntimeTransport = { host, port ->
         OkHttpRuntimeTransport(host, port)
@@ -777,11 +777,11 @@ class AgentSdk internal constructor(
             return AgentSdk(
                 tunnelController = VpnTunnelController(vpnService),
                 masqueTransport = NativeMasqueTransport(NativeMasqueBridge(vpnService)),
-                proofVerifier = security,
+                proofVerifier = DisabledProofVerifier,
                 controlRequestAuthenticator = security,
                 devicePublicKeyProvider = security,
                 messageSigner = security,
-                messageSignatureVerifier = security,
+                messageSignatureVerifier = DisabledMessageSignatureVerifier,
                 testCapabilityVcIssuer = TestCapabilityVcIssuer(
                     File(
                         vpnService.noBackupFilesDir,
