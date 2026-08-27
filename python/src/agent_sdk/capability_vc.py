@@ -5,6 +5,7 @@ import json
 import uuid
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,16 @@ TEST_CAPABILITY_ISSUER_DID = (
     "did:thirdpartyissuer@6gc.mnc015.mcc234.3gppnetwork"
 )
 TEST_CAPABILITY_ISSUER_KEY_ID = f"{TEST_CAPABILITY_ISSUER_DID}#keys-1"
+
+
+def embedded_test_capability_public_key_pem() -> bytes:
+    """Read the lab issuer public key from the installed SDK package."""
+
+    return (
+        resources.files("agent_sdk.certs")
+        .joinpath("third-party-capability-public-key.pem")
+        .read_bytes()
+    )
 
 
 def default_test_capability_private_key_path() -> Path:

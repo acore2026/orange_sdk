@@ -840,7 +840,10 @@ A 端也会默认连续执行能力发现、建组和消息发送。能力发现
 - A 的发送调用中只有 `group_id` 和 `target_agent_id`，没有由用户提供的 B IP/端口。
 
 测试能力 VC 默认由 B 使用 `~/lpx/cert/third-party/private-key.pem` 签发。
-密钥在其他位置时，B 传 `--third-party-private-key`。如果需要在每个主动调用前
+对应公钥随 Wheel 打包在
+`agent_sdk/certs/third-party-capability-public-key.pem`，SDK 和测试通过包相对
+资源读取，不依赖 `/root/lpx/cert/third-party/public-key.pem`。私钥在其他位置
+时，B 传 `--third-party-private-key`。如果需要在每个主动调用前
 人工确认，可显式增加 `--prompt`；B 不传 `--exit-after-message` 时，在收到
 第一条消息后继续常驻。SDK 文件日志在 `sdk.init()` 中完成初始化，
 脚本启动到 `init` 之前的状态会直接输出到终端。

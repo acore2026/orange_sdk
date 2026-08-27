@@ -78,6 +78,11 @@ Android cannot read the build host's `~/lpx/cert` at runtime. For this lab-only
 case, import the test issuer key once from an application resource; the SDK
 persists it under the app's `noBackupFilesDir/agent-sdk/test-capability-vc`:
 
+The matching third-party public key is already packaged in the AAR at
+`certs/third-party-capability-public-key.pem` and is loaded as a classpath-relative
+SDK resource. Applications do not configure an absolute public-key path. Only
+the private key remains external and must be imported for this lab-only issuer.
+
 ```kotlin
 val sdk = AgentSdk.create(vpnService)
 resources.openRawResource(R.raw.test_third_party_private_key).use { input ->

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from cryptography.exceptions import InvalidSignature
@@ -13,6 +14,7 @@ from agent_sdk import AgentSdkError, ErrorCode
 from agent_sdk.capability_vc import (
     TEST_CAPABILITY_ISSUER_DID,
     TEST_CAPABILITY_ISSUER_KEY_ID,
+    embedded_test_capability_public_key_pem,
     issue_test_capability_vcs,
 )
 
@@ -93,6 +95,32 @@ def test_issue_test_capability_vcs_matches_idm_signature_format(tmp_path):
             _signing_message(credentials[0]),
             ec.ECDSA(hashes.SHA256()),
         )
+
+
+def test_embedded_third_party_public_key_matches_lab_private_key_when_available():
+    public_key = serialization.load_pem_public_key(
+        embedded_test_capability_public_key_pem()
+    )
+    assert isinstance(public_key, ec.EllipticCurvePublicKey)
+    assert isinstance(public_key.curve, ec.SECP256R1)
+
+    private_key_path = Path.home() / "lpx/cert/third-party/private-key.pem"
+    if not private_key_path.is_file():
+        pytest.skip("lab-only third-party private key is not installed")
+    private_key = serialization.load_pem_private_key(
+        private_key_path.read_bytes(), password=None
+    )
+    assert isinstance(private_key, ec.EllipticCurvePrivateKey)
+    assert (
+        private_key.public_key().public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        == public_key.public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
 
 
 async def test_register_capabilities_accepts_existing_vcs_and_raw_capabilities(

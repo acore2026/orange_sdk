@@ -2,6 +2,24 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-27 — 三方能力认证公钥改为 SDK 包内相对资源
+
+### 修改原因
+
+- 三方能力 VC 的认证公钥不应依赖开发机 `/root/lpx/cert/third-party/public-key.pem`，否则 Wheel/AAR 安装到客户设备后无法按该绝对路径读取。
+- 公钥可以随 SDK 分发，但三方签发私钥必须继续留在 SDK 包外。
+
+### 修改方式
+
+- Python 将 P-256 公钥打包为 `agent_sdk/certs/third-party-capability-public-key.pem`，并通过 `importlib.resources` 提供包相对读取。
+- Android 将同一公钥打包为 AAR classpath 资源 `certs/third-party-capability-public-key.pem`，通过类资源流读取。
+- 两端验证测试改为使用 SDK 内嵌公钥，不再读取宿主机三方公钥绝对路径；外部私钥导入和测试签发流程保持不变。
+
+### 验证内容
+
+- 校验 Python/Android 两份包内 PEM 的 SHA-256 均为 `dbe535abb61b36fba64ea1e90c4436a9af2a762c34afe936ade4b21e4d5bf06c`，且为 P-256 公钥。
+- Python 测试验证包内公钥可读取，并在本机测试私钥存在时确认公私钥匹配；Wheel 构建产物检查确认实际包含该资源。Android 按此前联调要求未等待完整构建，仅校验 AAR 主资源目录、相对加载代码和 PEM 内容。
+
 ## 2026-08-27 — H-ID 签名对齐现网 IDM 的完整 Metadata JSON 编码
 
 ### 修改原因

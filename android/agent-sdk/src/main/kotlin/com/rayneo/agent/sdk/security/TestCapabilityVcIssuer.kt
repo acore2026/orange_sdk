@@ -23,6 +23,13 @@ internal const val TEST_CAPABILITY_ISSUER_DID =
     "did:thirdpartyissuer@6gc.mnc015.mcc234.3gppnetwork"
 internal const val TEST_CAPABILITY_ISSUER_KEY_ID = "$TEST_CAPABILITY_ISSUER_DID#keys-1"
 
+internal fun embeddedTestCapabilityIssuerPublicKeyPem(): ByteArray =
+    TestCapabilityVcIssuer::class.java.getResourceAsStream(
+        "/certs/third-party-capability-public-key.pem"
+    )?.use { it.readBytes() } ?: throw signatureError(
+        "Embedded test capability issuer public key is missing"
+    )
+
 /** Lab-only issuer. The private key lives outside the AAR in app-private storage. */
 internal class TestCapabilityVcIssuer(
     private val privateKeyFile: File,

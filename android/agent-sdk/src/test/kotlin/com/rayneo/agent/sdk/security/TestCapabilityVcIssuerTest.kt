@@ -126,10 +126,9 @@ class TestCapabilityVcIssuerTest {
     }
 
     @Test
-    fun `real lab third-party key verifies with matching public key when available`() {
+    fun `real lab third-party key verifies with embedded public key when available`() {
         val privateKeyFile = File("/root/lpx/cert/third-party/private-key.pem")
-        val publicKeyFile = File("/root/lpx/cert/third-party/public-key.pem")
-        assumeTrue(privateKeyFile.isFile && publicKeyFile.isFile)
+        assumeTrue(privateKeyFile.isFile)
         val issuer = TestCapabilityVcIssuer(
             temporaryFolder.newFolder("real-key").resolve("issuer-private-key.pem")
         )
@@ -140,7 +139,10 @@ class TestCapabilityVcIssuerTest {
             listOf("robot-control"),
         ).single()
 
-        verifyCredential(credential, parsePublicKey(publicKeyFile.readBytes()))
+        verifyCredential(
+            credential,
+            parsePublicKey(embeddedTestCapabilityIssuerPublicKeyPem()),
+        )
     }
 
     @Test
