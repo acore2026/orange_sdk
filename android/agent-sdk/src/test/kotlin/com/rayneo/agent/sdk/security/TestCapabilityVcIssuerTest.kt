@@ -11,11 +11,9 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
-import java.io.File
 import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
@@ -126,13 +124,11 @@ class TestCapabilityVcIssuerTest {
     }
 
     @Test
-    fun `real lab third-party key verifies with embedded public key when available`() {
-        val privateKeyFile = File("/root/lpx/cert/third-party/private-key.pem")
-        assumeTrue(privateKeyFile.isFile)
+    fun `embedded lab private key verifies with embedded public key`() {
         val issuer = TestCapabilityVcIssuer(
             temporaryFolder.newFolder("real-key").resolve("issuer-private-key.pem")
         )
-        issuer.importPrivateKey(privateKeyFile.readBytes())
+        issuer.importPrivateKey(embeddedTestCapabilityIssuerPrivateKeyPem())
         val credential = issuer.issue(
             "did:example:agent-a",
             "Agent Alpha",

@@ -19,6 +19,7 @@ import com.rayneo.agent.sdk.security.DisabledMessageSignatureVerifier
 import com.rayneo.agent.sdk.security.DisabledProofVerifier
 import com.rayneo.agent.sdk.security.RejectUnconfiguredMessageSigner
 import com.rayneo.agent.sdk.security.TestCapabilityVcIssuer
+import com.rayneo.agent.sdk.security.embeddedTestCapabilityIssuerPrivateKeyPem
 import com.rayneo.agent.sdk.server.TcpJsonLocalServer
 import com.rayneo.agent.sdk.transport.GroupMessageListener
 import com.rayneo.agent.sdk.transport.ControlRequestAuthenticator
@@ -414,7 +415,9 @@ class AgentSdk internal constructor(
         }))
         val abilityVc = response["vc1"] as? JsonObject ?: buildJsonObject { }
         val claims = abilityVc["claims"] as? JsonObject
-        val abilities = (claims?.get("abilities") as? JsonArray)
+        val abilities = (claims?.get("network_abilities") as? JsonArray)
+            ?.mapNotNull { it.jsonPrimitive.contentOrNull }
+            ?: (claims?.get("abilities") as? JsonArray)
             ?.mapNotNull { it.jsonPrimitive.contentOrNull }
             ?: claims?.get("agent_attribute")?.jsonPrimitive?.contentOrNull?.let(::listOf)
             ?: emptyList()
@@ -774,6 +777,14 @@ class AgentSdk internal constructor(
             val security = vpnService.resources.openRawResource(
                 R.raw.core_network_public_key
             ).use(AndroidDeviceSecurity::create)
+            val testCapabilityIssuer = TestCapabilityVcIssuer(
+                File(
+                    vpnService.noBackupFilesDir,
+                    "agent-sdk/test-capability-vc/issuer-private-key.pem",
+                )
+            ).also {
+                it.importPrivateKey(embeddedTestCapabilityIssuerPrivateKeyPem())
+            }
             return AgentSdk(
                 tunnelController = VpnTunnelController(vpnService),
                 masqueTransport = NativeMasqueTransport(NativeMasqueBridge(vpnService)),
@@ -782,12 +793,7 @@ class AgentSdk internal constructor(
                 devicePublicKeyProvider = security,
                 messageSigner = security,
                 messageSignatureVerifier = DisabledMessageSignatureVerifier,
-                testCapabilityVcIssuer = TestCapabilityVcIssuer(
-                    File(
-                        vpnService.noBackupFilesDir,
-                        "agent-sdk/test-capability-vc/issuer-private-key.pem",
-                    )
-                ),
+                testCapabilityVcIssuer = testCapabilityIssuer,
                 mediaOffloadAdapter = mediaOffloadAdapter,
                 peerMessenger = peerMessenger,
                 localServerFactory = localServerFactory,

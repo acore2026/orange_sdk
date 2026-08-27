@@ -149,7 +149,13 @@ async def run_agent_b(
             "POST /idm/v1/network-ability，取得 Agent B 的运营商网络能力凭证。",
         )
         ability = await client.get_network_ability(profile.agent_id)
-        _emit("NETWORK_ABILITY_READY", abilities=ability.abilities)
+        _emit(
+            "NETWORK_ABILITY_READY",
+            network_abilities=ability.abilities,
+            valid_until=(
+                ability.valid_until.isoformat() if ability.valid_until else None
+            ),
+        )
 
         await _before_step(
             gate,
@@ -232,7 +238,11 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--priority", type=int, default=1)
     value.add_argument(
         "--third-party-private-key",
-        default="~/lpx/cert/third-party/private-key.pem",
+        default=None,
+        help=(
+            "optional lab issuer private-key override; by default use the "
+            "private key packaged in the SDK"
+        ),
     )
     value.add_argument("--log-file", default="./logs/agent-b-test.log")
     value.add_argument(

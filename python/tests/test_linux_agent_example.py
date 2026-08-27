@@ -149,7 +149,7 @@ async def test_linux_agent_full_flow_executes_every_business_api():
         "priority": 1,
         "credentials": [profile.identity_vc, ability.ability_vc],
         "capabilities": ["robot-control"],
-        "test_vc_private_key_path": "~/lpx/cert/third-party/private-key.pem",
+        "test_vc_private_key_path": None,
     }
     assert (
         sdk.create_offloading_session.await_args.kwargs["workload_type"]

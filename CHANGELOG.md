@@ -2,6 +2,24 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-27 — 内置联调三方私钥并解析 VC1 network_abilities
+
+### 修改原因
+
+- Agent B 在 WSL 中发布测试能力时仍默认读取 `~/lpx/cert/third-party/private-key.pem`，展开为不存在的 `/root/lpx/...` 后导致 `register_capabilities` 失败；仅打包公钥无法完成 VC 签发。
+- 现网 IDM 将运营商能力放在 `vc1.claims.network_abilities[]`，原 Python 仅解析旧字段 `abilities/agent_attribute`，因此接口成功但日志显示 `abilities=[]`。
+
+### 修改方式
+
+- 按封闭测试要求，将匹配的三方 P-256 测试私钥作为 Wheel/AAR 相对资源 `certs/third-party-capability-private-key.pem` 打包；Python 默认直接读取包资源，Android `AgentSdk.create` 自动导入应用私有目录。
+- Python `--third-party-private-key` 和 `--test-third-party-private-key` 改为仅用于可选覆盖，默认不再传入任何宿主机路径；Android example 删除应用侧私钥资源查找和手工导入。
+- Python/Android 优先解析 `vc1.claims.network_abilities[]`，同时保留旧 `abilities/agent_attribute` 兼容；Agent B 日志明确输出 `network_abilities` 和 `valid_until`。
+
+### 验证内容
+
+- Python 测试验证包内公私钥匹配、默认无路径签发的 VC 可由包内公钥验证，并覆盖现网 `network_abilities` 响应解析。
+- Python 源码编译、全量测试和 Wheel 内容检查通过；Android 按当前联调优先要求只做代码与资源静态检查，不等待完整 Gradle 构建。
+
 ## 2026-08-27 — 封闭联调暂时关闭 SDK 入站 proof 验签
 
 ### 修改原因

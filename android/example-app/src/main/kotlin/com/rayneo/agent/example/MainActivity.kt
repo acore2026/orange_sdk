@@ -73,20 +73,6 @@ class MainActivity : Activity() {
             return
         }
         val value = AgentSdk.create(service)
-        if (config.testCapabilities.isNotEmpty()) {
-            val keyResource = resources.getIdentifier(
-                "test_third_party_private_key",
-                "raw",
-                packageName,
-            )
-            if (keyResource == 0) {
-                status.text = "Missing local raw/test_third_party_private_key.pem"
-                return
-            }
-            resources.openRawResource(keyResource).use { input ->
-                value.importTestCapabilityIssuerPrivateKey(input.readBytes())
-            }
-        }
         value.restoreLocalProfile(
             AgentProfile(config.agentId, config.agentName, buildJsonObject { })
         )

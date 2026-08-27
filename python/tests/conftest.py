@@ -102,7 +102,10 @@ class FakeRuntime:
                     "valid_until": "2027-08-19T00:00:00Z",
                     "claims": {
                         "agent_id": LOCAL_ID,
-                        "abilities": ["compute_offloading", "agent_discovery"],
+                        "network_abilities": [
+                            "compute_offloading",
+                            "agent_discovery",
+                        ],
                     },
                 },
             }

@@ -403,8 +403,7 @@ await sdk.register_capabilities(
     priority=1,
     credentials=[profile.identity_vc],
     capabilities=["robot-control", "voice"],
-    # 省略时默认读取 ~/lpx/cert/third-party/private-key.pem
-    test_vc_private_key_path="/root/lpx/cert/third-party/private-key.pem",
+    # test_vc_private_key_path 省略时使用 Wheel 内置的联调测试私钥
 )
 ```
 
@@ -412,9 +411,11 @@ await sdk.register_capabilities(
 `did:thirdpartyissuer@6gc.mnc015.mcc234.3gppnetwork` 作为 `issuer`，签名原文
 兼容现有 IDM 测试规则：只覆盖 `context/id/type/issuer/valid_from/valid_until/claims`
 七个字段，采用排序紧凑 JSON、P-256 ECDSA/SHA-256 和 DER Base64 签名。
-该私钥只从外部文件读取，不会进入 Wheel。此入口仅用于联调；正式环境应由
-独立能力认证服务签发 VC，再通过 `credentials` 发布。Android 也支持相同的
-能力列表输入，但必须先将测试机构私钥导入应用私有目录，详见 Android 指南。
+测试公私钥分别位于 Wheel 包内 `agent_sdk/certs/` 下的
+`third-party-capability-public-key.pem` 和
+`third-party-capability-private-key.pem`，均通过包相对资源读取。可通过
+`test_vc_private_key_path` 显式覆盖私钥，但正常联调不需要配置路径。此入口仅
+用于联调；正式环境应由独立能力认证服务签发 VC，再通过 `credentials` 发布。
 
 AgentRuntime 随后通过已建立的 WebSocket 下发核心网请求：
 
@@ -841,11 +842,10 @@ A 端也会默认连续执行能力发现、建组和消息发送。能力发现
   `B_MESSAGE_RECEIVED`；
 - A 的发送调用中只有 `group_id` 和 `target_agent_id`，没有由用户提供的 B IP/端口。
 
-测试能力 VC 默认由 B 使用 `~/lpx/cert/third-party/private-key.pem` 签发。
-对应公钥随 Wheel 打包在
-`agent_sdk/certs/third-party-capability-public-key.pem`，SDK 和测试通过包相对
-资源读取，不依赖 `/root/lpx/cert/third-party/public-key.pem`。私钥在其他位置
-时，B 传 `--third-party-private-key`。如果需要在每个主动调用前
+测试能力 VC 默认由 B 使用 Wheel 内置的三方测试私钥签发，对应公私钥都位于
+`agent_sdk/certs/third-party-capability-*-key.pem`，不依赖
+`/root/lpx/cert/third-party`。只有需要覆盖测试私钥时才传
+`--third-party-private-key`。如果需要在每个主动调用前
 人工确认，可显式增加 `--prompt`；B 不传 `--exit-after-message` 时，在收到
 第一条消息后继续常驻。SDK 文件日志在 `sdk.init()` 中完成初始化，
 脚本启动到 `init` 之前的状态会直接输出到终端。

@@ -76,21 +76,15 @@ fields as the Python SDK with P-256 ECDSA/SHA-256, and appends the result to the
 existing wire-level `vc_list`. AgentRuntime and the network-side HTTP contract
 do not change.
 
-Android cannot read the build host's `~/lpx/cert` at runtime. For this lab-only
-case, import the test issuer key once from an application resource; the SDK
-persists it under the app's `noBackupFilesDir/agent-sdk/test-capability-vc`:
-
-The matching third-party public key is already packaged in the AAR at
-`certs/third-party-capability-public-key.pem` and is loaded as a classpath-relative
-SDK resource. Applications do not configure an absolute public-key path. Only
-the private key remains external and must be imported for this lab-only issuer.
+For this closed lab profile, both the third-party public and private test keys
+are packaged in the AAR under `certs/third-party-capability-*-key.pem`. They are
+loaded as classpath-relative SDK resources; `AgentSdk.create` automatically
+copies the private test key into app-private storage. Applications do not
+configure or import a key path. This deliberately shared private key makes this
+profile unsuitable for production.
 
 ```kotlin
 val sdk = AgentSdk.create(vpnService)
-resources.openRawResource(R.raw.test_third_party_private_key).use { input ->
-    sdk.importTestCapabilityIssuerPrivateKey(input.readBytes())
-}
-
 sdk.registerCapabilities(
     agentId = profile.agentId,
     priority = 1,
@@ -99,18 +93,8 @@ sdk.registerCapabilities(
 )
 ```
 
-For the repository example, provision the ignored test resource before building:
-
-```bash
-mkdir -p android/example-app/src/main/res/raw
-cp ~/lpx/cert/third-party/private-key.pem \
-  android/example-app/src/main/res/raw/test_third_party_private_key.pem
-```
-
-The key is excluded from Git and the Agent SDK AAR. It is included in the local
-example APK when this test resource is present, so this flow must not be used in
-production. Production applications should publish VCs issued by an external
-capability authority through `credentials`.
+Production applications should publish VCs issued by an external capability
+authority through `credentials` and must use a build without this lab key.
 
 To rebuild the shipped ARM64 library after native source changes:
 

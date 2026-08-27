@@ -31,14 +31,14 @@ def embedded_test_capability_public_key_pem() -> bytes:
     )
 
 
-def default_test_capability_private_key_path() -> Path:
-    """Return the lab-only third-party issuer key location.
+def embedded_test_capability_private_key_pem() -> bytes:
+    """Read the lab-only issuer private key from the installed SDK package."""
 
-    The key is deliberately read from outside the package. It must never be
-    included in a Wheel or copied to a production Agent device.
-    """
-
-    return Path.home() / "lpx" / "cert" / "third-party" / "private-key.pem"
+    return (
+        resources.files("agent_sdk.certs")
+        .joinpath("third-party-capability-private-key.pem")
+        .read_bytes()
+    )
 
 
 def issue_test_capability_vcs(
@@ -103,18 +103,23 @@ def issue_test_capability_vcs(
             field="validity_days",
         )
 
-    resolved_key_path = Path(
-        private_key_path or default_test_capability_private_key_path()
-    ).expanduser()
+    resolved_key_path: Path | None = None
+    key_source = "SDK resource agent_sdk/certs/third-party-capability-private-key.pem"
     try:
+        if private_key_path is None:
+            private_key_pem = embedded_test_capability_private_key_pem()
+        else:
+            resolved_key_path = Path(private_key_path).expanduser()
+            private_key_pem = resolved_key_path.read_bytes()
+            key_source = str(resolved_key_path)
         private_key = serialization.load_pem_private_key(
-            resolved_key_path.read_bytes(),
+            private_key_pem,
             password=None,
         )
     except (OSError, ValueError, TypeError) as exc:
         raise AgentSdkError(
             ErrorCode.SIGNATURE_ERROR,
-            f"cannot load test capability issuer private key: {resolved_key_path}",
+            f"cannot load test capability issuer private key: {key_source}",
             field="test_vc_private_key_path",
         ) from exc
     if not isinstance(private_key, ec.EllipticCurvePrivateKey) or not isinstance(

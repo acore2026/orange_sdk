@@ -30,7 +30,14 @@ internal fun embeddedTestCapabilityIssuerPublicKeyPem(): ByteArray =
         "Embedded test capability issuer public key is missing"
     )
 
-/** Lab-only issuer. The private key lives outside the AAR in app-private storage. */
+internal fun embeddedTestCapabilityIssuerPrivateKeyPem(): ByteArray =
+    TestCapabilityVcIssuer::class.java.getResourceAsStream(
+        "/certs/third-party-capability-private-key.pem"
+    )?.use { it.readBytes() } ?: throw signatureError(
+        "Embedded test capability issuer private key is missing"
+    )
+
+/** Lab-only issuer. The packaged test key is copied to app-private storage. */
 internal class TestCapabilityVcIssuer(
     private val privateKeyFile: File,
 ) {

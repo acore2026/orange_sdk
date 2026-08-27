@@ -441,10 +441,10 @@ def parser() -> argparse.ArgumentParser:
     )
     value.add_argument(
         "--test-third-party-private-key",
-        default="~/lpx/cert/third-party/private-key.pem",
+        default=None,
         help=(
-            "lab-only P-256 issuer private key; read only when "
-            "--test-capability is present"
+            "optional lab-only P-256 issuer private-key override; the SDK "
+            "package resource is used by default"
         ),
     )
     value.add_argument("--update-skill", default="camera")

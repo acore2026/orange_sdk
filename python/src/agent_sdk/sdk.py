@@ -788,9 +788,11 @@ class AgentSdk:
         claims = vc1.get("claims")
         abilities: tuple[str, ...] = ()
         if isinstance(claims, Mapping):
-            raw_abilities = claims.get("abilities")
+            raw_abilities = claims.get("network_abilities")
+            if raw_abilities is None:
+                raw_abilities = claims.get("abilities")
             if isinstance(raw_abilities, list) and all(
-                isinstance(item, str) for item in raw_abilities
+                isinstance(item, str) and item for item in raw_abilities
             ):
                 abilities = tuple(raw_abilities)
             elif isinstance(claims.get("agent_attribute"), str):

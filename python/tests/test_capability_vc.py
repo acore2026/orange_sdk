@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 from cryptography.exceptions import InvalidSignature
@@ -14,6 +13,7 @@ from agent_sdk import AgentSdkError, ErrorCode
 from agent_sdk.capability_vc import (
     TEST_CAPABILITY_ISSUER_DID,
     TEST_CAPABILITY_ISSUER_KEY_ID,
+    embedded_test_capability_private_key_pem,
     embedded_test_capability_public_key_pem,
     issue_test_capability_vcs,
 )
@@ -97,18 +97,15 @@ def test_issue_test_capability_vcs_matches_idm_signature_format(tmp_path):
         )
 
 
-def test_embedded_third_party_public_key_matches_lab_private_key_when_available():
+def test_embedded_third_party_public_and_private_keys_match():
     public_key = serialization.load_pem_public_key(
         embedded_test_capability_public_key_pem()
     )
     assert isinstance(public_key, ec.EllipticCurvePublicKey)
     assert isinstance(public_key.curve, ec.SECP256R1)
 
-    private_key_path = Path.home() / "lpx/cert/third-party/private-key.pem"
-    if not private_key_path.is_file():
-        pytest.skip("lab-only third-party private key is not installed")
     private_key = serialization.load_pem_private_key(
-        private_key_path.read_bytes(), password=None
+        embedded_test_capability_private_key_pem(), password=None
     )
     assert isinstance(private_key, ec.EllipticCurvePrivateKey)
     assert (
@@ -120,6 +117,23 @@ def test_embedded_third_party_public_key_matches_lab_private_key_when_available(
             serialization.Encoding.DER,
             serialization.PublicFormat.SubjectPublicKeyInfo,
         )
+    )
+
+
+def test_issue_test_capability_vcs_uses_embedded_private_key_by_default():
+    credential = issue_test_capability_vcs(
+        agent_id="did:example:agent-a",
+        agent_name="Agent Alpha",
+        capabilities=["robot-control"],
+        now=datetime(2026, 8, 20, tzinfo=timezone.utc),
+    )[0]
+    public_key = serialization.load_pem_public_key(
+        embedded_test_capability_public_key_pem()
+    )
+    public_key.verify(
+        base64.b64decode(credential["proof"]["signature_value"]),
+        _signing_message(credential),
+        ec.ECDSA(hashes.SHA256()),
     )
 
 

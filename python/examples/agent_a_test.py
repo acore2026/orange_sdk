@@ -175,7 +175,13 @@ async def run_agent_a(
             "POST /idm/v1/network-ability，取得 Agent A 的运营商网络能力凭证。",
         )
         ability = await client.get_network_ability(profile.agent_id)
-        _emit("NETWORK_ABILITY_READY", abilities=ability.abilities)
+        _emit(
+            "NETWORK_ABILITY_READY",
+            network_abilities=ability.abilities,
+            valid_until=(
+                ability.valid_until.isoformat() if ability.valid_until else None
+            ),
+        )
 
         await _before_step(
             gate,

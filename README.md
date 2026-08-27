@@ -29,11 +29,10 @@ Native Core。
 
 Linux/Python 和 Android 的 AgentCard 发布接口默认接收已经签发的 VC。封闭
 联调时也可传 `capabilities=[...]`，SDK 为每个能力生成一张 IDM 兼容的
-`CapabilityCredential` 后放入既有 `vc_list`。Python 从外部
-`~/lpx/cert/third-party/private-key.pem` 读取测试机构 P-256 私钥；Android 需先
-把同一测试私钥导入应用私有目录。对应的三方认证公钥已经作为 SDK 相对资源
-打包进 Wheel/AAR，不依赖宿主机绝对路径；测试私钥不会打包进 Wheel、AAR 或
-Git。正式环境仍应传入外部认证机构签发好的 VC。
+`CapabilityCredential` 后放入既有 `vc_list`。测试机构 P-256 公私钥已经作为
+SDK 相对资源打包进 Wheel/AAR，不依赖
+`/root/lpx/cert/third-party`；这是明确包含共享测试私钥的封闭联调 Profile，
+不得用于生产。正式环境仍应传入外部认证机构签发好的 VC。
 
 核心网主动下行不再反向 POST 到端侧。Linux/Android SDK 初始化时主动连接
 `/v1/acn/downlink-websocket`，WebSocket 握手与后续主动上行 REST 接口使用同一

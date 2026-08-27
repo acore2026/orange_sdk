@@ -49,7 +49,9 @@ async def test_agent_a_discovers_b_groups_and_sends_from_group_cache():
         identity_vc={"id": "vc0-a"},
     )
     ability = SimpleNamespace(
-        abilities=("agent_discovery",), ability_vc={"id": "vc1-a"}
+        abilities=("agent_discovery",),
+        ability_vc={"id": "vc1-a"},
+        valid_until=None,
     )
     target = SimpleNamespace(
         agent_id="did:example:b",
@@ -120,7 +122,9 @@ async def test_agent_b_publishes_capability_and_can_exit_after_message_event():
         identity_vc={"id": "vc0-b"},
     )
     ability = SimpleNamespace(
-        abilities=("agent_discovery",), ability_vc={"id": "vc1-b"}
+        abilities=("agent_discovery",),
+        ability_vc={"id": "vc1-b"},
+        valid_until=None,
     )
     sdk = SimpleNamespace(
         register_network_message_listener=MagicMock(return_value=lambda: None),
@@ -151,6 +155,10 @@ async def test_agent_b_publishes_capability_and_can_exit_after_message_event():
     assert sdk.register_capabilities.await_args.kwargs["capabilities"] == [
         "text"
     ]
+    assert (
+        sdk.register_capabilities.await_args.kwargs["test_vc_private_key_path"]
+        is None
+    )
     sdk.close.assert_awaited_once()
 
 
