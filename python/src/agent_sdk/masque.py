@@ -77,6 +77,28 @@ class ConnectIpQuicProtocol(QuicConnectionProtocol):
         self.connect_stream_id: int | None = None
         self._keep_alive_uid = 0
 
+    async def wait_connected(self) -> None:
+        try:
+            await super().wait_connected()
+        except asyncio.CancelledError:
+            # aioquic shields its internal handshake future. When our outer
+            # timeout cancels this coroutine, the future later receives the
+            # connection-close exception and Python 3.14 otherwise reports
+            # "exception in shielded future" as an unhandled secondary error.
+            waiter = self._connected_waiter
+            if waiter is not None:
+                waiter.add_done_callback(self._consume_future_exception)
+            raise
+
+    @staticmethod
+    def _consume_future_exception(future: asyncio.Future[Any]) -> None:
+        if future.cancelled():
+            return
+        try:
+            future.exception()
+        except Exception:
+            return
+
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, ConnectionTerminated):
             log_event(
@@ -250,6 +272,16 @@ class AioquicConnectIpTransport:
             server_name=self._server_name or host,
             server_certificate_verification="disabled",
         )
+        phase = "QUIC handshake"
+        log_event(
+            self._logger,
+            logging.INFO,
+            "masque_connect_start",
+            server=f"{host}:{port}",
+            local_address=self._local_address or "OS-selected",
+            timeout_seconds=self._connect_timeout,
+            phase=phase,
+        )
         try:
             if self._local_address is None:
                 self._context = connect(
@@ -279,6 +311,7 @@ class AioquicConnectIpTransport:
                 path=self._url.path or "/",
                 authorization=self._authorization,
             )
+            phase = "CONNECT-IP response"
             status = await asyncio.wait_for(protocol.response, self._connect_timeout)
             if status < 200 or status >= 300:
                 raise AgentSdkError(
@@ -307,6 +340,22 @@ class AioquicConnectIpTransport:
         except AgentSdkError:
             await self.close()
             raise
+        except asyncio.TimeoutError as exc:
+            await self.close()
+            source = self._local_address or "OS-selected"
+            raise AgentSdkError(
+                ErrorCode.MASQUE_CONNECT_FAILED,
+                f"MASQUE {phase} timed out after {self._connect_timeout:g}s: "
+                f"server={host}:{port}, local_address={source}; verify the "
+                "MASQUE UDP port, firewall, server process, and source-IP route",
+                retryable=True,
+                details={
+                    "phase": phase,
+                    "server": f"{host}:{port}",
+                    "local_address": source,
+                    "timeout_seconds": self._connect_timeout,
+                },
+            ) from exc
         except Exception as exc:
             await self.close()
             raise AgentSdkError(

@@ -1,7 +1,8 @@
 """Agent B: publish a capability, accept Agent A's group, and receive messages.
 
-Each outbound SDK operation waits for Enter by default. Network-initiated group
-messages are handled immediately; an invitation is accepted without prompting.
+Outbound SDK operations run continuously by default. Use ``--prompt`` for
+manual stepping. Network-initiated group messages are handled immediately; an
+invitation is accepted without prompting.
 """
 
 from __future__ import annotations
@@ -240,9 +241,9 @@ def parser() -> argparse.ArgumentParser:
         default="INFO",
     )
     value.add_argument(
-        "--no-prompt",
+        "--prompt",
         action="store_true",
-        help="run setup operations without waiting for Enter",
+        help="wait for Enter before each outbound SDK setup operation",
     )
     value.add_argument(
         "--exit-after-message",
@@ -260,14 +261,28 @@ def parser() -> argparse.ArgumentParser:
 
 
 async def main(args: argparse.Namespace) -> None:
-    gate = None if args.no_prompt else EnterStepGate()
+    _emit("TEST_STARTING", interactive=args.prompt)
+    gate = EnterStepGate() if args.prompt else None
     await run_agent_b(args, gate=gate)
 
 
 if __name__ == "__main__":
+    arguments = parser().parse_args()
     try:
-        asyncio.run(main(parser().parse_args()))
+        asyncio.run(main(arguments))
     except InteractiveDemoAborted as exc:
         print(f"[已终止] {exc}")
     except KeyboardInterrupt:
         print("[已终止] 收到 Ctrl+C")
+    except Exception as exc:
+        _emit(
+            "TEST_FAILED",
+            error_type=type(exc).__name__,
+            error=str(exc) or repr(exc),
+            error_code=getattr(getattr(exc, "code", None), "value", None),
+            runtime=f"http://{arguments.runtime_ip}:{arguments.runtime_port}",
+            masque_url=arguments.masque_url,
+            local_vlan_ip=arguments.local_vlan_ip,
+            sdk_log_file=arguments.log_file,
+        )
+        raise

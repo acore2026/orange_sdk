@@ -809,7 +809,8 @@ sudo -E .venv/bin/python examples/agent_b_test.py \
   --log-file ./logs/agent-b-test.log
 ```
 
-逐次按回车，直到 B 输出 `B_READY`。然后在设备 A 启动：
+B 会直接连续执行初始化和能力发布；等待它输出 `B_READY`后，
+再在设备 A 启动：
 
 ```bash
 cd /path/to/orange_sdk/python
@@ -824,7 +825,7 @@ sudo -E .venv/bin/python examples/agent_a_test.py \
   --log-file ./logs/agent-a-test.log
 ```
 
-A 端同样每按一次回车只执行当前显示的下一项操作。能力发现结果中存在多个相同
+A 端也会默认连续执行能力发现、建组和消息发送。能力发现结果中存在多个相同
 能力的 Agent 时，可增加 `--target-agent-id <B的Agent ID>` 精确选择。建组邀请和
 群组配置是网络下行事务，两个脚本会立即处理，不额外等待回车，避免阻塞建组流程。
 
@@ -836,8 +837,33 @@ A 端同样每按一次回车只执行当前显示的下一项操作。能力发
 - A 的发送调用中只有 `group_id` 和 `target_agent_id`，没有由用户提供的 B IP/端口。
 
 测试能力 VC 默认由 B 使用 `~/lpx/cert/third-party/private-key.pem` 签发。
-密钥在其他位置时，B 传 `--third-party-private-key`。需要无人值守执行时增加
-`--no-prompt`；B 不传 `--exit-after-message` 时，在收到第一条消息后继续常驻。
+密钥在其他位置时，B 传 `--third-party-private-key`。如果需要在每个主动调用前
+人工确认，可显式增加 `--prompt`；B 不传 `--exit-after-message` 时，在收到
+第一条消息后继续常驻。SDK 文件日志在 `sdk.init()` 中完成初始化，
+脚本启动到 `init` 之前的状态会直接输出到终端。
+
+如果 `sdk.init()` 报告 `MASQUE QUIC handshake timed out after 10s`，表示
+`GET /v1/ue/info` 之后的 QUIC/UDP 握手未收到服务端响应，还没有进入
+CONNECT-IP HTTP 协商。先查看 SDK 日志：
+
+```bash
+tail -f ./logs/agent-b-test.log
+```
+
+再确认 `--local-vlan-ip` 确实存在于当前系统，并且绑定该源地址后能到达
+MASQUE 服务器：
+
+```bash
+ip addr show
+ip route get <MASQUE服务器IP> from <local-vlan-ip>
+sudo tcpdump -ni any udp port <MASQUE端口>
+```
+
+服务器侧应确认对应的是 UDP 监听端口，不是同端口的 TCP 服务：
+
+```bash
+ss -lunp | grep <MASQUE端口>
+```
 
 ## 6. 函数清单
 

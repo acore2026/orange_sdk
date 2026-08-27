@@ -35,7 +35,6 @@ def _base_arguments(module):
             "192.168.1.10",
             "--masque-url",
             "https://192.168.3.10:4433/.well-known/masque/ip",
-            "--no-prompt",
         ]
     )
 
@@ -43,6 +42,7 @@ def _base_arguments(module):
 async def test_agent_a_discovers_b_groups_and_sends_from_group_cache():
     module = _load_example("agent_a_test")
     args = _base_arguments(module)
+    assert args.prompt is False
     profile = SimpleNamespace(
         agent_id="did:example:a",
         agent_name="Agent-A",
@@ -112,6 +112,7 @@ async def test_agent_a_discovers_b_groups_and_sends_from_group_cache():
 async def test_agent_b_publishes_capability_and_can_exit_after_message_event():
     module = _load_example("agent_b_test")
     args = _base_arguments(module)
+    assert args.prompt is False
     args.exit_after_message = True
     profile = SimpleNamespace(
         agent_id="did:example:b",
