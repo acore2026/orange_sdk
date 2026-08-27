@@ -9,11 +9,12 @@
 
 ## 1. 说明范围
 
-本文说明 Agent SDK 当前使用的消息级 `proof` 生成和校验方法，覆盖以下三类消息：
+本文说明 Agent SDK 当前使用的消息级 `proof` 生成和校验方法，覆盖以下四类消息：
 
 1. SDK 发往 AgentRuntime 的非身份申请控制面写请求以及 H-COMPUTE 算力卸载请求；
 2. 核心网通过 AgentRuntime 下发的 `acf_group_config` 群组配置；
 3. Agent 之间通过 `POST /A2A/message` 发送的定向消息。
+4. 内测三方能力机构签发的 `AgentCapabilityCredential`。
 
 > 联调状态说明（2026-08-27）：Python Wheel 和 Android AAR 当前默认收包路径已
 > 暂停核心网群组配置 proof 与 A2A proof 的验签，只保留字段校验、缓存、路由和
@@ -28,8 +29,6 @@
   `metadata` JSON Container 作为单个 LP16 字段，不使用本文的 `proof`
   算法。SDK 固定必填字段 `region/os/version` 的顺序，其他字符串字段
   按名称排序，保证签名字节与 HTTP/N-01 传输的 Metadata JSON 完全一致；
-- 内测三方能力机构签发 Capability VC 时使用的 `creator + signature_value`。
-  该测试 VC 使用另一套凭证签名格式，不属于本文的消息级 proof。
 
 当前实现保留既有 snake_case 线上字段，并使用项目约定的排序紧凑 JSON
 规范化。因此本文将其称为 **ACN JsonWebSignature2020 兼容 Profile**。它不是
@@ -80,7 +79,7 @@ SDK 生成的 proof 格式如下：
 |---|---|---|
 | SDK 控制面上行请求 | `authentication` | 网侧根据已经登记的 Agent/设备身份取得端侧公钥 |
 | `acf_group_config` | `assertionMethod` | SDK 内置的核心网 P-256 公钥 |
-| A2A 定向消息 | `authentication` | 已通过核心网 proof 校验并提交的群组快照中，发送方成员的 `did_key` |
+| A2A 定向消息 | `authentication` | 当前联调仍生成出站 proof；最新群组成员不下发验签公钥，接收端暂不执行该 proof 验签 |
 
 不得直接读取未验签消息里的 `verification_method`，然后用它指定的公钥验证同一
 条消息。`verification_method` 是受签名保护的声明字段，不是当前 SDK 的信任锚。
@@ -403,18 +402,28 @@ Python 和 Android 测试使用以下 proofOptions：
 `proof_purpose=assertionMethod`。当前联调 Profile 跳过该调用，直接继续解析
 成员、校验本机 Agent TUN IP 和端口、提交群组快照并安装动态路由。
 
-群组成员里的 `did_key` 不能用于验证承载这些成员信息的同一条群组配置，否则会
-形成消息自带公钥、自证消息有效的错误信任链。
+最新群组成员只包含 `agent_id/agent_name/service_endpoints/agent_ip/skills`，不包含
+`did_key`。群组配置自身只能使用 SDK 内置的核心网公钥验签，不能从待验消息中
+推导信任锚。
 
 ### 8.3 A2A 定向消息
 
 发送端先构造不含 proof 的完整 A2A 消息，使用本机设备私钥和
 `proof_purpose=authentication` 生成 proof，随后发送到从已提交群组缓存解析出的
-`agent_ip:tcp_port`。
+目标成员的 `service_endpoints`；SDK 使用其中的协议、端口和路径，并以已验证的
+`agent_ip` 作为实际目的地址。
 
-安全验签恢复后，接收端根据 `group_id + src_agent_id` 从群组快照取得发送方
-`did_key`，解析为 P-256 公钥后校验 proof。当前联调 Profile 跳过该验签，在
-目标、成员和消息字段校验通过后把 `payload` 交给应用 listener。
+当前群组配置没有携带发送方验签公钥，因此接收端暂不校验 A2A proof；它仍会
+校验目标、群组成员关系和消息字段，再把 `payload` 交给应用 listener。后续恢复
+验签时必须新增网侧可信公钥分发或查询机制，不能使用消息自带公钥。
+
+### 8.4 三方 Agent 能力凭证
+
+测试签发器生成 `VerifiableCredential + AgentCapabilityCredential`，能力名位于
+`claims.skill_name`。凭证业务文档是不含 `proof` 的完整 VC 对象；proof 使用
+`proof_purpose=assertionMethod`，`verification_method` 固定为三方测试机构
+key ID，并按第 4、5 章生成 ES256 分离 JWS。旧的
+`creator + signature_value` 格式不再生成。
 
 ## 9. 完整性范围和上层安全边界
 

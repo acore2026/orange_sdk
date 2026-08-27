@@ -12,11 +12,9 @@ enum class NetworkMessageAction { ACCEPT, REJECT, ACK }
 data class GroupMemberWire(
     @SerialName("agent_id") val agentId: String,
     @SerialName("agent_name") val agentName: String,
-    val capabilities: List<String>,
+    val skills: List<String>,
     @SerialName("agent_ip") val agentIp: String,
-    @SerialName("tcp_port") val tcpPort: String,
-    @SerialName("udp_port") val udpPort: String,
-    @SerialName("did_key") val didKey: String,
+    @SerialName("service_endpoints") val serviceEndpoints: String,
 )
 
 @Serializable
@@ -24,6 +22,7 @@ data class GroupConfigWire(
     @SerialName("notification_type") val notificationType: String,
     val version: String,
     val timestamp: String,
+    @SerialName("target_agent_id") val targetAgentId: String? = null,
     @SerialName("group_id") val groupId: String,
     val members: Map<String, GroupMemberWire>,
     val proof: JsonObject,
@@ -37,7 +36,11 @@ data class GroupMemberInfo(
     val tcpPort: Int,
     val udpPort: Int,
     val didKey: String,
-)
+    val serviceEndpoint: String = "",
+) {
+    val skills: List<String>
+        get() = capabilities
+}
 
 data class GroupConfigSnapshot(
     val groupId: String,

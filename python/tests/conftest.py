@@ -180,10 +180,10 @@ class AckNetworkListener:
 
 class FakePeerMessenger:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, int, Mapping[str, Any], float]] = []
+        self.calls: list[tuple[str, Mapping[str, Any], float]] = []
 
-    async def send(self, ip, port, body, timeout):
-        self.calls.append((ip, port, body, timeout))
+    async def send(self, endpoint, body, timeout):
+        self.calls.append((endpoint, body, timeout))
         return {"status": "OK"}
 
 
@@ -270,7 +270,6 @@ def group_payload(
     timestamp: datetime | None = None,
     peer_ip: str = "8.8.8.8",
     peer_tcp_port: str = "4001",
-    peer_udp_port: str = "28443",
 ) -> dict[str, Any]:
     timestamp = timestamp or datetime.now(timezone.utc)
     return {
@@ -282,20 +281,18 @@ def group_payload(
             "agent1": {
                 "agent_id": LOCAL_ID,
                 "agent_name": "Agent A",
-                "capabilities": ["text"],
+                "skills": ["text"],
                 "agent_ip": "8.8.8.7",
-                "tcp_port": "4001",
-                "udp_port": "28443",
-                "did_key": "did:key:local",
+                "service_endpoints": "http://agent-a.example:4001/A2A/message",
             },
             "arbitrary-label": {
                 "agent_id": PEER_ID,
                 "agent_name": "Agent B",
-                "capabilities": ["text", "voice"],
+                "skills": ["text", "voice"],
                 "agent_ip": peer_ip,
-                "tcp_port": peer_tcp_port,
-                "udp_port": peer_udp_port,
-                "did_key": "did:key:peer",
+                "service_endpoints": (
+                    f"http://agent-b.example:{peer_tcp_port}/A2A/message"
+                ),
             },
         },
         "proof": {"jws": "test-proof"},

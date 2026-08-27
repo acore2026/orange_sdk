@@ -13,7 +13,9 @@ class RecordingGroupListener:
         self.messages.append((group_id, sender_agent_id, payload))
 
 
-async def test_a2a_signature_key_comes_from_committed_member(sdk_fixture):
+async def test_a2a_delivery_uses_committed_member_without_inbound_verification(
+    sdk_fixture,
+):
     sdk = sdk_fixture["sdk"]
     server = sdk_fixture["server"]
     runtime = sdk_fixture["runtime"]
@@ -39,5 +41,5 @@ async def test_a2a_signature_key_comes_from_committed_member(sdk_fixture):
         }
     )
 
-    assert sdk_fixture["signature_verifier"].keys == ["did:key:peer"]
+    assert sdk_fixture["signature_verifier"].keys == []
     assert listener.messages == [("g1", PEER_ID, {"hello": "world"})]

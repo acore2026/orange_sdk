@@ -263,8 +263,7 @@ class AgentSdk internal constructor(
                 "A2A message targets another agent",
             )
         }
-        val sender = groupCache!!.resolve(groupId, senderId)
-        messageSignatureVerifier.verifyA2a(payload, sender.didKey)
+        groupCache!!.resolve(groupId, senderId)
         val userPayload = payload["payload"] as? JsonObject ?: throw AgentSdkException(
             ErrorCode.INVALID_ARGUMENT,
             "A2A payload must be a JSON object",
@@ -323,8 +322,7 @@ class AgentSdk internal constructor(
             put("proof", messageSigner.signA2a(unsigned))
         }
         val response = peerMessenger.send(
-            target.agentIp,
-            target.tcpPort,
+            target.serviceEndpoint,
             body,
             (timeoutSeconds * 1000).toLong(),
         )
@@ -459,10 +457,12 @@ class AgentSdk internal constructor(
                 "credentials",
             )
         }
+        val serviceEndpoints = "http://$agentTunIp:$localTcpPort/A2A/message"
         return operation("POST", "/arf/v1/agent-cards", buildJsonObject {
             put("request_id", UUID.randomUUID().toString())
             put("agent_id", agentId)
             put("priority", priority)
+            put("service_endpoints", serviceEndpoints)
             put("vc_list", JsonArray(vcList))
         })
     }

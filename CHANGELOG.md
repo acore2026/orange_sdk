@@ -2,6 +2,27 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-27 — 补齐 AgentCard service_endpoints 并消除 H3 SETTINGS 竞态
+
+### 修改原因
+
+- 真实 `POST /arf/v1/agent-cards` 返回 `invalid_service_endpoints`；现网 H-PROFILE 要求顶层 `service_endpoints`，原 SDK 请求体未携带。
+- 测试能力 VC 仍使用旧 `CapabilityCredential + creator/signature_value + claims.capability`，而现网 IDM 校验 `AgentCapabilityCredential`、`claims.skill_name` 和 ACN JsonWebSignature2020。
+- 偶发 CONNECT-IP HTTP 200 后立即返回 `peer did not negotiate HTTP/3 Datagram`；客户端直接读取 `received_settings or {}`，在 SETTINGS 尚未发布时会误判为服务端不支持。
+- 现网群组配置成员已改为 `service_endpoints + agent_ip + skills`，原 SDK 仍要求 `tcp_port/udp_port/capabilities/did_key`，会在建组成功后的配置缓存阶段拒绝消息。
+
+### 修改方式
+
+- Python/Android 从 SDK 已知的 Agent TUN IP、本地 TCP 端口和固定 `/A2A/message` 自动构造 `service_endpoints`，纳入 `/arf/v1/agent-cards` 请求和外层 proof，不增加用户参数。
+- 两端测试能力 VC 改为 `AgentCapabilityCredential`，能力写入 `claims.skill_name`，proof 改为 `assertionMethod` 的 ES256 分离 JWS。
+- Python MASQUE 协议层增加 HTTP/3 SETTINGS future；收到 CONNECT-IP 2xx 后等待 SETTINGS，再检查并记录 `H3_DATAGRAM`，连接关闭时同步结束等待。
+- Python/Android 群组缓存按最新字段解析 `service_endpoints/skills`；SDK 从完整 URL 提取协议、端口和路径，并强制使用已验证 `agent_ip` 作为实际目标地址，`send_message` 的用户参数保持不变。
+
+### 验证内容
+
+- Python 测试覆盖自动 `service_endpoints`、最新群组成员格式及隐藏式目标 URL 解析、标准能力 VC 自签自验与篡改拒绝、SETTINGS 晚于 CONNECT 响应时的等待行为。
+- Python 源码编译和全量测试通过；Android 完成代码静态检查，Gradle 单测因当前环境未配置 `ANDROID_HOME`、不存在 `android/local.properties` 而未能启动（非源码测试失败）。
+
 ## 2026-08-27 — 内置联调三方私钥并解析 VC1 network_abilities
 
 ### 修改原因

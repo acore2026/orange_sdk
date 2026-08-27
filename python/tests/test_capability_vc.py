@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import base64
-import json
 from datetime import datetime, timezone
 
 import pytest
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from agent_sdk import AgentSdkError, ErrorCode
@@ -17,6 +14,7 @@ from agent_sdk.capability_vc import (
     embedded_test_capability_public_key_pem,
     issue_test_capability_vcs,
 )
+from agent_sdk.security import verify_proof
 
 
 def _write_private_key(tmp_path):
@@ -32,27 +30,6 @@ def _write_private_key(tmp_path):
     return private_key, private_key_path
 
 
-def _signing_message(credential):
-    payload = {
-        field: credential[field]
-        for field in (
-            "context",
-            "id",
-            "type",
-            "issuer",
-            "valid_from",
-            "valid_until",
-            "claims",
-        )
-    }
-    return json.dumps(
-        payload,
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-
 def test_issue_test_capability_vcs_matches_idm_signature_format(tmp_path):
     private_key, private_key_path = _write_private_key(tmp_path)
 
@@ -65,7 +42,7 @@ def test_issue_test_capability_vcs_matches_idm_signature_format(tmp_path):
     )
 
     assert len(credentials) == 2
-    assert [item["claims"]["capability"] for item in credentials] == [
+    assert [item["claims"]["skill_name"] for item in credentials] == [
         "robot-control",
         "voice",
     ]
@@ -73,7 +50,7 @@ def test_issue_test_capability_vcs_matches_idm_signature_format(tmp_path):
         assert credential["context"] == ["3gpp-ts-33.xxx-v20.0.0"]
         assert credential["type"] == [
             "VerifiableCredential",
-            "CapabilityCredential",
+            "AgentCapabilityCredential",
         ]
         assert credential["issuer"] == TEST_CAPABILITY_ISSUER_DID
         assert credential["valid_from"] == "2026-08-20T00:00:00Z"
@@ -81,19 +58,22 @@ def test_issue_test_capability_vcs_matches_idm_signature_format(tmp_path):
         assert credential["claims"]["agent_id"] == "did:example:agent-a"
         assert credential["claims"]["agent_name"] == "Agent Alpha"
         assert credential["claims"]["authorization_mode"] == "Mode2"
-        assert credential["proof"]["creator"] == TEST_CAPABILITY_ISSUER_KEY_ID
-        private_key.public_key().verify(
-            base64.b64decode(credential["proof"]["signature_value"]),
-            _signing_message(credential),
-            ec.ECDSA(hashes.SHA256()),
+        assert credential["proof"]["verification_method"] == (
+            TEST_CAPABILITY_ISSUER_KEY_ID
+        )
+        assert credential["proof"]["proof_purpose"] == "assertionMethod"
+        verify_proof(
+            credential,
+            private_key.public_key(),
+            expected_purpose="assertionMethod",
         )
 
-    credentials[0]["claims"]["capability"] = "tampered"
-    with pytest.raises(InvalidSignature):
-        private_key.public_key().verify(
-            base64.b64decode(credentials[0]["proof"]["signature_value"]),
-            _signing_message(credentials[0]),
-            ec.ECDSA(hashes.SHA256()),
+    credentials[0]["claims"]["skill_name"] = "tampered"
+    with pytest.raises(AgentSdkError):
+        verify_proof(
+            credentials[0],
+            private_key.public_key(),
+            expected_purpose="assertionMethod",
         )
 
 
@@ -130,10 +110,10 @@ def test_issue_test_capability_vcs_uses_embedded_private_key_by_default():
     public_key = serialization.load_pem_public_key(
         embedded_test_capability_public_key_pem()
     )
-    public_key.verify(
-        base64.b64decode(credential["proof"]["signature_value"]),
-        _signing_message(credential),
-        ec.ECDSA(hashes.SHA256()),
+    verify_proof(
+        credential,
+        public_key,
+        expected_purpose="assertionMethod",
     )
 
 
@@ -157,7 +137,7 @@ async def test_register_capabilities_accepts_existing_vcs_and_raw_capabilities(
     assert result.success is True
     assert (method, path) == ("POST", "/arf/v1/agent-cards")
     assert body["vc_list"][0]["id"] == "vc0"
-    assert [item["claims"]["capability"] for item in body["vc_list"][1:]] == [
+    assert [item["claims"]["skill_name"] for item in body["vc_list"][1:]] == [
         "robot-control",
         "voice",
     ]
@@ -166,6 +146,7 @@ async def test_register_capabilities_accepts_existing_vcs_and_raw_capabilities(
         for item in body["vc_list"][1:]
     )
     assert body["timestamp"] == "2026-08-19T00:00:00Z"
+    assert body["service_endpoints"] == "http://8.8.8.7:4001/A2A/message"
     assert body["proof"] == {"jws": "test-proof"}
 
 

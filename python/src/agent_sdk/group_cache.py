@@ -5,6 +5,7 @@ import re
 from datetime import datetime, timezone
 from ipaddress import ip_address
 from typing import Any, Mapping
+from urllib.parse import urlsplit, urlunsplit
 
 from .errors import AgentSdkError, ErrorCode
 from .models import GroupConfigSnapshot, GroupMemberInfo
@@ -27,21 +28,43 @@ def _require_string(value: Any, field: str) -> str:
     return value.strip()
 
 
-def _parse_port(value: Any, field: str) -> int:
-    if not isinstance(value, str) or not value.isdecimal():
+def _parse_service_endpoint(value: Any, agent_ip: str, field: str) -> tuple[str, int]:
+    endpoint = _require_string(value, field)
+    try:
+        parsed = urlsplit(endpoint)
+        port = parsed.port
+    except ValueError as exc:
         raise AgentSdkError(
             ErrorCode.GROUP_CONFIG_INVALID,
-            f"{field} must be a decimal string",
+            f"{field} contains an invalid port",
+            field=field,
+        ) from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or not parsed.path
+        or parsed.fragment
+    ):
+        raise AgentSdkError(
+            ErrorCode.GROUP_CONFIG_INVALID,
+            f"{field} must be an absolute HTTP/HTTPS URL without credentials or fragment",
             field=field,
         )
-    port = int(value)
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
     if not 1 <= port <= 65535:
         raise AgentSdkError(
             ErrorCode.GROUP_CONFIG_INVALID,
-            f"{field} must be in 1..65535",
+            f"{field} port must be in 1..65535",
             field=field,
         )
-    return port
+    # The service URL supplies scheme, port and path.  The verified Agent IP is
+    # always used as the destination so traffic follows the installed /32 route.
+    host = f"[{agent_ip}]" if ":" in agent_ip else agent_ip
+    authority = f"{host}:{port}"
+    return urlunsplit((parsed.scheme, authority, parsed.path, parsed.query, "")), port
 
 
 def _parse_timestamp(value: Any) -> datetime:
@@ -107,6 +130,15 @@ class GroupMemberCache:
             )
 
         group_id = _require_string(payload.get("group_id"), "group_id")
+        target_agent_id = payload.get("target_agent_id")
+        if target_agent_id is not None and _require_string(
+            target_agent_id, "target_agent_id"
+        ) != local_agent_id:
+            raise AgentSdkError(
+                ErrorCode.GROUP_CONFIG_INVALID,
+                "target_agent_id does not match the local agent",
+                field="target_agent_id",
+            )
         timestamp = _parse_timestamp(payload.get("timestamp"))
         raw_members = payload.get("members")
         if not isinstance(raw_members, Mapping) or not raw_members:
@@ -152,25 +184,31 @@ class GroupMemberCache:
                 )
             claimed_ips[agent_ip] = agent_id
 
-            raw_capabilities = value.get("capabilities")
-            if not isinstance(raw_capabilities, list) or not all(
-                isinstance(item, str) and item for item in raw_capabilities
+            raw_skills = value.get("skills")
+            if not isinstance(raw_skills, list) or not all(
+                isinstance(item, str) and item for item in raw_skills
             ):
                 raise AgentSdkError(
                     ErrorCode.GROUP_CONFIG_INVALID,
-                    "capabilities must be a list of non-empty strings",
-                    field=f"{prefix}.capabilities",
+                    "skills must be a list of non-empty strings",
+                    field=f"{prefix}.skills",
                 )
+            service_endpoint, tcp_port = _parse_service_endpoint(
+                value.get("service_endpoints"),
+                agent_ip,
+                f"{prefix}.service_endpoints",
+            )
             members[agent_id] = GroupMemberInfo(
                 agent_id=agent_id,
                 agent_name=_require_string(
                     value.get("agent_name"), f"{prefix}.agent_name"
                 ),
-                capabilities=tuple(raw_capabilities),
+                capabilities=tuple(raw_skills),
                 agent_ip=agent_ip,
-                tcp_port=_parse_port(value.get("tcp_port"), f"{prefix}.tcp_port"),
-                udp_port=_parse_port(value.get("udp_port"), f"{prefix}.udp_port"),
-                did_key=_require_string(value.get("did_key"), f"{prefix}.did_key"),
+                tcp_port=tcp_port,
+                udp_port=0,
+                did_key="",
+                service_endpoint=service_endpoint,
             )
 
         local_member = members.get(local_agent_id)
@@ -186,13 +224,10 @@ class GroupMemberCache:
                 "local member agent_ip does not match the Agent TUN address",
                 field="members.agent_ip",
             )
-        if (
-            local_member.tcp_port != local_tcp_port
-            or local_member.udp_port != local_udp_port
-        ):
+        if local_member.tcp_port != local_tcp_port:
             raise AgentSdkError(
                 ErrorCode.GROUP_CONFIG_INVALID,
-                "local member ports do not match SDK listeners",
+                "local member service endpoint port does not match the SDK listener",
                 field="members",
             )
 

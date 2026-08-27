@@ -12,6 +12,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
 import java.net.InetAddress
+import java.net.URI
 import java.time.Instant
 import java.util.Collections
 
@@ -81,6 +82,13 @@ class GroupMemberCache(
                 "group_id and members are required",
             )
         }
+        if (wire.targetAgentId != null && wire.targetAgentId != localAgentId) {
+            throw AgentSdkException(
+                ErrorCode.GROUP_CONFIG_INVALID,
+                "target_agent_id does not match the local agent",
+                "target_agent_id",
+            )
+        }
 
         val byId = linkedMapOf<String, GroupMemberInfo>()
         val ipOwners = mutableMapOf<String, String>()
@@ -101,12 +109,14 @@ class GroupMemberCache(
                     "members.$label.agent_ip",
                 )
             }
-            val tcpPort = parsePort(member.tcpPort, "members.$label.tcp_port")
-            val udpPort = parsePort(member.udpPort, "members.$label.udp_port")
+            val (serviceEndpoint, tcpPort) = parseServiceEndpoint(
+                member.serviceEndpoints,
+                normalizedIp,
+                "members.$label.service_endpoints",
+            )
             if (
                 member.agentName.isBlank() ||
-                member.didKey.isBlank() ||
-                member.capabilities.any { it.isBlank() }
+                member.skills.any { it.isBlank() }
             ) {
                 throw AgentSdkException(
                     ErrorCode.GROUP_CONFIG_INVALID,
@@ -117,11 +127,12 @@ class GroupMemberCache(
             byId[member.agentId] = GroupMemberInfo(
                 agentId = member.agentId,
                 agentName = member.agentName,
-                capabilities = Collections.unmodifiableList(member.capabilities.toList()),
+                capabilities = Collections.unmodifiableList(member.skills.toList()),
                 agentIp = normalizedIp,
                 tcpPort = tcpPort,
-                udpPort = udpPort,
-                didKey = member.didKey,
+                udpPort = 0,
+                didKey = "",
+                serviceEndpoint = serviceEndpoint,
             )
         }
 
@@ -137,10 +148,10 @@ class GroupMemberCache(
                 "members.agent_ip",
             )
         }
-        if (local.tcpPort != localTcpPort || local.udpPort != localUdpPort) {
+        if (local.tcpPort != localTcpPort) {
             throw AgentSdkException(
                 ErrorCode.GROUP_CONFIG_INVALID,
-                "Local member ports do not match SDK listeners",
+                "Local member service endpoint port does not match the SDK listener",
                 "members",
             )
         }
@@ -195,20 +206,56 @@ class GroupMemberCache(
         snapshots.clear()
     }
 
-    private fun parsePort(value: String, field: String): Int {
-        if (!value.all(Char::isDigit)) {
+    private fun parseServiceEndpoint(
+        value: String,
+        agentIp: String,
+        field: String,
+    ): Pair<String, Int> {
+        val parsed = try {
+            URI(value)
+        } catch (error: Exception) {
             throw AgentSdkException(
                 ErrorCode.GROUP_CONFIG_INVALID,
-                "$field must be a decimal string",
+                "$field must be an absolute HTTP/HTTPS URL",
+                field,
+                cause = error,
+            )
+        }
+        if (
+            parsed.scheme !in setOf("http", "https") ||
+            parsed.host == null ||
+            parsed.userInfo != null ||
+            parsed.path.isNullOrBlank() ||
+            parsed.fragment != null
+        ) {
+            throw AgentSdkException(
+                ErrorCode.GROUP_CONFIG_INVALID,
+                "$field must be an absolute HTTP/HTTPS URL without credentials or fragment",
                 field,
             )
         }
-        return value.toIntOrNull()?.takeIf { it in 1..65535 }
-            ?: throw AgentSdkException(
+        val port = when {
+            parsed.port != -1 -> parsed.port
+            parsed.scheme == "https" -> 443
+            else -> 80
+        }
+        if (port !in 1..65535) {
+            throw AgentSdkException(
                 ErrorCode.GROUP_CONFIG_INVALID,
-                "$field must be in 1..65535",
+                "$field port must be in 1..65535",
                 field,
             )
+        }
+        val deliveryEndpoint = URI(
+            parsed.scheme,
+            null,
+            agentIp,
+            port,
+            parsed.path,
+            parsed.query,
+            null,
+        ).toASCIIString()
+        return deliveryEndpoint to port
     }
 
     private fun normalizeLiteralIp(value: String, field: String): String {

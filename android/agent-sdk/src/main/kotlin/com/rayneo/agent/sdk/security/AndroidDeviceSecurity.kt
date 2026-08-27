@@ -478,10 +478,10 @@ private val P256_B = BigInteger(
     16,
 )
 
-private fun base64Url(value: ByteArray): String =
+internal fun base64Url(value: ByteArray): String =
     Base64.getUrlEncoder().withoutPadding().encodeToString(value)
 
-private fun base64UrlDecode(value: String): ByteArray =
+internal fun base64UrlDecode(value: String): ByteArray =
     Base64.getUrlDecoder().decode(value)
 
 private fun base58Encode(value: ByteArray): String {
@@ -519,7 +519,7 @@ private fun unsignedFixed(value: BigInteger, size: Int): ByteArray {
     return ByteArray(size - raw.size) + raw
 }
 
-private fun derToJose(der: ByteArray): ByteArray {
+internal fun derToJose(der: ByteArray): ByteArray {
     require(der.size >= 8 && der[0] == 0x30.toByte()) { "Invalid ECDSA DER signature" }
     var offset = 2
     require(der[offset++] == 0x02.toByte()) { "Invalid ECDSA DER r value" }
@@ -532,7 +532,7 @@ private fun derToJose(der: ByteArray): ByteArray {
     return unsignedFixed(BigInteger(1, r), 32) + unsignedFixed(BigInteger(1, s), 32)
 }
 
-private fun joseToDer(raw: ByteArray): ByteArray {
+internal fun joseToDer(raw: ByteArray): ByteArray {
     require(raw.size == 64) { "ES256 signature must be 64 bytes" }
     fun integer(bytes: ByteArray): ByteArray {
         var value = bytes.dropWhile { it == 0.toByte() }.toByteArray()

@@ -73,6 +73,11 @@ class ConnectIpQuicProtocol(QuicConnectionProtocol):
         self._logger = logger or logging.getLogger(__name__)
         self.http = H3Connection(self._quic, enable_webtransport=True)
         self.response: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+        self.settings: asyncio.Future[dict[int, int]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self.response.add_done_callback(self._consume_future_exception)
+        self.settings.add_done_callback(self._consume_future_exception)
         self.packets: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=1024)
         self.connect_stream_id: int | None = None
         self._keep_alive_uid = 0
@@ -110,6 +115,10 @@ class ConnectIpQuicProtocol(QuicConnectionProtocol):
             )
             if not self.response.done():
                 self.response.set_exception(
+                    ConnectionError(f"QUIC closed: {event.error_code}")
+                )
+            if not self.settings.done():
+                self.settings.set_exception(
                     ConnectionError(f"QUIC closed: {event.error_code}")
                 )
             try:
@@ -155,6 +164,12 @@ class ConnectIpQuicProtocol(QuicConnectionProtocol):
                     self.packets.put_nowait(data[1:])
                 except asyncio.QueueFull:
                     pass
+        self._publish_received_settings()
+
+    def _publish_received_settings(self) -> None:
+        received_settings = self.http.received_settings
+        if received_settings is not None and not self.settings.done():
+            self.settings.set_result(dict(received_settings))
 
     def open_connect_ip(
         self, *, authority: str, path: str, authorization: str | None
@@ -318,7 +333,18 @@ class AioquicConnectIpTransport:
                     ErrorCode.CONNECT_IP_NEGOTIATION_FAILED,
                     f"CONNECT-IP returned HTTP {status}",
                 )
-            settings = protocol.http.received_settings or {}
+            phase = "HTTP/3 SETTINGS"
+            settings = await asyncio.wait_for(
+                protocol.settings,
+                self._connect_timeout,
+            )
+            log_event(
+                self._logger,
+                logging.INFO,
+                "masque_http3_settings_received",
+                h3_datagram=settings.get(Setting.H3_DATAGRAM),
+                settings={str(int(key)): value for key, value in settings.items()},
+            )
             if settings.get(Setting.H3_DATAGRAM) != 1:
                 raise AgentSdkError(
                     ErrorCode.CONNECT_IP_NEGOTIATION_FAILED,

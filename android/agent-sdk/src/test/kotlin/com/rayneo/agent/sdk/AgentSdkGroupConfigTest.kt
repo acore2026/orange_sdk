@@ -296,6 +296,10 @@ class AgentSdkGroupConfigTest {
         assertEquals("/arf/v1/agent-cards-update", runtime.lastPath)
         assertEquals(LOCAL_ID, runtime.lastBody!!["agent_id"].toString().trim('"'))
         UUID.fromString(runtime.lastBody!!["request_id"].toString().trim('"'))
+        assertEquals(
+            "http://8.8.8.7:4001/A2A/message",
+            runtime.lastBody!!.getValue("service_endpoints").jsonPrimitive.content,
+        )
         assertFalse(runtime.lastBody!!.containsKey("request_type"))
     }
 
@@ -398,12 +402,12 @@ class AgentSdkGroupConfigTest {
             listOf("robot-control", "voice"),
             vcList.drop(1).map {
                 it.jsonObject.getValue("claims").jsonObject
-                    .getValue("capability").jsonPrimitive.content
+                    .getValue("skill_name").jsonPrimitive.content
             },
         )
         assertTrue(vcList.drop(1).all {
             it.jsonObject.getValue("proof").jsonObject
-                .getValue("signature_value").jsonPrimitive.content.isNotBlank()
+                .getValue("jws").jsonPrimitive.content.isNotBlank()
         })
     }
 
@@ -432,8 +436,8 @@ class AgentSdkGroupConfigTest {
         put("timestamp", Instant.now().toString())
         put("group_id", "g1")
         put("members", buildJsonObject {
-            put("agent1", member(LOCAL_ID, "Agent A", "8.8.8.7", "4001", "did:key:a"))
-            put("not-an-id", member(PEER_ID, "Agent B", "8.8.8.8", peerPort, "did:key:b"))
+            put("agent1", member(LOCAL_ID, "Agent A", "8.8.8.7", "4001"))
+            put("not-an-id", member(PEER_ID, "Agent B", "8.8.8.8", peerPort))
         })
         put("proof", buildJsonObject { put("jws", "test") })
     }
@@ -443,15 +447,12 @@ class AgentSdkGroupConfigTest {
         name: String,
         ip: String,
         tcpPort: String,
-        key: String,
     ): JsonObject = buildJsonObject {
         put("agent_id", id)
         put("agent_name", name)
-        put("capabilities", buildJsonArray { add(JsonPrimitive("text")) })
+        put("skills", buildJsonArray { add(JsonPrimitive("text")) })
         put("agent_ip", ip)
-        put("tcp_port", tcpPort)
-        put("udp_port", "28443")
-        put("did_key", key)
+        put("service_endpoints", "http://agent.example:$tcpPort/A2A/message")
     }
 
     private fun testPrivateKeyPem(): ByteArray {
@@ -564,14 +565,14 @@ class AgentSdkGroupConfigTest {
         var port = 0
         var body: JsonObject? = null
         override suspend fun send(
-            ip: String,
-            port: Int,
+            endpoint: String,
             body: JsonObject,
             timeoutMillis: Long,
         ): JsonObject {
             called = true
-            this.ip = ip
-            this.port = port
+            val url = java.net.URI(endpoint)
+            this.ip = url.host
+            this.port = url.port
             this.body = body
             return buildJsonObject { put("status", "OK") }
         }

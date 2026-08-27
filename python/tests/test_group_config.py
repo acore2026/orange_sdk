@@ -28,7 +28,8 @@ async def test_group_config_caches_by_agent_id_and_installs_route(sdk_fixture):
     member = snapshot.members_by_agent_id[PEER_ID]
     assert member.agent_ip == "8.8.8.8"
     assert member.tcp_port == 4001
-    assert member.udp_port == 28443
+    assert member.skills == ("text", "voice")
+    assert member.service_endpoint == "http://8.8.8.8:4001/A2A/message"
     assert "8.8.8.8/32" in backend.routes
     assert "8.8.8.7/32" not in backend.routes
 
@@ -51,7 +52,7 @@ async def test_group_config_commits_without_listener(sdk_fixture):
     assert snapshot is not None
     assert snapshot.members_by_agent_id[PEER_ID].agent_ip == "8.8.8.8"
     assert "8.8.8.8/32" in backend.routes
-    assert messenger.calls[0][0:2] == ("8.8.8.8", 4001)
+    assert messenger.calls[0][0] == "http://8.8.8.8:4001/A2A/message"
 
 
 async def test_listener_reject_is_only_a_notification_result(sdk_fixture):
@@ -86,13 +87,17 @@ async def test_listener_failure_does_not_roll_back_group_config(sdk_fixture):
     assert "8.8.8.8/32" in backend.routes
 
 
-@pytest.mark.parametrize("invalid_port", ["0", "65536", "not-a-port", 4001])
-async def test_invalid_string_port_rejects_entire_config(sdk_fixture, invalid_port):
+@pytest.mark.parametrize("invalid_port", ["0", "65536", "not-a-port"])
+async def test_invalid_service_endpoint_port_rejects_entire_config(
+    sdk_fixture, invalid_port
+):
     sdk = sdk_fixture["sdk"]
     runtime = sdk_fixture["runtime"]
     sdk.register_network_message_listener(AckNetworkListener())
     payload = group_payload()
-    payload["members"]["arbitrary-label"]["tcp_port"] = invalid_port
+    payload["members"]["arbitrary-label"]["service_endpoints"] = (
+        f"http://agent-b.example:{invalid_port}/A2A/message"
+    )
 
     with pytest.raises(AgentSdkError) as exc:
         await runtime.deliver_group_config(payload)
@@ -133,6 +138,19 @@ async def test_local_agent_ip_must_match_tun(sdk_fixture):
     assert await sdk.get_group_snapshot("g1") is None
 
 
+async def test_group_config_target_must_match_local_agent(sdk_fixture):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    payload = group_payload()
+    payload["target_agent_id"] = PEER_ID
+
+    with pytest.raises(AgentSdkError) as exc:
+        await runtime.deliver_group_config(payload)
+
+    assert exc.value.code is ErrorCode.GROUP_CONFIG_INVALID
+    assert exc.value.field == "target_agent_id"
+
+
 async def test_group_config_requires_semantic_version(sdk_fixture):
     sdk = sdk_fixture["sdk"]
     runtime = sdk_fixture["runtime"]
@@ -162,8 +180,8 @@ async def test_send_message_uses_only_cached_tcp_endpoint(sdk_fixture):
 
     assert receipt.delivered is True
     assert len(messenger.calls) == 1
-    ip, port, body, _ = messenger.calls[0]
-    assert (ip, port) == ("8.8.8.8", 4567)
+    endpoint, body, _ = messenger.calls[0]
+    assert endpoint == "http://8.8.8.8:4567/A2A/message"
     assert body["dst_agent_id"] == PEER_ID
     assert body["src_agent_id"] == "did:example:agent-a"
     assert body["type"] == "control"

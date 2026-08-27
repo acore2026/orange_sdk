@@ -312,20 +312,17 @@ class OkHttpRuntimeTransport(
 class OkHttpPeerMessenger(
     private val baseClient: OkHttpClient = OkHttpClient(),
     private val json: Json = Json,
-    private val scheme: String = "http",
 ) : PeerMessenger {
     override suspend fun send(
-        ip: String,
-        port: Int,
+        endpoint: String,
         body: JsonObject,
         timeoutMillis: Long,
     ): JsonObject = withContext(Dispatchers.IO) {
-        val host = if (ip.contains(':')) "[$ip]" else ip
         val client = baseClient.newBuilder()
             .callTimeout(timeoutMillis, TimeUnit.MILLISECONDS)
             .build()
         val request = Request.Builder()
-            .url("$scheme://$host:$port/A2A/message")
+            .url(endpoint)
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
         try {

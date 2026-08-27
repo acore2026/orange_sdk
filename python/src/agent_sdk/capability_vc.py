@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-import json
+import hashlib
 import uuid
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
@@ -11,8 +11,10 @@ from typing import Any
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
 from .errors import AgentSdkError, ErrorCode
+from .security import canonical_json
 
 
 TEST_CAPABILITY_ISSUER_DID = (
@@ -53,9 +55,8 @@ def issue_test_capability_vcs(
 ) -> list[dict[str, Any]]:
     """Issue one lab-only third-party VC for each capability string.
 
-    Signing follows the existing IDM test convention: the seven VC fields are
-    serialized as sorted compact ASCII JSON, then signed with P-256
-    ECDSA/SHA-256. ``signature_value`` is ASN.1 DER encoded and standard Base64.
+    Signing follows the ACN JsonWebSignature2020 credential profile with a
+    detached ES256 JWS and ``proof_purpose=assertionMethod``.
     """
 
     normalized_agent_id = agent_id.strip()
@@ -142,43 +143,65 @@ def issue_test_capability_vcs(
         credential: dict[str, Any] = {
             "context": ["3gpp-ts-33.xxx-v20.0.0"],
             "id": f"urn:uuid:{uuid.uuid4()}",
-            "type": ["VerifiableCredential", "CapabilityCredential"],
+            "type": ["VerifiableCredential", "AgentCapabilityCredential"],
             "issuer": TEST_CAPABILITY_ISSUER_DID,
             "valid_from": _format_utc(issued_at),
             "valid_until": _format_utc(expires_at),
             "claims": {
                 "agent_id": normalized_agent_id,
                 "agent_name": normalized_agent_name,
-                "capability": capability,
+                "skill_name": capability,
                 "authorization_mode": authorization_mode,
             },
         }
-        signing_payload = {
-            field: credential[field]
-            for field in (
-                "context",
-                "id",
-                "type",
-                "issuer",
-                "valid_from",
-                "valid_until",
-                "claims",
-            )
-        }
-        signing_message = json.dumps(
-            signing_payload,
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        signature = private_key.sign(signing_message, ec.ECDSA(hashes.SHA256()))
-        credential["proof"] = {
-            "creator": TEST_CAPABILITY_ISSUER_KEY_ID,
-            "signature_value": base64.b64encode(signature).decode("ascii"),
-        }
+        credential["proof"] = _create_credential_proof(
+            credential,
+            private_key,
+            created=_format_utc_millis(issued_at),
+        )
         credentials.append(credential)
     return credentials
 
 
+def _create_credential_proof(
+    document: dict[str, Any],
+    private_key: ec.EllipticCurvePrivateKey,
+    *,
+    created: str,
+) -> dict[str, Any]:
+    proof: dict[str, Any] = {
+        "type": "JsonWebSignature2020",
+        "verification_method": TEST_CAPABILITY_ISSUER_KEY_ID,
+        "proof_purpose": "assertionMethod",
+        "created": created,
+    }
+    protected = _base64url(
+        canonical_json({"alg": "ES256", "b64": False, "crit": ["b64"]})
+    )
+    proof_hash = hashlib.sha256(canonical_json(proof)).digest()
+    document_hash = hashlib.sha256(canonical_json(document)).digest()
+    signing_input = (
+        protected.encode("ascii") + b"." + proof_hash + document_hash
+    )
+    der_signature = private_key.sign(
+        signing_input,
+        ec.ECDSA(hashes.SHA256()),
+    )
+    r_value, s_value = decode_dss_signature(der_signature)
+    raw_signature = r_value.to_bytes(32, "big") + s_value.to_bytes(32, "big")
+    proof["jws"] = f"{protected}..{_base64url(raw_signature)}"
+    return proof
+
+
+def _base64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
 def _format_utc(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _format_utc_millis(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")

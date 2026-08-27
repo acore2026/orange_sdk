@@ -604,7 +604,6 @@ class AgentSdk:
             )
         assert self._groups is not None
         sender = await self._groups.resolve(group_id, sender_id)
-        await self._message_signature_verifier.verify_a2a(payload, sender.did_key)
         user_payload = payload.get("payload")
         if not isinstance(user_payload, Mapping):
             raise AgentSdkError(
@@ -661,7 +660,7 @@ class AgentSdk:
         }
         body["proof"] = dict(await self._message_signer.sign_a2a(body))
         response = await self._peer_messenger.send(
-            target.agent_ip, target.tcp_port, body, timeout_seconds
+            target.service_endpoint, body, timeout_seconds
         )
         delivered = response.get("status") == "OK"
         return MessageReceipt(
@@ -845,6 +844,11 @@ class AgentSdk:
                 "credentials or capabilities must contain at least one item",
                 field="credentials",
             )
+        assert self._config is not None
+        service_endpoints = (
+            f"http://{self._config.agent_tun_ip}:"
+            f"{self._config.local_tcp_port}/A2A/message"
+        )
         path = "/arf/v1/agent-cards"
         body = await self._authenticate_control_request(
             path,
@@ -852,6 +856,7 @@ class AgentSdk:
                 "request_id": str(uuid.uuid4()),
                 "agent_id": agent_id,
                 "priority": priority,
+                "service_endpoints": service_endpoints,
                 "vc_list": vc_list,
             },
         )

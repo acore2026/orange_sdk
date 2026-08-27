@@ -44,11 +44,11 @@ class TestCapabilityVcIssuerTest {
         assertEquals(
             listOf("robot-control", "voice"),
             credentials.map { it.getValue("claims").jsonObject
-                .getValue("capability").jsonPrimitive.content },
+                .getValue("skill_name").jsonPrimitive.content },
         )
         credentials.forEach { credential ->
             assertEquals(
-                listOf("VerifiableCredential", "CapabilityCredential"),
+                listOf("VerifiableCredential", "AgentCapabilityCredential"),
                 credential.getValue("type").jsonArray.map { it.jsonPrimitive.content },
             )
             assertEquals(
@@ -83,7 +83,7 @@ class TestCapabilityVcIssuerTest {
                         value.jsonObject.forEach { (claimKey, claimValue) ->
                             put(
                                 claimKey,
-                                if (claimKey == "capability") {
+                                if (claimKey == "skill_name") {
                                     JsonPrimitive("tampered")
                                 } else {
                                     claimValue
@@ -163,24 +163,17 @@ class TestCapabilityVcIssuerTest {
     }
 
     private fun verifyCredential(credential: JsonObject, publicKey: ECPublicKey) {
-        val unsigned = buildJsonObject {
-            listOf(
-                "context",
-                "id",
-                "type",
-                "issuer",
-                "valid_from",
-                "valid_until",
-                "claims",
-            ).forEach { field -> put(field, credential.getValue(field)) }
-        }
-        val signature = Base64.getDecoder().decode(
-            credential.getValue("proof").jsonObject
-                .getValue("signature_value").jsonPrimitive.content
-        )
+        val proof = credential.getValue("proof").jsonObject
+        val jws = proof.getValue("jws").jsonPrimitive.content
+        val parts = jws.split('.', limit = 3)
+        assertEquals(3, parts.size)
+        assertTrue(parts[1].isEmpty())
+        val signature = joseToDer(base64UrlDecode(parts[2]))
+        val signingInput = parts[0].toByteArray(Charsets.US_ASCII) +
+            byteArrayOf('.'.code.toByte()) + proofSigningBytes(credential, proof)
         val valid = Signature.getInstance("SHA256withECDSA").run {
             initVerify(publicKey)
-            update(canonicalAsciiJson(unsigned))
+            update(signingInput)
             verify(signature)
         }
         assertTrue(valid)

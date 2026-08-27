@@ -98,20 +98,16 @@ class DemoRuntime:
                     "agent1": {
                         "agent_id": LOCAL_AGENT_ID,
                         "agent_name": "Agent A",
-                        "capabilities": ["text", "camera"],
+                        "skills": ["text", "camera"],
                         "agent_ip": "8.8.8.7",
-                        "tcp_port": "4001",
-                        "udp_port": "28443",
-                        "did_key": "did:key:local-demo",
+                        "service_endpoints": "http://agent-a:4001/A2A/message",
                     },
                     "agent2": {
                         "agent_id": PEER_AGENT_ID,
                         "agent_name": "Agent B",
-                        "capabilities": ["text", "camera"],
+                        "skills": ["text", "camera"],
                         "agent_ip": "8.8.8.8",
-                        "tcp_port": "4001",
-                        "udp_port": "28443",
-                        "did_key": "did:key:peer-demo",
+                        "service_endpoints": "http://agent-b:4001/A2A/message",
                     },
                 },
                 "proof": {"jws": "demo-group-proof"},
@@ -212,11 +208,11 @@ class DemoLocalServer:
 
 class DemoPeerMessenger:
     def __init__(self) -> None:
-        self.last_endpoint: tuple[str, int] | None = None
+        self.last_endpoint: str | None = None
 
-    async def send(self, ip, port, body, timeout):
+    async def send(self, endpoint, body, timeout):
         del body, timeout
-        self.last_endpoint = (ip, port)
+        self.last_endpoint = endpoint
         return {"status": "OK"}
 
 
@@ -439,7 +435,7 @@ async def run_demo(
         assert summary == {
             "runtime_request_count": 8,
             "group_id": "g-demo",
-            "peer_endpoint": ("8.8.8.8", 4001),
+            "peer_endpoint": "http://8.8.8.8:4001/A2A/message",
             "installed_route": True,
             "received_message_count": 1,
             "invitation_action": "ACCEPT",

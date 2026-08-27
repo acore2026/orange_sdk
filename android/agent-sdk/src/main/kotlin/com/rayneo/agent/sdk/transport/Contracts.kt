@@ -79,7 +79,7 @@ interface LocalServer {
 }
 
 interface PeerMessenger {
-    suspend fun send(ip: String, port: Int, body: JsonObject, timeoutMillis: Long): JsonObject
+    suspend fun send(endpoint: String, body: JsonObject, timeoutMillis: Long): JsonObject
 }
 
 fun interface NetworkMessageListener {

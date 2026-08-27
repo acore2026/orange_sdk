@@ -483,10 +483,9 @@ class HttpPeerMessenger:
         self._logger = logger or logging.getLogger(__name__)
 
     async def send(
-        self, ip: str, port: int, body: Mapping[str, Any], timeout: float
+        self, endpoint: str, body: Mapping[str, Any], timeout: float
     ) -> Mapping[str, Any]:
-        host = f"[{ip}]" if ":" in ip else ip
-        url = f"{self._scheme}://{host}:{port}/A2A/message"
+        url = endpoint
         request_id = uuid.uuid4().hex
         log_event(
             self._logger,
@@ -549,7 +548,7 @@ class HttpPeerMessenger:
             )
             raise AgentSdkError(
                 ErrorCode.MESSAGE_DELIVERY_FAILED,
-                f"A2A delivery to {ip}:{port} failed: {exc}",
+                f"A2A delivery to {url} failed: {exc}",
                 retryable=True,
             ) from exc
         log_event(

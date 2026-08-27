@@ -88,7 +88,7 @@ class LocalServer(Protocol):
 
 class PeerMessenger(Protocol):
     async def send(
-        self, ip: str, port: int, body: Mapping[str, Any], timeout: float
+        self, endpoint: str, body: Mapping[str, Any], timeout: float
     ) -> Mapping[str, Any]: ...
 
 

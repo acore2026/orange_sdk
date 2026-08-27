@@ -15,6 +15,7 @@ import java.security.interfaces.ECPrivateKey
 import java.security.spec.PKCS8EncodedKeySpec
 import java.time.Instant
 import java.time.temporal.ChronoUnit
+import java.time.format.DateTimeFormatterBuilder
 import java.util.Base64
 import java.util.Locale
 import java.util.UUID
@@ -117,7 +118,7 @@ internal class TestCapabilityVcIssuer(
                 put("id", "urn:uuid:${UUID.randomUUID()}")
                 put("type", buildJsonArray {
                     add(JsonPrimitive("VerifiableCredential"))
-                    add(JsonPrimitive("CapabilityCredential"))
+                    add(JsonPrimitive("AgentCapabilityCredential"))
                 })
                 put("issuer", TEST_CAPABILITY_ISSUER_DID)
                 put("valid_from", issuedAt.toString())
@@ -125,23 +126,33 @@ internal class TestCapabilityVcIssuer(
                 put("claims", buildJsonObject {
                     put("agent_id", normalizedAgentId)
                     put("agent_name", normalizedAgentName)
-                    put("capability", capability)
+                    put("skill_name", capability)
                     put("authorization_mode", authorizationMode)
                 })
             }
+            val proofOptions = buildJsonObject {
+                put("type", "JsonWebSignature2020")
+                put("verification_method", TEST_CAPABILITY_ISSUER_KEY_ID)
+                put("proof_purpose", "assertionMethod")
+                put("created", canonicalTimestamp(issuedAt))
+            }
+            val protected = base64Url(canonicalJson(buildJsonObject {
+                put("alg", "ES256")
+                put("b64", false)
+                put("crit", buildJsonArray { add(JsonPrimitive("b64")) })
+            }))
+            val signingInput = protected.toByteArray(Charsets.US_ASCII) +
+                byteArrayOf('.'.code.toByte()) + proofSigningBytes(unsigned, proofOptions)
             val signature = Signature.getInstance("SHA256withECDSA").run {
                 initSign(privateKey)
-                update(canonicalAsciiJson(unsigned))
+                update(signingInput)
                 sign()
             }
             buildJsonObject {
                 unsigned.forEach(::put)
                 put("proof", buildJsonObject {
-                    put("creator", TEST_CAPABILITY_ISSUER_KEY_ID)
-                    put(
-                        "signature_value",
-                        Base64.getEncoder().encodeToString(signature),
-                    )
+                    proofOptions.forEach(::put)
+                    put("jws", "$protected..${base64Url(derToJose(signature))}")
                 })
             }
         }
@@ -161,6 +172,9 @@ internal class TestCapabilityVcIssuer(
         return parseP256PrivateKey(encoded)
     }
 }
+
+private fun canonicalTimestamp(value: Instant): String =
+    DateTimeFormatterBuilder().appendInstant(3).toFormatter().format(value)
 
 internal fun canonicalAsciiJson(value: JsonObject): ByteArray = buildString {
     String(canonicalJson(value), Charsets.UTF_8).forEach { character ->

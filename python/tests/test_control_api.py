@@ -235,6 +235,9 @@ async def test_control_requests_use_identity_signature_and_other_proofs(
     assert publish_path == "/arf/v1/agent-cards"
     uuid.UUID(publish_body["request_id"])
     assert publish_body["timestamp"] == "2026-08-19T00:00:00Z"
+    assert publish_body["service_endpoints"] == (
+        "http://8.8.8.7:4001/A2A/message"
+    )
     assert publish_body["proof"] == {"jws": "test-proof"}
     assert "signature" not in publish_body
 

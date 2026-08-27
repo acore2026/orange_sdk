@@ -5,7 +5,8 @@ The Android library mirrors the Python SDK's group-cache and endpoint rules:
 - `AgentVpnService` creates the Agent TUN without root.
 - `acf_group_config` is decoded into an immutable snapshot keyed by
   `group_id + agent_id`.
-- A2A TCP always uses cached `agent_ip + tcp_port`.
+- A2A HTTP uses cached `service_endpoints` for scheme/port/path and the verified
+  `agent_ip` as the routed destination; applications never pass an endpoint.
 - Group changes rebuild VPN routes and atomically swap the TUN fd in the native
   MASQUE core.
 - Runtime downlink uses a client WebSocket; A2A uses the Agent TUN HTTP listener.
@@ -71,10 +72,11 @@ traffic for this internal deployment.
 
 `registerCapabilities` accepts either pre-issued VCs, raw capability strings,
 or both. Existing VCs remain the production path. With raw capabilities, the
-SDK creates one `CapabilityCredential` per string, signs the same seven IDM VC
-fields as the Python SDK with P-256 ECDSA/SHA-256, and appends the result to the
-existing wire-level `vc_list`. AgentRuntime and the network-side HTTP contract
-do not change.
+SDK creates one `AgentCapabilityCredential` per string, stores the value as
+`claims.skill_name`, and signs it with the ACN JsonWebSignature2020 detached
+ES256 JWS profile. The SDK also derives the top-level `service_endpoints` from
+the Agent TUN IP, local TCP port, and `/A2A/message`; applications do not pass
+an address or URL.
 
 For this closed lab profile, both the third-party public and private test keys
 are packaged in the AAR under `certs/third-party-capability-*-key.pem`. They are

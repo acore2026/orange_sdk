@@ -2,7 +2,7 @@
 
 `agent-connect-sdk` 为 Linux 端 Agent 提供统一的控制面和数据面能力：应用只需要调用 SDK 函数，不需要感知对端 IP、TCP 端口、TUN 路由或 MASQUE 封装细节。
 
-SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_group_config` 后，会自动缓存 `group_id + agent_id -> agent_ip + tcp_port + udp_port`，并自动维护对端 `/32` 或 `/128` 主机路由。应用发送时提供群组、目标 Agent、消息类型、任务 ID 和业务 JSON，不传 IP、端口或路由。
+SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_group_config` 后，会自动缓存 `group_id + agent_id -> agent_ip + service_endpoints + skills`，并自动维护对端 `/32` 或 `/128` 主机路由。应用发送时提供群组、目标 Agent、消息类型、任务 ID 和业务 JSON，不传 URL、IP、端口或路由。
 
 ## 1. 交付物和运行要求
 
@@ -394,7 +394,7 @@ group = await sdk.create_group(
 
 `credentials` 是正式用法：调用方传入已经由运营商或能力认证组织签发的 VC，
 SDK 将其原样放入 `vc_list`。封闭实验环境还可直接传能力字符串；SDK 会使用
-测试三方机构的 P-256 私钥为每个能力生成一张 `CapabilityCredential`，再追加
+测试三方机构的 P-256 私钥为每个能力生成一张 `AgentCapabilityCredential`，再追加
 到同一个 `vc_list`：
 
 ```python
@@ -409,13 +409,19 @@ await sdk.register_capabilities(
 
 生成的测试 VC 使用
 `did:thirdpartyissuer@6gc.mnc015.mcc234.3gppnetwork` 作为 `issuer`，签名原文
-兼容现有 IDM 测试规则：只覆盖 `context/id/type/issuer/valid_from/valid_until/claims`
-七个字段，采用排序紧凑 JSON、P-256 ECDSA/SHA-256 和 DER Base64 签名。
+使用与现网 IDM 一致的 `JsonWebSignature2020`、
+`proof_purpose=assertionMethod` 和 ES256 分离 JWS；能力名写入
+`claims.skill_name`。
 测试公私钥分别位于 Wheel 包内 `agent_sdk/certs/` 下的
 `third-party-capability-public-key.pem` 和
 `third-party-capability-private-key.pem`，均通过包相对资源读取。可通过
 `test_vc_private_key_path` 显式覆盖私钥，但正常联调不需要配置路径。此入口仅
 用于联调；正式环境应由独立能力认证服务签发 VC，再通过 `credentials` 发布。
+
+SDK 会自动把本机 Agent TUN IP、`local_tcp_port` 和固定 `/A2A/message` 路径
+组合成顶层 `service_endpoints`，例如
+`http://10.60.0.2:4001/A2A/message`。该字段会与 `agent_id/priority/vc_list` 一起
+进入外层 proof，用户不需要也不能在 `register_capabilities()` 中传地址。
 
 AgentRuntime 随后通过已建立的 WebSocket 下发核心网请求：
 
@@ -459,10 +465,11 @@ receipt = await sdk.send_message(
 print(receipt.message_id, receipt.delivered)
 ```
 
-应用不传 URL、IP 或端口。SDK 使用已缓存的目标 `agent_ip + tcp_port`，固定调用对端：
+应用不传 URL、IP 或端口。SDK 从已缓存的目标 `service_endpoints` 取得协议、端口和路径，并以同一成员的已验证 `agent_ip` 替换 URL 主机名，确保报文命中 Agent TUN 的对端主机路由。例如：
 
 ```text
-POST http://<agent_ip>:<tcp_port>/A2A/message
+service_endpoints = http://agent-b:4001/A2A/message
+实际请求          = POST http://<agent_ip>:4001/A2A/message
 ```
 
 这个 HTTP 包由系统路由送入 Agent TUN，再通过 CONNECT-IP 和 5GC U 面到达对端。群组配置不存在或目标不在群组时，SDK 会拒绝发送，不会回退到用户提供的地址；当前联调 Profile 不会因 proof 验签失败拒绝消息。
@@ -853,6 +860,11 @@ A 端也会默认连续执行能力发现、建组和消息发送。能力发现
 如果 `sdk.init()` 报告 `MASQUE QUIC handshake timed out after 10s`，表示
 `GET /v1/ue/info` 之后的 QUIC/UDP 握手未收到服务端响应，还没有进入
 CONNECT-IP HTTP 协商。先查看 SDK 日志：
+
+收到 CONNECT-IP HTTP 200 后，SDK 会继续等待服务端 HTTP/3 SETTINGS，并记录
+`masque_http3_settings_received`。只有 SETTINGS 明确没有 `H3_DATAGRAM=1` 时才
+返回 `peer did not negotiate HTTP/3 Datagram`，避免响应与 SETTINGS 到达顺序
+造成偶发误判。
 
 ```bash
 tail -f ./logs/agent-b-test.log

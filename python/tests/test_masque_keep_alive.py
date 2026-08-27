@@ -6,6 +6,7 @@ import logging
 import pytest
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
+from aioquic.h3.connection import Setting
 
 import agent_sdk.masque as masque_module
 from agent_sdk.errors import AgentSdkError, ErrorCode
@@ -83,6 +84,18 @@ async def test_cancelled_handshake_consumes_late_aioquic_error() -> None:
     await asyncio.sleep(0)
 
     assert waiter._log_traceback is False
+
+
+async def test_http3_settings_future_handles_settings_after_connect_response() -> None:
+    protocol = ConnectIpQuicProtocol(
+        QuicConnection(configuration=QuicConfiguration(is_client=True))
+    )
+    assert protocol.settings.done() is False
+
+    protocol.http._received_settings = {Setting.H3_DATAGRAM: 1}
+    protocol._publish_received_settings()
+
+    assert await protocol.settings == {Setting.H3_DATAGRAM: 1}
 
 
 async def test_keep_alive_sends_quic_ping_while_connected() -> None:

@@ -28,6 +28,12 @@ class GroupMemberInfo:
     tcp_port: int
     udp_port: int
     did_key: str
+    service_endpoint: str = ""
+
+    @property
+    def skills(self) -> tuple[str, ...]:
+        """Skills advertised by the member (``capabilities`` compatibility alias)."""
+        return self.capabilities
 
 
 @dataclass(frozen=True, slots=True)

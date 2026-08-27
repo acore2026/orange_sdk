@@ -29,7 +29,7 @@ Native Core。
 
 Linux/Python 和 Android 的 AgentCard 发布接口默认接收已经签发的 VC。封闭
 联调时也可传 `capabilities=[...]`，SDK 为每个能力生成一张 IDM 兼容的
-`CapabilityCredential` 后放入既有 `vc_list`。测试机构 P-256 公私钥已经作为
+`AgentCapabilityCredential` 后放入既有 `vc_list`。测试机构 P-256 公私钥已经作为
 SDK 相对资源打包进 Wheel/AAR，不依赖
 `/root/lpx/cert/third-party`；这是明确包含共享测试私钥的封闭联调 Profile，
 不得用于生产。正式环境仍应传入外部认证机构签发好的 VC。
@@ -41,6 +41,15 @@ AgentRuntime IP 和端口。初始化不再调用 `/health` 或 `/sdk/v1/endpoin
 Session 的 `ipv4` 字段得到本机 Agent TUN IP；该 GET 无请求体，不向
 AgentRuntime 同步本机信息。
 本地 HTTP Server 只保留 Agent 间 `/A2A/message`。
+
+发布 AgentCard 时，SDK 根据 `GET /v1/ue/info` 得到的 Agent TUN IP、本地 TCP
+端口和固定消息路径，自动生成形如
+`http://10.60.0.2:4001/A2A/message` 的 `service_endpoints`；应用不传 IP、端口
+或 URL。
+
+群组配置采用最新的 `agent_id/agent_name/service_endpoints/agent_ip/skills` 成员
+格式。SDK 内部从 `service_endpoints` 取得协议、端口和路径，并使用同一成员的
+`agent_ip` 作为实际目的地址；用户仍只传 `group_id + target_agent_id`。
 
 控制面写请求由 SDK 自动生成普通 UUID 格式的 `request_id`。身份申请严格按
 `ACN-H-ID-v1` 编码 owner/name/publicKey/description/timestamp，并将完整紧凑
