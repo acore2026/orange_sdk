@@ -90,6 +90,14 @@ internal fun identityApplicationSigningBytes(payload: JsonObject): ByteArray {
         "metadata must be a JSON object",
         "metadata",
     )
+    listOf("region", "os", "version").forEach(metadata::requiredIdentityString)
+    if (metadata.any { (_, value) -> value !is JsonPrimitive || !value.isString }) {
+        throw AgentSdkException(
+            ErrorCode.INVALID_ARGUMENT,
+            "metadata keys and values must be strings",
+            "metadata",
+        )
+    }
     val publicKeyDer = try {
         Base64.getDecoder().decode(payload.requiredIdentityString("public_key"))
     } catch (error: IllegalArgumentException) {
@@ -151,9 +159,7 @@ internal fun identityApplicationSigningBytes(payload: JsonObject): ByteArray {
         for (shift in 56 downTo 0 step 8) {
             write(((timestampMillis ushr shift) and 0xff).toInt())
         }
-        writeLp16(metadata.requiredIdentityString("region").toByteArray(), "metadata.region")
-        writeLp16(metadata.requiredIdentityString("os").toByteArray(), "metadata.os")
-        writeLp16(metadata.requiredIdentityString("version").toByteArray(), "metadata.version")
+        writeLp16(metadata.toString().toByteArray(Charsets.UTF_8), "metadata")
     }.toByteArray()
 }
 

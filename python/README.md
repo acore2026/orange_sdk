@@ -283,8 +283,11 @@ MASQUE TLS 的 P-256 消息签名密钥：
 - 目录权限为 `0700`，两个密钥文件权限为 `0600`；后续启动复用同一密钥。
 - 私钥不进入请求、返回值或日志。
 
-签名算法固定为 P-256 ECDSA + SHA-256。身份申请的普通 `signature` 按
-`ACN-H-ID-v1\0 + LP16/U64BE` 逐字段编码后签名，ASN.1 DER 再做标准 Base64；
+签名算法固定为 P-256 ECDSA + SHA-256。身份申请的普通 `signature` 待签字节为
+`ACN-H-ID-v1\0 + LP16(owner/name/publicKey/description) + U64BE(timestamp) +
+LP16(完整紧凑 metadata JSON)`，签名使用 ASN.1 DER 再做标准 Base64。
+`metadata` 的必填字段顺序固定为 `region/os/version`，额外字符串字段
+按字段名排序；SDK 签名和 HTTP 发送使用同一个紧凑 UTF-8 JSON。
 其他控制请求和 A2A 的 `proof.jws` 使用 `ES256`、RFC 7797 `b64=false` 的分离
 JWS。SDK 自动生成普通 UUID `request_id`，它只用于 HTTP 幂等关联，不进入
 NAS 业务体，也不属于签名覆盖范围。

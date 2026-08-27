@@ -145,9 +145,11 @@ The local HTTP/1.1 listener now exposes only `/A2A/message` inside the CONNECT-I
 path; the former Runtime callback paths are not available.
 
 Control-plane writes carry an SDK-generated plain UUID `request_id`. Identity
-application uses the `ACN-H-ID-v1` domain plus ordered LP16/U64BE signing bytes;
-the remaining control requests use `proof`. Applications must provide non-empty
-identity `description` and `metadata.region/os/version`. Group configuration
+application uses the `ACN-H-ID-v1` domain, ordered LP16/U64BE fields, and one
+LP16 containing the exact compact UTF-8 `metadata` JSON sent over HTTP. Required
+metadata keys are ordered as `region/os/version`; additional string-valued keys
+are sorted by name. The remaining control requests use `proof`. Applications
+must provide non-empty identity `description` and `metadata.region/os/version`. Group configuration
 downlink uses exactly `ACN_AGENT_GROUPING_NOTIFICATION`.
 
 A2A calls remain address-free at the application boundary:

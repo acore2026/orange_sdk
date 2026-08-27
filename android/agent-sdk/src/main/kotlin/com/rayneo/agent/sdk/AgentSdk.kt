@@ -339,6 +339,7 @@ class AgentSdk internal constructor(
     ): AgentProfile {
         requireReady()
         validateIdentityApplication(owner, name, description, metadata)
+        val normalizedMetadata = normalizeIdentityMetadata(metadata)
         val publicKey = devicePublicKeyProvider?.publicKeyBase64
             ?: throw AgentSdkException(
                 ErrorCode.SIGNATURE_ERROR,
@@ -351,7 +352,7 @@ class AgentSdk internal constructor(
             put("name", name)
             put("public_key", publicKey)
             put("description", description)
-            put("metadata", metadata)
+            put("metadata", normalizedMetadata)
         }))
         if (response["result"]?.jsonPrimitive?.contentOrNull != "success") {
             throw AgentSdkException(
@@ -695,11 +696,10 @@ class AgentSdk internal constructor(
                 )
             }
         }
-        val extraFields = metadata.keys - setOf("region", "os", "version")
-        if (extraFields.isNotEmpty()) {
+        if (metadata.any { (_, value) -> value !is JsonPrimitive || !value.isString }) {
             throw AgentSdkException(
                 ErrorCode.INVALID_ARGUMENT,
-                "metadata contains unsupported fields: ${extraFields.sorted()}",
+                "metadata keys and values must be strings",
                 "metadata",
             )
         }
@@ -711,6 +711,16 @@ class AgentSdk internal constructor(
                     "metadata.$field must be a non-empty string",
                     "metadata.$field",
                 )
+            }
+        }
+    }
+
+    private fun normalizeIdentityMetadata(metadata: JsonObject): JsonObject {
+        val required = listOf("region", "os", "version")
+        val optional = (metadata.keys - required.toSet()).sorted()
+        return buildJsonObject {
+            (required + optional).forEach { field ->
+                put(field, metadata.getValue(field))
             }
         }
     }

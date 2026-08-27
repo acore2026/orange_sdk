@@ -41,7 +41,8 @@ AgentRuntime 同步本机信息。
 本地 HTTP Server 只保留 Agent 间 `/A2A/message`。
 
 控制面写请求由 SDK 自动生成普通 UUID 格式的 `request_id`。身份申请严格按
-`ACN-H-ID-v1` 的 LP16/U64BE 字段编码签名；其他控制请求使用 `proof`。
+`ACN-H-ID-v1` 编码 owner/name/publicKey/description/timestamp，并将完整紧凑
+`metadata` JSON Container 作为一个 LP16 字段签名；其他控制请求使用 `proof`。
 `proof` 保留现有 `verification_method/proof_purpose` 字段名。其分离 JWS 的
 未编码载荷固定为
 `SHA-256(canonical(proof 去掉 jws)) || SHA-256(canonical(业务文档去掉 proof))`；

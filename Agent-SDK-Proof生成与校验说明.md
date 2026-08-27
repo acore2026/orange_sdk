@@ -18,7 +18,10 @@
 本文不覆盖以下两类签名：
 
 - `POST /idm/v1/identity-applications` 使用的 `signature`。该接口采用
-  `ACN-H-ID-v1\0 + LP16/U64BE` 专用字段编码，不使用本文的 `proof` 算法；
+  `ACN-H-ID-v1\0 + LP16/U64BE` 专用字段编码，其中完整紧凑
+  `metadata` JSON Container 作为单个 LP16 字段，不使用本文的 `proof`
+  算法。SDK 固定必填字段 `region/os/version` 的顺序，其他字符串字段
+  按名称排序，保证签名字节与 HTTP/N-01 传输的 Metadata JSON 完全一致；
 - 内测三方能力机构签发 Capability VC 时使用的 `creator + signature_value`。
   该测试 VC 使用另一套凭证签名格式，不属于本文的消息级 proof。
 

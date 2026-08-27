@@ -331,7 +331,31 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
-    fun `identity application rejects metadata outside N01 contract`() = runTest {
+    fun `identity application accepts string metadata and normalizes order`() = runTest {
+        initializeSdk()
+
+        sdk.applyIdentity(
+            owner = "Alice",
+            name = "AliceAgent",
+            description = "AgentModel-X",
+            metadata = buildJsonObject {
+                put("zone", "north")
+                put("version", "0.12.0")
+                put("os", "Android")
+                put("region", "CN")
+                put("platform", "edge")
+            },
+        )
+
+        assertEquals(
+            "{\"region\":\"CN\",\"os\":\"Android\",\"version\":\"0.12.0\"," +
+                "\"platform\":\"edge\",\"zone\":\"north\"}",
+            runtime.lastBody!!.getValue("metadata").toString(),
+        )
+    }
+
+    @Test
+    fun `identity application rejects non-string metadata value`() = runTest {
         initializeSdk()
 
         val error = runCatching {
@@ -343,7 +367,7 @@ class AgentSdkGroupConfigTest {
                     put("region", "CN")
                     put("os", "Android")
                     put("version", "0.12.0")
-                    put("platform", "unsupported-extra")
+                    put("priority", 1)
                 },
             )
         }.exceptionOrNull() as AgentSdkException

@@ -664,6 +664,7 @@ class AgentSdk:
         assert self._runtime is not None
         path = "/idm/v1/identity-applications"
         self._validate_identity_application(owner, name, description, metadata)
+        normalized_metadata = self._normalize_identity_metadata(metadata)
         body = await self._authenticate_control_request(
             path,
             {
@@ -672,7 +673,7 @@ class AgentSdk:
                 "name": name,
                 "public_key": self._device_identity_store.ensure().public_key_base64,
                 "description": description,
-                "metadata": dict(metadata or {}),
+                "metadata": normalized_metadata,
             },
         )
         response = await self._runtime.request("POST", path, body)
@@ -1128,11 +1129,13 @@ class AgentSdk:
                 "metadata must be a JSON object",
                 field="metadata",
             )
-        extra_fields = set(metadata).difference({"region", "os", "version"})
-        if extra_fields:
+        if any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in metadata.items()
+        ):
             raise AgentSdkError(
                 ErrorCode.INVALID_ARGUMENT,
-                f"metadata contains unsupported fields: {sorted(extra_fields)}",
+                "metadata keys and values must be strings",
                 field="metadata",
             )
         for field in ("region", "os", "version"):
@@ -1143,6 +1146,12 @@ class AgentSdk:
                     f"metadata.{field} must be a non-empty string",
                     field=f"metadata.{field}",
                 )
+
+    @staticmethod
+    def _normalize_identity_metadata(metadata: Mapping[str, Any]) -> dict[str, str]:
+        required = ("region", "os", "version")
+        ordered_keys = (*required, *sorted(set(metadata).difference(required)))
+        return {key: str(metadata[key]) for key in ordered_keys}
 
     @staticmethod
     def _require_response_object(

@@ -55,9 +55,12 @@ def test_identity_signing_bytes_match_cross_platform_golden_vector():
 
     encoded = identity_application_signing_bytes(payload)
 
-    assert len(encoded) == 174
+    assert len(encoded) == 204
     assert hashlib.sha256(encoded).hexdigest() == (
-        "483881296c5966469dcc901c15e7ff1c970644d7cb81446493f6178837e47a03"
+        "97eea3ebc7f7d6018d789b285bf36c16d545698b2931987855881b799d7fea60"
+    )
+    assert encoded.endswith(
+        b'\x00.{"region":"CN","os":"Linux","version":"1.0.0"}'
     )
 
 

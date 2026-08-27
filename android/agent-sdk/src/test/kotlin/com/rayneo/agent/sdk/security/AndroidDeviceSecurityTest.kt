@@ -43,10 +43,17 @@ class AndroidDeviceSecurityTest {
             .digest(encoded)
             .joinToString("") { "%02x".format(it) }
 
-        assertEquals(174, encoded.size)
+        assertEquals(204, encoded.size)
         assertEquals(
-            "483881296c5966469dcc901c15e7ff1c970644d7cb81446493f6178837e47a03",
+            "97eea3ebc7f7d6018d789b285bf36c16d545698b2931987855881b799d7fea60",
             digest,
+        )
+        val metadataSuffix =
+            "\u0000.{\"region\":\"CN\",\"os\":\"Linux\",\"version\":\"1.0.0\"}"
+                .toByteArray()
+        assertTrue(
+            encoded.copyOfRange(encoded.size - metadataSuffix.size, encoded.size)
+                .contentEquals(metadataSuffix),
         )
     }
 

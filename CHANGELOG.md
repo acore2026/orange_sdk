@@ -2,6 +2,25 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-27 — H-ID 签名对齐现网 IDM 的完整 Metadata JSON 编码
+
+### 修改原因
+
+- 真实 `POST /idm/v1/identity-applications` 已通过 AgentRuntime 本地校验并进入核心网，但 IDM 返回 `SIGNATURE_INVALID`。
+- 核心网 `RegisterSigningBytes/hidSigningBytes` 将完整 `request.Metadata` JSON Container 作为一个 LP16 字段；原 SDK 将 `region/os/version` 分成三个 LP16，双方待签字节必然不同。
+
+### 修改方式
+
+- Python 和 Android 统一改为 `domain + owner/name/publicKey/description + timestamp + LP16(compact metadata JSON)`，HTTP 字段名、字段类型和签名算法不变。
+- 两端在申请体中固定 `region→os→version` 顺序，额外字符串 metadata 字段按名称排序，签名与 HTTP 发送复用相同对象和紧凑 UTF-8 JSON 编码。
+- metadata 校验对齐 IDM：保留三个必填非空字符串，允许额外字符串成员，拒绝非字符串值。
+- 用户 README 和 Proof 说明同步更新 H-ID 待签字节与 metadata 顺序约束。
+
+### 验证内容
+
+- Python 和 Android 共享的新黄金向量为 204 字节，SHA-256 为 `97eea3ebc7f7d6018d789b285bf36c16d545698b2931987855881b799d7fea60`。
+- 测试覆盖额外字符串 metadata 的确定性排序、非字符串拒绝和 H-ID 自签自验；Python/Android 全量测试、编译及 `git diff --check` 通过，原始《SDK设计文档》保持不变。
+
 ## 2026-08-27 — A/B 联调脚本改为默认连续执行
 
 ### 修改原因

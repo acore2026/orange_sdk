@@ -72,7 +72,33 @@ async def test_identity_uses_raw_request_and_vc0_response(sdk_fixture):
     assert profile.identity_vc["id"] == "vc-a"
 
 
-async def test_identity_rejects_metadata_outside_n01_contract(sdk_fixture):
+async def test_identity_accepts_string_metadata_and_normalizes_field_order(
+    sdk_fixture,
+):
+    await sdk_fixture["sdk"].apply_identity(
+        "Alice",
+        "AliceAgent",
+        "AgentModel-X",
+        {
+            "zone": "north",
+            "version": "0.12.0",
+            "os": "Linux",
+            "region": "CN",
+            "platform": "edge",
+        },
+    )
+
+    body = sdk_fixture["runtime"].requests[-1][2]
+    assert body["metadata"] == {
+        "region": "CN",
+        "os": "Linux",
+        "version": "0.12.0",
+        "platform": "edge",
+        "zone": "north",
+    }
+
+
+async def test_identity_rejects_non_string_metadata_value(sdk_fixture):
     with pytest.raises(AgentSdkError) as caught:
         await sdk_fixture["sdk"].apply_identity(
             "Alice",
@@ -82,7 +108,7 @@ async def test_identity_rejects_metadata_outside_n01_contract(sdk_fixture):
                 "region": "CN",
                 "os": "Linux",
                 "version": "0.12.0",
-                "platform": "unsupported-extra",
+                "priority": 1,
             },
         )
 

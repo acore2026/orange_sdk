@@ -81,15 +81,30 @@ def identity_application_signing_bytes(payload: Mapping[str, Any]) -> bytes:
     name = _identity_string(payload, "name").encode("utf-8")
     description = _identity_string(payload, "description").encode("utf-8")
     timestamp = _identity_string(payload, "timestamp")
-    region = _identity_string(payload, "region", container="metadata").encode(
-        "utf-8"
-    )
-    operating_system = _identity_string(
-        payload, "os", container="metadata"
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        raise AgentSdkError(
+            ErrorCode.INVALID_ARGUMENT,
+            "metadata must be a JSON object",
+            field="metadata",
+        )
+    for required in ("region", "os", "version"):
+        _identity_string(payload, required, container="metadata")
+    if any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in metadata.items()
+    ):
+        raise AgentSdkError(
+            ErrorCode.INVALID_ARGUMENT,
+            "metadata keys and values must be strings",
+            field="metadata",
+        )
+    metadata_json = json.dumps(
+        metadata,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8")
-    version = _identity_string(payload, "version", container="metadata").encode(
-        "utf-8"
-    )
     try:
         public_key_der = base64.b64decode(
             _identity_string(payload, "public_key"), validate=True
@@ -143,9 +158,7 @@ def identity_application_signing_bytes(payload: Mapping[str, Any]) -> bytes:
             _lp16(public_key_der, "public_key"),
             _lp16(description, "description"),
             struct.pack("!Q", timestamp_millis),
-            _lp16(region, "metadata.region"),
-            _lp16(operating_system, "metadata.os"),
-            _lp16(version, "metadata.version"),
+            _lp16(metadata_json, "metadata"),
         )
     )
 
