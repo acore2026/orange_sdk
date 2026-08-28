@@ -387,9 +387,13 @@ group = await sdk.create_group(
     agent_id=profile.agent_id,
     target_agent_ids=[agents[0].agent_id],
     group_name="customer-demo",
+    dnn="internet",
     max_members=2,
 )
 ```
+
+`dnn` 是建组必填参数，必须与目标 Agent 可用的 PDU 会话数据网络一致。SDK 将其
+原样放入 `group_config.dnn` 并纳入 proof，空字符串或纯空白值会在本地直接拒绝。
 
 `credentials` 是正式用法：调用方传入已经由运营商或能力认证组织签发的 VC，
 SDK 将其原样放入 `vc_list`。封闭实验环境还可直接传能力字符串；SDK 会使用
@@ -754,6 +758,7 @@ sudo -E .venv/bin/python examples/linux_agent.py \
   --masque-token 'replace-with-secret-for-device-a' \
   --required-skill text \
   --group-name customer-demo \
+  --dnn internet \
   --message '{"type":"text","content":"hello"}' \
   --sandbox-id sandbox-edge-1 \
   --log-file /var/log/agent-sdk/agent-a.log \
@@ -791,6 +796,7 @@ sudo -E .venv/bin/python examples/interactive_linux_agent.py \
   --masque-url https://192.168.3.10:4433/.well-known/masque/ip \
   --required-skill text \
   --group-name customer-demo \
+  --dnn internet \
   --message '{"type":"text","content":"hello"}' \
   --log-file ./logs/interactive-agent-a.log
 ```
@@ -835,6 +841,7 @@ sudo -E .venv/bin/python examples/agent_a_test.py \
   --masque-url https://192.168.3.10:8443/.well-known/masque/ip \
   --target-capability text \
   --group-name agent-a-b-test-group \
+  --dnn internet \
   --message '{"type":"text","content":"hello Agent B from Agent A"}' \
   --log-file ./logs/agent-a-test.log
 ```
@@ -898,7 +905,7 @@ ss -lunp | grep <MASQUE端口>
 | `register_capabilities(...)` | 发布已有 VC；内测时也可将能力字符串签成三方 VC 后发布 | `OperationResult` |
 | `update_capabilities(...)` | `POST /arf/v1/agent-cards-update` 更新能力 | `OperationResult` |
 | `discover_agents(...)` | 从原始 `result[].agent_card` 发现 Agent | `list[DiscoveredAgent]` |
-| `create_group(...)` | 使用 `target_agents + group_config` 请求建群 | `GroupInfo` |
+| `create_group(..., dnn, ...)` | 使用 `target_agents + group_config` 请求建群；`dnn` 必填 | `GroupInfo` |
 | `get_group_snapshot(group_id)` | 查询 SDK 已提交的只读群组快照 | `GroupConfigSnapshot | None` |
 | `send_message(...)` | 按群组缓存直接调用完整 `service_endpoints` | `MessageReceipt` |
 | `create_offloading_session(...)` | 创建计算卸载会话 | `OffloadingSession` |

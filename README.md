@@ -51,6 +51,9 @@ AgentRuntime 同步本机信息。
 格式。SDK 直接调用成员的完整 `service_endpoints` URL，并使用 `agent_ip` 安装
 用户面主机路由；用户仍只传 `group_id + target_agent_id`。
 
+创建群组时必须向 `create_group/createGroup` 传入非空 `dnn`。SDK 会将其写入
+`group_config.dnn` 并纳入控制面 proof，应用不需要自行拼装 HTTP 请求体。
+
 控制面写请求由 SDK 自动生成普通 UUID 格式的 `request_id`。身份申请严格按
 `ACN-H-ID-v1` 编码 owner/name/publicKey/description/timestamp，并将完整紧凑
 `metadata` JSON Container 作为一个 LP16 字段签名；其他控制请求使用 `proof`。

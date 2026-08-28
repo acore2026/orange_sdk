@@ -2,6 +2,23 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-28 — 建组接口增加必填 DNN
+
+### 修改原因
+
+- 最新联调契约要求 H-GROUP 的 `group_config` 必须携带非空 `dnn`，用于网侧选择对应的 PDU 会话和数据网络；上一提交按当时要求未由 SDK 发送该字段。
+
+### 修改方式
+
+- Python `create_group` 和 Android `createGroup` 增加无默认值的必填 `dnn` 参数，并在发送前拒绝空值或纯空白值。
+- SDK 将调用方传入值原样写入 `POST /acf/v1/agents-grouping` 的 `group_config.dnn`；现有控制请求认证器会自动把该字段纳入 proof 覆盖的业务文档。
+- Linux 全流程、交互式示例和 Agent A/B 联调示例增加 `--dnn` 配置并传入建组函数；同步更新 README 与两端单元测试。
+
+### 验证内容
+
+- Python/Android 测试覆盖合法 DNN 随建组请求发送以及空 DNN 在本地被拒绝。
+- `python3 -m compileall -q src examples tests` 与全量 `pytest` 通过（89 passed）；Android 完整 Gradle 验证仍依赖外部 Android SDK 环境。
+
 ## 2026-08-28 — 按 ACN 全流程测试重新对齐发现与 A2A 接口
 
 ### 修改原因

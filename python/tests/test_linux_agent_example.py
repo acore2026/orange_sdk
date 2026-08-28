@@ -73,6 +73,7 @@ def test_linux_agent_parser_accepts_full_flow_values():
     )
     assert arguments.message == {"type": "text", "content": "hello"}
     assert arguments.test_capability == ["robot-control", "voice"]
+    assert arguments.dnn == "internet"
     assert arguments.keep_identity is False
 
 
@@ -151,6 +152,7 @@ async def test_linux_agent_full_flow_executes_every_business_api():
         "capabilities": ["robot-control"],
         "test_vc_private_key_path": None,
     }
+    assert sdk.create_group.await_args.kwargs["dnn"] == "internet"
     assert (
         sdk.create_offloading_session.await_args.kwargs["workload_type"]
         == "video_rendering"

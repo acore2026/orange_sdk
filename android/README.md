@@ -98,6 +98,19 @@ sdk.registerCapabilities(
 Production applications should publish VCs issued by an external capability
 authority through `credentials` and must use a build without this lab key.
 
+Group creation requires a non-blank DNN. The SDK places it in
+`group_config.dnn` and includes it in the existing control-request proof:
+
+```kotlin
+val group = sdk.createGroup(
+    agentId = profile.agentId,
+    targetAgentIds = listOf(target.agentId),
+    groupName = "patrol-group",
+    dnn = "internet",
+    maxMembers = 2,
+)
+```
+
 To rebuild the shipped ARM64 library after native source changes:
 
 ```bash

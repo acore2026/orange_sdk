@@ -198,6 +198,7 @@ async def test_create_group_preserves_nested_original_body(sdk_fixture):
         "did:example:agent-a",
         ["did:example:agent-b"],
         "task-patrol",
+        "internet",
         max_members=2,
     )
 
@@ -212,11 +213,29 @@ async def test_create_group_preserves_nested_original_body(sdk_fixture):
             "group_name": "task-patrol",
             "scope": "private",
             "max_members": 2,
+            "dnn": "internet",
         },
         "timestamp": "2026-08-19T00:00:00Z",
         "proof": {"jws": "test-proof"},
     }
     assert group.group_id == "g1"
+
+
+async def test_create_group_rejects_blank_dnn(sdk_fixture):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+
+    with pytest.raises(AgentSdkError) as caught:
+        await sdk.create_group(
+            "did:example:agent-a",
+            ["did:example:agent-b"],
+            "task-patrol",
+            "   ",
+        )
+
+    assert caught.value.code is ErrorCode.INVALID_ARGUMENT
+    assert caught.value.field == "dnn"
+    assert runtime.requests == []
 
 
 async def test_control_requests_use_identity_signature_and_other_proofs(

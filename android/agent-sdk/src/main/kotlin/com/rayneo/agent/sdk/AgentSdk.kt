@@ -536,10 +536,18 @@ class AgentSdk internal constructor(
         agentId: String,
         targetAgentIds: List<String>,
         groupName: String,
+        dnn: String,
         scope: String = "private",
         maxMembers: Int = 10,
     ): GroupInfo {
         requireReady()
+        if (dnn.isBlank()) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "dnn must be a non-empty string",
+                "dnn",
+            )
+        }
         val path = "/acf/v1/agents-grouping"
         val response = runtime!!.request("POST", path, authenticateControl(path, buildJsonObject {
             put("request_id", UUID.randomUUID().toString())
@@ -549,6 +557,7 @@ class AgentSdk internal constructor(
                 put("group_name", groupName)
                 put("scope", scope)
                 put("max_members", maxMembers)
+                put("dnn", dnn)
             })
         }))
         if (response["status"]?.jsonPrimitive?.contentOrNull != "grouped") {

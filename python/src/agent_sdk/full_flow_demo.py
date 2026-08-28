@@ -374,6 +374,7 @@ async def run_demo(
             profile.agent_id,
             [discovered[0].agent_id],
             group_name="demo-group",
+            dnn="internet",
             max_members=2,
         )
         show("7 create_group", group.group_id)

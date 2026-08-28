@@ -263,12 +263,14 @@ async def run_full_flow(
         before_step,
         "sdk.create_group",
         "POST /acf/v1/agents-grouping 邀请目标 Agent 并创建群组；"
-        f"target_agent_id={target_agent_id}，group_name={args.group_name!r}",
+        f"target_agent_id={target_agent_id}，group_name={args.group_name!r}，"
+        f"dnn={args.dnn!r}",
     )
     group = await sdk.create_group(
         profile.agent_id,
         [target_agent_id],
         group_name=args.group_name,
+        dnn=args.dnn,
         scope=args.group_scope,
         max_members=args.max_members,
     )
@@ -454,6 +456,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--max-results", type=int, default=10)
     value.add_argument("--target-agent-id")
     value.add_argument("--group-name", default="linux-sdk-example")
+    value.add_argument("--dnn", default="internet")
     value.add_argument("--group-scope", default="private")
     value.add_argument("--max-members", type=int, default=2)
     value.add_argument("--group-timeout", type=float, default=30.0)

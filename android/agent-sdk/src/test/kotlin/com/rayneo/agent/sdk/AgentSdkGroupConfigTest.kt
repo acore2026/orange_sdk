@@ -458,6 +458,44 @@ class AgentSdkGroupConfigTest {
         assertEquals(listOf("patrol"), agents.single().skills)
     }
 
+    @Test
+    fun `create group requires and sends dnn`() = runTest {
+        initializeSdk()
+
+        val group = sdk.createGroup(
+            agentId = LOCAL_ID,
+            targetAgentIds = listOf(PEER_ID),
+            groupName = "patrol-group",
+            dnn = "internet",
+            maxMembers = 2,
+        )
+
+        assertEquals("g1", group.groupId)
+        assertEquals("/acf/v1/agents-grouping", runtime.lastPath)
+        assertEquals(
+            "internet",
+            runtime.lastBody!!.getValue("group_config").jsonObject
+                .getValue("dnn").jsonPrimitive.content,
+        )
+    }
+
+    @Test
+    fun `create group rejects blank dnn`() = runTest {
+        initializeSdk()
+
+        val error = runCatching {
+            sdk.createGroup(
+                agentId = LOCAL_ID,
+                targetAgentIds = listOf(PEER_ID),
+                groupName = "patrol-group",
+                dnn = "   ",
+            )
+        }.exceptionOrNull() as AgentSdkException
+
+        assertEquals(ErrorCode.INVALID_ARGUMENT, error.code)
+        assertEquals("dnn", error.field)
+    }
+
     private suspend fun initializeSdk() {
         val result = sdk.initialize(
             agentRuntimeIp = "192.168.3.10",
@@ -602,6 +640,11 @@ class AgentSdkGroupConfigTest {
                         })
                     })
                     put("timestamp", "2026-08-21T09:00:01.000Z")
+                }
+            } else if (path == "/acf/v1/agents-grouping") {
+                buildJsonObject {
+                    put("status", "grouped")
+                    put("group_id", "g1")
                 }
             } else {
                 buildJsonObject { }

@@ -251,12 +251,14 @@ async def run_agent_a(
         await _before_step(
             gate,
             "sdk.create_group",
-            "POST /acf/v1/agents-grouping，邀请发现到的 Agent B 建组。",
+            "POST /acf/v1/agents-grouping，邀请发现到的 Agent B 建组；"
+            f"dnn={args.dnn!r}。",
         )
         group = await client.create_group(
             profile.agent_id,
             [target.agent_id],
             group_name=args.group_name,
+            dnn=args.dnn,
             scope=args.group_scope,
             max_members=2,
         )
@@ -368,6 +370,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--discovery-scope", default="intra_plmn")
     value.add_argument("--max-results", type=int, default=10)
     value.add_argument("--group-name", default="agent-a-b-test-group")
+    value.add_argument("--dnn", default="internet")
     value.add_argument("--group-scope", default="private")
     value.add_argument("--group-timeout", type=float, default=60.0)
     value.add_argument(

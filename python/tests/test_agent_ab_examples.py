@@ -43,6 +43,7 @@ async def test_agent_a_discovers_b_groups_and_sends_from_group_cache():
     module = _load_example("agent_a_test")
     args = _base_arguments(module)
     assert args.prompt is False
+    assert args.dnn == "internet"
     profile = SimpleNamespace(
         agent_id="did:example:a",
         agent_name="Agent-A",
@@ -109,6 +110,7 @@ async def test_agent_a_discovers_b_groups_and_sends_from_group_cache():
     assert "task_id" not in sdk.discover_agents.await_args.kwargs
     assert sdk.discover_agents.await_args.kwargs["required_skills"] == ["text"]
     assert sdk.create_group.await_args.args[1] == ["did:example:b"]
+    assert sdk.create_group.await_args.kwargs["dnn"] == "internet"
     assert sdk.send_message.await_args.args[:2] == (
         "group-a-b",
         "did:example:b",

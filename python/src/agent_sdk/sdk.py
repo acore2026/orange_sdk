@@ -956,10 +956,17 @@ class AgentSdk:
         agent_id: str,
         target_agent_ids: Sequence[str],
         group_name: str,
+        dnn: str,
         scope: str = "private",
         max_members: int = 10,
     ) -> GroupInfo:
         self._require_ready()
+        if not isinstance(dnn, str) or not dnn.strip():
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "dnn must be a non-empty string",
+                field="dnn",
+            )
         assert self._runtime is not None
         path = "/acf/v1/agents-grouping"
         body = await self._authenticate_control_request(
@@ -972,6 +979,7 @@ class AgentSdk:
                     "group_name": group_name,
                     "scope": scope,
                     "max_members": max_members,
+                    "dnn": dnn,
                 },
             },
         )
