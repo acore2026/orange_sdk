@@ -29,7 +29,7 @@ async def test_group_config_caches_by_agent_id_and_installs_route(sdk_fixture):
     assert member.agent_ip == "8.8.8.8"
     assert member.tcp_port == 4001
     assert member.skills == ("text", "voice")
-    assert member.service_endpoint == "http://8.8.8.8:4001/A2A/message"
+    assert member.service_endpoint == "http://agent-b.example:4001/A2A/message"
     assert "8.8.8.8/32" in backend.routes
     assert "8.8.8.7/32" not in backend.routes
 
@@ -52,7 +52,7 @@ async def test_group_config_commits_without_listener(sdk_fixture):
     assert snapshot is not None
     assert snapshot.members_by_agent_id[PEER_ID].agent_ip == "8.8.8.8"
     assert "8.8.8.8/32" in backend.routes
-    assert messenger.calls[0][0] == "http://8.8.8.8:4001/A2A/message"
+    assert messenger.calls[0][0] == "http://agent-b.example:4001/A2A/message"
 
 
 async def test_listener_reject_is_only_a_notification_result(sdk_fixture):
@@ -181,11 +181,12 @@ async def test_send_message_uses_only_cached_tcp_endpoint(sdk_fixture):
     assert receipt.delivered is True
     assert len(messenger.calls) == 1
     endpoint, body, _ = messenger.calls[0]
-    assert endpoint == "http://8.8.8.8:4567/A2A/message"
+    assert endpoint == "http://agent-b.example:4567/A2A/message"
     assert body["dst_agent_id"] == PEER_ID
     assert body["src_agent_id"] == "did:example:agent-a"
     assert body["type"] == "control"
     assert body["task_id"] == "task-patrol"
+    assert "proof" not in body
 
 
 async def test_send_without_group_config_never_falls_back(sdk_fixture):

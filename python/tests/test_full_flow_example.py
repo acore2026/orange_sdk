@@ -20,7 +20,7 @@ async def test_full_flow_example_calls_every_primary_api(capsys, tmp_path):
     summary = await module.run_demo(log_file_path=str(log_path))
 
     assert summary["runtime_request_count"] == 8
-    assert summary["peer_endpoint"] == "http://8.8.8.8:4001/A2A/message"
+    assert summary["peer_endpoint"] == "http://agent-b:4001/A2A/message"
     assert summary["installed_route"] is True
     assert summary["received_message_count"] == 1
     assert summary["message_delivered"] is True

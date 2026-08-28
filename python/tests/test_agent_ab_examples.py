@@ -55,13 +55,14 @@ async def test_agent_a_discovers_b_groups_and_sends_from_group_cache():
     )
     target = SimpleNamespace(
         agent_id="did:example:b",
-        ip="10.60.0.3",
-        tcp_port=4001,
-        udp_port=28443,
+        service_endpoints="http://agent-b:4001/A2A/message",
         skills=("text",),
         priority=1,
     )
-    member = SimpleNamespace(agent_ip="10.60.0.3", tcp_port=4001)
+    member = SimpleNamespace(
+        agent_ip="10.60.0.3",
+        service_endpoint="http://agent-b:4001/A2A/message",
+    )
     snapshot = SimpleNamespace(
         members_by_agent_id={target.agent_id: member}, generation=1
     )
@@ -102,6 +103,10 @@ async def test_agent_a_discovers_b_groups_and_sends_from_group_cache():
         "message_id": "message-a-b",
     }
     assert "capabilities" not in sdk.register_capabilities.await_args.kwargs
+    assert sdk.register_capabilities.await_args.kwargs["credentials"] == [
+        ability.ability_vc
+    ]
+    assert "task_id" not in sdk.discover_agents.await_args.kwargs
     assert sdk.discover_agents.await_args.kwargs["required_skills"] == ["text"]
     assert sdk.create_group.await_args.args[1] == ["did:example:b"]
     assert sdk.send_message.await_args.args[:2] == (
@@ -154,6 +159,9 @@ async def test_agent_b_publishes_capability_and_can_exit_after_message_event():
     assert result["capability"] == "text"
     assert sdk.register_capabilities.await_args.kwargs["capabilities"] == [
         "text"
+    ]
+    assert sdk.register_capabilities.await_args.kwargs["credentials"] == [
+        ability.ability_vc
     ]
     assert (
         sdk.register_capabilities.await_args.kwargs["test_vc_private_key_path"]

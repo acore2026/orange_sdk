@@ -191,7 +191,7 @@ async def run_agent_a(
         registration = await client.register_capabilities(
             profile.agent_id,
             priority=args.priority,
-            credentials=[profile.identity_vc, ability.ability_vc],
+            credentials=[ability.ability_vc],
         )
         if not registration.success:
             raise RuntimeError(
@@ -205,7 +205,6 @@ async def run_agent_a(
             "POST /arf/v1/agent-discoveries，按目标能力发现 Agent B。",
         )
         discovered = await client.discover_agents(
-            task_id=args.task_id,
             agent_id=profile.agent_id,
             task_description=args.task_description,
             required_skills=[args.target_capability],
@@ -218,8 +217,7 @@ async def run_agent_a(
             agents=[
                 {
                     "agent_id": item.agent_id,
-                    "agent_ip": item.ip,
-                    "tcp_port": item.tcp_port,
+                    "service_endpoints": item.service_endpoints,
                     "skills": list(item.skills),
                     "priority": item.priority,
                 }
@@ -247,8 +245,7 @@ async def run_agent_a(
         _emit(
             "TARGET_B_SELECTED",
             agent_id=target.agent_id,
-            agent_ip=target.ip,
-            tcp_port=target.tcp_port,
+            service_endpoints=target.service_endpoints,
         )
 
         await _before_step(
@@ -283,7 +280,7 @@ async def run_agent_a(
             generation=snapshot.generation,
             target_agent_id=target.agent_id,
             target_agent_ip=member.agent_ip,
-            target_tcp_port=member.tcp_port,
+            target_service_endpoint=member.service_endpoint,
         )
 
         await _before_step(

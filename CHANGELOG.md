@@ -2,6 +2,25 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-28 — 按 ACN 全流程测试重新对齐发现与 A2A 接口
+
+### 修改原因
+
+- `/root/acn/acn_sdk_runtime_full_flow_test.py` 的 H-DISCOVERY 请求不包含 `task_id`，成功响应的 `agent_card` 使用 `service_endpoints + skills`；原 SDK 仍发送额外 `task_id` 并解析旧 `agent_ip/tcp_port/udp_port`。
+- 现行 H-A2A 定义不包含消息级 `proof`，并要求直接调用群组配置中的完整 `service_endpoints`；原 SDK 仍附加 proof，并用 `agent_ip` 改写 URL 主机。
+- 用户明确指定 `dnn` 不由端侧 SDK 实现，因此 H-GROUP 参数和请求体保持原设计，不跟随测试脚本增加 `group_config.dnn`。
+
+### 修改方式
+
+- Python/Android 的发现公开函数删除 `task_id`，HTTP 请求及外层 proof 待签业务文档同步删除该字段；`DiscoveredAgent` 改为 `agent_id + service_endpoints + skills + priority`。
+- 群组缓存验证 `service_endpoints` 为完整 HTTP/HTTPS URL 后保存原值；`send_message` 直接调用该 URL，A2A 请求仅保留 `message_id/group_id/type/timestamp/payload/src_agent_id/dst_agent_id/task_id`，接收端拒绝旧 `proof` 等契约外字段。
+- A/B、Linux 和离线全流程示例发布 Profile 时不再把 VC0 放入 `vc_list`，只传运营商 VC1 与可选能力 VC；同步更新两端测试和用户说明。
+
+### 验证内容
+
+- Python 测试覆盖 H-DISCOVERY 不发送 `task_id`、新 `agent_card` 响应解析、完整 `service_endpoints` 原值投递、A2A 无 proof 请求及旧 proof 拒绝。
+- `python3 -m compileall -q src examples tests` 与全量 `pytest` 通过（88 passed）；Android 接口、模型和单元测试同步更新，完整 Gradle 验证仍依赖外部 Android SDK 环境。
+
 ## 2026-08-27 — 补齐 AgentCard service_endpoints 并消除 H3 SETTINGS 竞态
 
 ### 修改原因

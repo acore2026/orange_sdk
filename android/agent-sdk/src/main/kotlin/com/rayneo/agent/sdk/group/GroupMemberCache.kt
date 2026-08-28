@@ -111,7 +111,6 @@ class GroupMemberCache(
             }
             val (serviceEndpoint, tcpPort) = parseServiceEndpoint(
                 member.serviceEndpoints,
-                normalizedIp,
                 "members.$label.service_endpoints",
             )
             if (
@@ -208,7 +207,6 @@ class GroupMemberCache(
 
     private fun parseServiceEndpoint(
         value: String,
-        agentIp: String,
         field: String,
     ): Pair<String, Int> {
         val parsed = try {
@@ -246,16 +244,7 @@ class GroupMemberCache(
                 field,
             )
         }
-        val deliveryEndpoint = URI(
-            parsed.scheme,
-            null,
-            agentIp,
-            port,
-            parsed.path,
-            parsed.query,
-            null,
-        ).toASCIIString()
-        return deliveryEndpoint to port
+        return value to port
     }
 
     private fun normalizeLiteralIp(value: String, field: String): String {

@@ -6,6 +6,7 @@ import com.rayneo.agent.sdk.model.NetworkMessageType
 import com.rayneo.agent.sdk.transport.LocalServer
 import com.rayneo.agent.sdk.transport.ControlRequestAuthenticator
 import com.rayneo.agent.sdk.transport.DevicePublicKeyProvider
+import com.rayneo.agent.sdk.transport.GroupMessageListener
 import com.rayneo.agent.sdk.transport.MediaOffloadAdapter
 import com.rayneo.agent.sdk.transport.MessageSigner
 import com.rayneo.agent.sdk.transport.MasqueConfiguration
@@ -159,12 +160,37 @@ class AgentSdkGroupConfigTest {
         )
 
         assertTrue(receipt.delivered)
-        assertEquals("8.8.8.8", peer.ip)
+        assertEquals("agent.example", peer.ip)
         assertEquals(4567, peer.port)
         assertEquals(PEER_ID, peer.body!!["dst_agent_id"].toString().trim('"'))
         assertEquals(LOCAL_ID, peer.body!!["src_agent_id"].toString().trim('"'))
         assertEquals("control", peer.body!!["type"].toString().trim('"'))
         assertEquals("task-patrol", peer.body!!["task_id"].toString().trim('"'))
+        assertFalse(peer.body!!.containsKey("proof"))
+    }
+
+    @Test
+    fun `A2A rejects legacy proof outside the current contract`() = runTest {
+        initializeSdk()
+        sdk.registerGroupMessageListener(GroupMessageListener { _, _, _ -> })
+        runtime.deliverGroupConfig(groupConfig())
+
+        val error = runCatching {
+            sdk.handleA2aMessage(buildJsonObject {
+                put("message_id", "message-1")
+                put("group_id", "g1")
+                put("src_agent_id", PEER_ID)
+                put("dst_agent_id", LOCAL_ID)
+                put("type", "text")
+                put("task_id", "task-patrol")
+                put("timestamp", "2026-08-28T00:00:00Z")
+                put("payload", buildJsonObject { put("hello", "world") })
+                put("proof", buildJsonObject { put("jws", "legacy") })
+            })
+        }.exceptionOrNull() as AgentSdkException
+
+        assertEquals(ErrorCode.INVALID_ARGUMENT, error.code)
+        assertEquals("proof", error.field)
     }
 
     @Test
@@ -296,10 +322,6 @@ class AgentSdkGroupConfigTest {
         assertEquals("/arf/v1/agent-cards-update", runtime.lastPath)
         assertEquals(LOCAL_ID, runtime.lastBody!!["agent_id"].toString().trim('"'))
         UUID.fromString(runtime.lastBody!!["request_id"].toString().trim('"'))
-        assertEquals(
-            "http://8.8.8.7:4001/A2A/message",
-            runtime.lastBody!!.getValue("service_endpoints").jsonPrimitive.content,
-        )
         assertFalse(runtime.lastBody!!.containsKey("request_type"))
     }
 
@@ -395,6 +417,10 @@ class AgentSdkGroupConfigTest {
         assertEquals("POST", runtime.lastMethod)
         assertEquals("/arf/v1/agent-cards", runtime.lastPath)
         UUID.fromString(runtime.lastBody!!["request_id"].toString().trim('"'))
+        assertEquals(
+            "http://8.8.8.7:4001/A2A/message",
+            runtime.lastBody!!.getValue("service_endpoints").jsonPrimitive.content,
+        )
         val vcList = runtime.lastBody!!.getValue("vc_list").jsonArray
         assertEquals(3, vcList.size)
         assertEquals("vc0", vcList[0].jsonObject.getValue("id").jsonPrimitive.content)
@@ -409,6 +435,27 @@ class AgentSdkGroupConfigTest {
             it.jsonObject.getValue("proof").jsonObject
                 .getValue("jws").jsonPrimitive.content.isNotBlank()
         })
+    }
+
+    @Test
+    fun `discovery uses current request and AgentCard fields`() = runTest {
+        initializeSdk()
+
+        val agents = sdk.discoverAgents(
+            agentId = LOCAL_ID,
+            taskDescription = "Patrol Area A",
+            requiredSkills = listOf("patrol"),
+        )
+
+        assertEquals("/arf/v1/agent-discoveries", runtime.lastPath)
+        assertFalse(runtime.lastBody!!.containsKey("task_id"))
+        assertEquals(1, agents.size)
+        assertEquals(PEER_ID, agents.single().agentId)
+        assertEquals(
+            "http://agent-b:4001/A2A/message",
+            agents.single().serviceEndpoints,
+        )
+        assertEquals(listOf("patrol"), agents.single().skills)
     }
 
     private suspend fun initializeSdk() {
@@ -540,6 +587,21 @@ class AgentSdkGroupConfigTest {
                     put("vc0", buildJsonObject {
                         put("claims", buildJsonObject { put("agent_name", "AliceAgent") })
                     })
+                }
+            } else if (path == "/arf/v1/agent-discoveries") {
+                buildJsonObject {
+                    put("task_description", "Patrol Area A")
+                    put("result", buildJsonArray {
+                        add(buildJsonObject {
+                            put("agent_card", buildJsonObject {
+                                put("agent_id", PEER_ID)
+                                put("service_endpoints", "http://agent-b:4001/A2A/message")
+                                put("skills", buildJsonArray { add(JsonPrimitive("patrol")) })
+                            })
+                            put("priority", 1)
+                        })
+                    })
+                    put("timestamp", "2026-08-21T09:00:01.000Z")
                 }
             } else {
                 buildJsonObject { }

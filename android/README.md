@@ -5,8 +5,8 @@ The Android library mirrors the Python SDK's group-cache and endpoint rules:
 - `AgentVpnService` creates the Agent TUN without root.
 - `acf_group_config` is decoded into an immutable snapshot keyed by
   `group_id + agent_id`.
-- A2A HTTP uses cached `service_endpoints` for scheme/port/path and the verified
-  `agent_ip` as the routed destination; applications never pass an endpoint.
+- A2A HTTP calls the cached complete `service_endpoints` URL without rewriting
+  scheme, authority, port, or path; `agent_ip` is used only for the VPN route.
 - Group changes rebuild VPN routes and atomically swap the TUN fd in the native
   MASQUE core.
 - Runtime downlink uses a client WebSocket; A2A uses the Agent TUN HTTP listener.
@@ -41,11 +41,11 @@ certificate or key parameters to `initialize`.
 On the first `initialize`, the SDK also creates a separate P-256 message-signing
 key in Android Keystore under alias `agent-sdk-device-signing-v1`. The private
 key is non-exportable. Identity registration automatically sends its Base64
-SubjectPublicKeyInfo public key; control-plane and A2A messages are signed by
-the SDK. The AAR retains the pinned core-network P-256 public key and verifier
+SubjectPublicKeyInfo public key; control-plane requests are signed by the SDK,
+while the current A2A contract has no message-level proof. The AAR retains the pinned core-network P-256 public key and verifier
 implementation, but this internal interoperability build bypasses inbound
-`acf_group_config.proof` and peer A2A `proof` verification. Outbound signing is
-unchanged. Applications do not supply proof verifiers, authenticators, signers,
+`acf_group_config.proof` verification. Control-plane outbound signing is unchanged.
+Applications do not supply proof verifiers, authenticators, signers,
 public keys, or production private keys. This profile must not be used in
 production.
 The explicit lab-only capability issuer import described below is the sole

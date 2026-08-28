@@ -93,9 +93,7 @@ data class NetworkAbility(
 
 data class DiscoveredAgent(
     val agentId: String,
-    val ip: String,
-    val tcpPort: Int,
-    val udpPort: Int,
+    val serviceEndpoints: String,
     val skills: List<String>,
     val priority: Int,
 )

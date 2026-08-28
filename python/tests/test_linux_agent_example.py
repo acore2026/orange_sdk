@@ -147,7 +147,7 @@ async def test_linux_agent_full_flow_executes_every_business_api():
     sdk.set_local_profile_for_restore.assert_called_once_with(profile)
     assert sdk.register_capabilities.await_args.kwargs == {
         "priority": 1,
-        "credentials": [profile.identity_vc, ability.ability_vc],
+        "credentials": [ability.ability_vc],
         "capabilities": ["robot-control"],
         "test_vc_private_key_path": None,
     }

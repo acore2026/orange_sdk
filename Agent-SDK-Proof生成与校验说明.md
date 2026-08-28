@@ -9,17 +9,16 @@
 
 ## 1. 说明范围
 
-本文说明 Agent SDK 当前使用的消息级 `proof` 生成和校验方法，覆盖以下四类消息：
+本文说明 Agent SDK 当前使用的消息级 `proof` 生成和校验方法，覆盖以下三类消息：
 
 1. SDK 发往 AgentRuntime 的非身份申请控制面写请求以及 H-COMPUTE 算力卸载请求；
 2. 核心网通过 AgentRuntime 下发的 `acf_group_config` 群组配置；
-3. Agent 之间通过 `POST /A2A/message` 发送的定向消息。
-4. 内测三方能力机构签发的 `AgentCapabilityCredential`。
+3. 内测三方能力机构签发的 `AgentCapabilityCredential`。
 
 > 联调状态说明（2026-08-27）：Python Wheel 和 Android AAR 当前默认收包路径已
-> 暂停核心网群组配置 proof 与 A2A proof 的验签，只保留字段校验、缓存、路由和
-> 投递。本文的验签算法、内置公钥和实现代码仍保留，供恢复安全开关及双方对齐
-> 使用。所有出站签名继续按本文生成，HTTP/NAS 字段名没有变化。该联调 Profile
+> 暂停核心网群组配置 proof 的验签，只保留字段校验、缓存、路由和投递。
+> 现行 A2A HTTP 接口不包含消息级 proof。本文的验签算法、内置公钥和实现代码
+> 仍保留，供恢复安全开关及双方对齐使用。控制面出站签名继续按本文生成。该联调 Profile
 > 不得用于生产环境。
 
 本文不覆盖以下两类签名：
@@ -79,7 +78,6 @@ SDK 生成的 proof 格式如下：
 |---|---|---|
 | SDK 控制面上行请求 | `authentication` | 网侧根据已经登记的 Agent/设备身份取得端侧公钥 |
 | `acf_group_config` | `assertionMethod` | SDK 内置的核心网 P-256 公钥 |
-| A2A 定向消息 | `authentication` | 当前联调仍生成出站 proof；最新群组成员不下发验签公钥，接收端暂不执行该 proof 验签 |
 
 不得直接读取未验签消息里的 `verification_method`，然后用它指定的公钥验证同一
 条消息。`verification_method` 是受签名保护的声明字段，不是当前 SDK 的信任锚。
@@ -92,12 +90,9 @@ SDK 生成的 proof 格式如下：
 
 - 非身份申请控制请求和 H-COMPUTE：HTTP 请求体去掉 `request_id`，加入 SDK 生成的
   `timestamp`，并且不包含 `proof`；
-- A2A 消息：包含 `message_id/group_id/type/timestamp/payload/src_agent_id/
-  dst_agent_id/task_id`，不包含 `proof`；
 - 群组配置：包含核心网生成的完整群组配置业务字段，不包含 `proof`。
 
 控制请求的 `request_id` 只用于 HTTP 幂等、事务关联和重试，不进入业务签名。
-A2A 的 `message_id` 是业务消息字段，需要进入业务文档摘要。
 
 ### 4.2 构造 proofOptions
 
@@ -408,14 +403,12 @@ Python 和 Android 测试使用以下 proofOptions：
 
 ### 8.3 A2A 定向消息
 
-发送端先构造不含 proof 的完整 A2A 消息，使用本机设备私钥和
-`proof_purpose=authentication` 生成 proof，随后发送到从已提交群组缓存解析出的
-目标成员的 `service_endpoints`；SDK 使用其中的协议、端口和路径，并以已验证的
-`agent_ip` 作为实际目的地址。
-
-当前群组配置没有携带发送方验签公钥，因此接收端暂不校验 A2A proof；它仍会
-校验目标、群组成员关系和消息字段，再把 `payload` 交给应用 listener。后续恢复
-验签时必须新增网侧可信公钥分发或查询机制，不能使用消息自带公钥。
+现行 A2A 请求固定包含
+`message_id/group_id/type/timestamp/payload/src_agent_id/dst_agent_id/task_id`，
+不包含消息级 `proof`。SDK 按 `group_id + target_agent_id` 取得完整
+`service_endpoints` 并直接调用，不改写 URL 的 scheme、authority、端口或路径；
+`agent_ip` 仅用于安装用户面主机路由。接收端校验目标、群组成员关系和消息字段后
+把 `payload` 交给应用 listener。
 
 ### 8.4 三方 Agent 能力凭证
 
@@ -436,7 +429,7 @@ key ID，并按第 4、5 章生成 ES256 分离 JWS。旧的
   最大偏差；
 - 群组配置上层会解析业务 `timestamp`，并拒绝不比已提交快照更新的配置，但当前
   没有单独的绝对时间窗口；
-- A2A 上层当前只要求业务 `timestamp` 非空，proof 基础验签函数不负责防重放；
+- A2A 上层当前只要求业务 `timestamp` 非空，接口未定义消息级 proof 或防重放缓存；
 - HTTP 控制请求的幂等和重试由 `request_id` 处理，而 `request_id` 按契约不进入
   业务签名。
 

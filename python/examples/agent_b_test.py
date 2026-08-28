@@ -165,7 +165,7 @@ async def run_agent_b(
         registration = await client.register_capabilities(
             profile.agent_id,
             priority=args.priority,
-            credentials=[profile.identity_vc, ability.ability_vc],
+            credentials=[ability.ability_vc],
             capabilities=[args.capability],
             test_vc_private_key_path=args.third_party_private_key,
         )

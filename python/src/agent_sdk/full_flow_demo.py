@@ -146,14 +146,12 @@ class DemoRuntime:
             }
         if path == "/arf/v1/agent-discoveries":
             return {
-                "task_id": body["task_id"],
+                "task_description": body["task_description"],
                 "result": [
                     {
                         "agent_card": {
                             "agent_id": PEER_AGENT_ID,
-                            "agent_ip": "8.8.8.8",
-                            "tcp_port": "4001",
-                            "udp_port": "28443",
+                            "service_endpoints": "http://agent-b:4001/A2A/message",
                             "skills": ["text", "camera"],
                         },
                         "priority": 1,
@@ -198,7 +196,6 @@ class DemoLocalServer:
                 "task_id": "task-demo",
                 "timestamp": _now(),
                 "payload": {"text": "hello from Agent B"},
-                "proof": {"jws": "demo-message-proof"},
             }
         )
 
@@ -348,7 +345,7 @@ async def run_demo(
         registration = await sdk.register_capabilities(
             profile.agent_id,
             priority=1,
-            credentials=[profile.identity_vc, ability.ability_vc],
+            credentials=[ability.ability_vc],
         )
         show("4 register_capabilities", registration.success)
 
@@ -366,7 +363,6 @@ async def run_demo(
         show("5 update_capabilities", update.success)
 
         discovered = await sdk.discover_agents(
-            task_id="task-demo",
             agent_id=profile.agent_id,
             task_description="send a demo message",
             required_skills=["text"],
@@ -435,7 +431,7 @@ async def run_demo(
         assert summary == {
             "runtime_request_count": 8,
             "group_id": "g-demo",
-            "peer_endpoint": "http://8.8.8.8:4001/A2A/message",
+            "peer_endpoint": "http://agent-b:4001/A2A/message",
             "installed_route": True,
             "received_message_count": 1,
             "invitation_action": "ACCEPT",

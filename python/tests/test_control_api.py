@@ -173,24 +173,21 @@ async def test_discovery_parses_raw_result_agent_card(sdk_fixture):
     runtime = sdk_fixture["runtime"]
 
     agents = await sdk.discover_agents(
-        "task-1",
-        "did:example:agent-a",
-        "Patrol Area A",
-        ["camera"],
+        agent_id="did:example:agent-a",
+        task_description="Patrol Area A",
+        required_skills=["camera"],
     )
 
     method, path, body = runtime.requests[-1]
     assert (method, path) == ("POST", "/arf/v1/agent-discoveries")
     uuid.UUID(body["request_id"])
+    assert "task_id" not in body
     assert body["timestamp"] == "2026-08-19T00:00:00Z"
     assert body["proof"] == {"jws": "test-proof"}
     assert len(agents) == 1
     assert agents[0].agent_id == "did:example:agent-b"
-    assert (agents[0].ip, agents[0].tcp_port, agents[0].udp_port) == (
-        "8.8.8.8",
-        4001,
-        28443,
-    )
+    assert agents[0].service_endpoints == "http://agent-b:4001/A2A/message"
+    assert agents[0].skills == ("camera",)
 
 
 async def test_create_group_preserves_nested_original_body(sdk_fixture):

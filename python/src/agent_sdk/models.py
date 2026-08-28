@@ -113,9 +113,7 @@ class NetworkAbility:
 @dataclass(frozen=True, slots=True)
 class DiscoveredAgent:
     agent_id: str
-    ip: str
-    tcp_port: int
-    udp_port: int
+    service_endpoints: str
     skills: tuple[str, ...]
     priority: int
 

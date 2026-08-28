@@ -321,21 +321,14 @@ class AgentSdk:
                 "log_backup_count": log_backup_count,
             },
         )
-        if not (
-            self._group_config_verification_enabled
-            and self._a2a_verification_enabled
-        ):
+        if not self._group_config_verification_enabled:
             self._log(
                 logging.WARNING,
                 "inbound_signature_verification_disabled",
                 security_profile="internal-test-only",
-                group_config_proof_verification=(
-                    "enabled" if self._group_config_verification_enabled else "disabled"
-                ),
-                a2a_proof_verification=(
-                    "enabled" if self._a2a_verification_enabled else "disabled"
-                ),
-                outbound_signing="enabled",
+                group_config_proof_verification="disabled",
+                a2a_message_proof="not_defined_by_contract",
+                control_request_signing="enabled",
             )
         try:
             if self._state not in {"NEW", "CLOSED"}:
@@ -581,10 +574,30 @@ class AgentSdk:
             raise AgentSdkError(
                 ErrorCode.GROUP_NOT_ACTIVE, "A2A listener or local identity is missing"
             )
+        allowed_fields = {
+            "message_id",
+            "group_id",
+            "src_agent_id",
+            "dst_agent_id",
+            "type",
+            "task_id",
+            "timestamp",
+            "payload",
+        }
+        unexpected_fields = sorted(
+            str(field) for field in payload if field not in allowed_fields
+        )
+        if unexpected_fields:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"A2A contains unsupported field: {unexpected_fields[0]}",
+                field=unexpected_fields[0],
+            )
         group_id = str(payload.get("group_id", ""))
         sender_id = str(payload.get("src_agent_id", ""))
         target_id = str(payload.get("dst_agent_id", ""))
         for field in (
+            "message_id",
             "group_id",
             "src_agent_id",
             "dst_agent_id",
@@ -603,7 +616,7 @@ class AgentSdk:
                 ErrorCode.TARGET_NOT_IN_GROUP, "A2A message targets another agent"
             )
         assert self._groups is not None
-        sender = await self._groups.resolve(group_id, sender_id)
+        await self._groups.resolve(group_id, sender_id)
         user_payload = payload.get("payload")
         if not isinstance(user_payload, Mapping):
             raise AgentSdkError(
@@ -658,7 +671,6 @@ class AgentSdk:
             "dst_agent_id": target_agent_id,
             "task_id": task_id,
         }
-        body["proof"] = dict(await self._message_signer.sign_a2a(body))
         response = await self._peer_messenger.send(
             target.service_endpoint, body, timeout_seconds
         )
@@ -892,7 +904,6 @@ class AgentSdk:
     @logged_async
     async def discover_agents(
         self,
-        task_id: str,
         agent_id: str,
         task_description: str,
         required_skills: Sequence[str],
@@ -906,7 +917,6 @@ class AgentSdk:
             path,
             {
                 "request_id": str(uuid.uuid4()),
-                "task_id": task_id,
                 "agent_id": agent_id,
                 "task_description": task_description,
                 "required_skills": list(required_skills),
@@ -930,13 +940,10 @@ class AgentSdk:
                     f"Runtime response result[{index}] must be an object",
                 )
             card = self._require_response_object(item, "agent_card")
-            tcp_port = card.get("tcp_port", card.get("agent_port", 0))
             agents.append(
                 DiscoveredAgent(
                     agent_id=str(card["agent_id"]),
-                    ip=str(card.get("agent_ip", "")),
-                    tcp_port=int(tcp_port),
-                    udp_port=int(card.get("udp_port", 0)),
+                    service_endpoints=str(card["service_endpoints"]),
                     skills=tuple(card.get("skills", ())),
                     priority=int(item.get("priority", 0)),
                 )

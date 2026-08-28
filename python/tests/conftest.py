@@ -111,14 +111,12 @@ class FakeRuntime:
             }
         if path == "/arf/v1/agent-discoveries":
             return {
-                "task_id": "task-1",
+                "task_description": "Patrol Area A",
                 "result": [
                     {
                         "agent_card": {
                             "agent_id": PEER_ID,
-                            "agent_ip": "8.8.8.8",
-                            "tcp_port": "4001",
-                            "udp_port": "28443",
+                            "service_endpoints": "http://agent-b:4001/A2A/message",
                             "skills": ["camera"],
                         },
                         "priority": 1,

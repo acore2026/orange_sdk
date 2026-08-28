@@ -209,7 +209,7 @@ async def run_full_flow(
     registered = await sdk.register_capabilities(
         profile.agent_id,
         priority=args.priority,
-        credentials=[profile.identity_vc, ability.ability_vc],
+        credentials=[ability.ability_vc],
         capabilities=args.test_capability,
         test_vc_private_key_path=args.test_third_party_private_key,
     )
@@ -241,10 +241,9 @@ async def run_full_flow(
         before_step,
         "sdk.discover_agents",
         "POST /arf/v1/agent-discoveries 发现满足技能条件的 Agent；"
-        f"task_id={args.task_id!r}，required_skills={args.required_skill or ['text']}",
+        f"required_skills={args.required_skill or ['text']}",
     )
     discovered = await sdk.discover_agents(
-        task_id=args.task_id,
         agent_id=profile.agent_id,
         task_description=args.task_description,
         required_skills=args.required_skill or ["text"],

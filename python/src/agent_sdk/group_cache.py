@@ -5,7 +5,7 @@ import re
 from datetime import datetime, timezone
 from ipaddress import ip_address
 from typing import Any, Mapping
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from .errors import AgentSdkError, ErrorCode
 from .models import GroupConfigSnapshot, GroupMemberInfo
@@ -28,7 +28,7 @@ def _require_string(value: Any, field: str) -> str:
     return value.strip()
 
 
-def _parse_service_endpoint(value: Any, agent_ip: str, field: str) -> tuple[str, int]:
+def _parse_service_endpoint(value: Any, field: str) -> tuple[str, int]:
     endpoint = _require_string(value, field)
     try:
         parsed = urlsplit(endpoint)
@@ -60,11 +60,7 @@ def _parse_service_endpoint(value: Any, agent_ip: str, field: str) -> tuple[str,
             f"{field} port must be in 1..65535",
             field=field,
         )
-    # The service URL supplies scheme, port and path.  The verified Agent IP is
-    # always used as the destination so traffic follows the installed /32 route.
-    host = f"[{agent_ip}]" if ":" in agent_ip else agent_ip
-    authority = f"{host}:{port}"
-    return urlunsplit((parsed.scheme, authority, parsed.path, parsed.query, "")), port
+    return endpoint, port
 
 
 def _parse_timestamp(value: Any) -> datetime:
@@ -195,7 +191,6 @@ class GroupMemberCache:
                 )
             service_endpoint, tcp_port = _parse_service_endpoint(
                 value.get("service_endpoints"),
-                agent_ip,
                 f"{prefix}.service_endpoints",
             )
             members[agent_id] = GroupMemberInfo(

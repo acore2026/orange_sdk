@@ -252,6 +252,25 @@ class AgentSdk internal constructor(
             ErrorCode.GROUP_NOT_ACTIVE,
             "Group message listener is unavailable",
         )
+        val allowedFields = setOf(
+            "message_id",
+            "group_id",
+            "src_agent_id",
+            "dst_agent_id",
+            "type",
+            "task_id",
+            "timestamp",
+            "payload",
+        )
+        val unsupportedField = payload.keys.firstOrNull { it !in allowedFields }
+        if (unsupportedField != null) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "A2A contains unsupported field: $unsupportedField",
+                unsupportedField,
+            )
+        }
+        payload.requireString("message_id")
         val groupId = payload.requireString("group_id")
         val senderId = payload.requireString("src_agent_id")
         payload.requireString("type")
@@ -317,13 +336,9 @@ class AgentSdk internal constructor(
             put("dst_agent_id", targetAgentId)
             put("task_id", taskId)
         }
-        val body = buildJsonObject {
-            unsigned.forEach { (key, value) -> put(key, value) }
-            put("proof", messageSigner.signA2a(unsigned))
-        }
         val response = peerMessenger.send(
             target.serviceEndpoint,
-            body,
+            unsigned,
             (timeoutSeconds * 1000).toLong(),
         )
         val delivered = response["status"]?.jsonPrimitive?.contentOrNull == "OK"
@@ -489,7 +504,6 @@ class AgentSdk internal constructor(
     })
 
     suspend fun discoverAgents(
-        taskId: String,
         agentId: String,
         taskDescription: String,
         requiredSkills: List<String>,
@@ -500,7 +514,6 @@ class AgentSdk internal constructor(
         val path = "/arf/v1/agent-discoveries"
         val response = runtime!!.request("POST", path, authenticateControl(path, buildJsonObject {
             put("request_id", UUID.randomUUID().toString())
-            put("task_id", taskId)
             put("agent_id", agentId)
             put("task_description", taskDescription)
             put("required_skills", buildJsonArray { requiredSkills.forEach { add(JsonPrimitive(it)) } })
@@ -512,9 +525,7 @@ class AgentSdk internal constructor(
             val card = item["agent_card"]?.jsonObject ?: buildJsonObject { }
             DiscoveredAgent(
                 agentId = card.requireString("agent_id"),
-                ip = card["agent_ip"]?.jsonPrimitive?.contentOrNull ?: "",
-                tcpPort = card["tcp_port"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
-                udpPort = card["udp_port"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
+                serviceEndpoints = card.requireString("service_endpoints"),
                 skills = (card["skills"] as? JsonArray).orEmpty().map { it.jsonPrimitive.content },
                 priority = item["priority"]?.jsonPrimitive?.intOrNull ?: 0,
             )

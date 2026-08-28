@@ -288,7 +288,7 @@ MASQUE TLS 的 P-256 消息签名密钥：
 LP16(完整紧凑 metadata JSON)`，签名使用 ASN.1 DER 再做标准 Base64。
 `metadata` 的必填字段顺序固定为 `region/os/version`，额外字符串字段
 按字段名排序；SDK 签名和 HTTP 发送使用同一个紧凑 UTF-8 JSON。
-其他控制请求和 A2A 的 `proof.jws` 使用 `ES256`、RFC 7797 `b64=false` 的分离
+其他控制请求的 `proof.jws` 使用 `ES256`、RFC 7797 `b64=false` 的分离
 JWS。SDK 自动生成普通 UUID `request_id`，它只用于 HTTP 幂等关联，不进入
 NAS 业务体，也不属于签名覆盖范围。
 
@@ -310,10 +310,10 @@ Wheel 只预置 `/root/lpx/cert/core-network/public-key.pem` 对应的核心网�
 SPKI DER SHA-256 指纹为
 `86:D4:77:77:67:4E:79:77:88:A9:61:18:8A:C9:B8:A4:CD:34:DF:15:F4:61:FC:1C:E9:BA:89:D2:15:01:6C:CD`。
 核心网私钥不会进入 SDK。验签实现和内置公钥继续保留，便于后续恢复；当前
-封闭联调 Profile 不执行 `acf_group_config.proof` 和 A2A `proof` 的入站验签，
-收到消息后直接进入原有字段校验、成员缓存或业务投递流程。SDK 初始化日志会
-输出 `inbound_signature_verification_disabled` 警告。控制面和 A2A 出站签名仍
-照常生成，HTTP/NAS 字段及签名算法没有变化。该 Profile 不得用于生产环境。
+封闭联调 Profile 不执行 `acf_group_config.proof` 的入站验签；现行 A2A 请求本身
+不包含消息级 `proof`。收到消息后直接进入原有字段校验、成员缓存或业务投递流程。
+SDK 初始化日志会输出 `inbound_signature_verification_disabled` 警告。控制面出站
+签名仍照常生成。该 Profile 不得用于生产环境。
 
 ## 4. 应用如何调用 SDK
 
@@ -342,9 +342,8 @@ sdk.register_group_message_listener(GroupListener())
 ```
 
 应用不传入签名器、验签器或私钥。首次 `init()` 时 SDK 自动生成 P-256
-设备密钥并持久化；之后控制面请求和 A2A 消息都复用该私钥签名。当前封闭联调
-构建不会校验核心网下发 `acf_group_config.proof` 或对端 A2A `proof`；完整验签
-实现仍保留在 SDK 内，但不接入默认收包路径。
+设备密钥并持久化；之后控制面请求复用该私钥签名。当前封闭联调构建不会校验
+核心网下发的 `acf_group_config.proof`；A2A 按当前接口不携带消息级 proof。
 
 ### 4.2 身份、能力、发现和建群
 
@@ -361,7 +360,7 @@ ability = await sdk.get_network_ability(profile.agent_id)
 await sdk.register_capabilities(
     profile.agent_id,
     priority=1,
-    credentials=[profile.identity_vc, ability.ability_vc],
+    credentials=[ability.ability_vc],
 )
 
 await sdk.update_capabilities(
@@ -377,12 +376,12 @@ await sdk.update_capabilities(
 )
 
 agents = await sdk.discover_agents(
-    task_id="task-001",
     agent_id=profile.agent_id,
     task_description="寻找支持文字消息的 Agent",
     required_skills=["text"],
     max_results=10,
 )
+# 每项包含 agent_id、service_endpoints、skills、priority
 
 group = await sdk.create_group(
     agent_id=profile.agent_id,
@@ -401,7 +400,7 @@ SDK 将其原样放入 `vc_list`。封闭实验环境还可直接传能力字符
 await sdk.register_capabilities(
     profile.agent_id,
     priority=1,
-    credentials=[profile.identity_vc],
+    credentials=[ability.ability_vc],
     capabilities=["robot-control", "voice"],
     # test_vc_private_key_path 省略时使用 Wheel 内置的联调测试私钥
 )
@@ -465,11 +464,12 @@ receipt = await sdk.send_message(
 print(receipt.message_id, receipt.delivered)
 ```
 
-应用不传 URL、IP 或端口。SDK 从已缓存的目标 `service_endpoints` 取得协议、端口和路径，并以同一成员的已验证 `agent_ip` 替换 URL 主机名，确保报文命中 Agent TUN 的对端主机路由。例如：
+应用不传 URL、IP 或端口。SDK 直接调用群组配置中已缓存的完整
+`service_endpoints`，不改写 scheme、authority、端口或路径。例如：
 
 ```text
 service_endpoints = http://agent-b:4001/A2A/message
-实际请求          = POST http://<agent_ip>:4001/A2A/message
+实际请求          = POST http://agent-b:4001/A2A/message
 ```
 
 这个 HTTP 包由系统路由送入 Agent TUN，再通过 CONNECT-IP 和 5GC U 面到达对端。群组配置不存在或目标不在群组时，SDK 会拒绝发送，不会回退到用户提供的地址；当前联调 Profile 不会因 proof 验签失败拒绝消息。
@@ -771,7 +771,8 @@ AgentRuntime 下发 `acf_group_config`，不会让用户填写对端 IP 或端�
 
 该全流程默认注销本次申请的身份。需要保留身份时传 `--keep-identity`，并把
 验证后的 `AgentProfile` 安全持久化；传 `--stay-running` 可在流程完成后继续
-接收消息。出站签名全部由 SDK 内部执行；当前联调 Profile 暂停入站验签。
+接收消息。控制面出站签名由 SDK 内部执行；当前联调 Profile 暂停群组配置验签，
+A2A 消息按现行接口不携带 proof。
 
 ### 5.3 按回车逐接口调用的真实测试 Demo
 
@@ -899,7 +900,7 @@ ss -lunp | grep <MASQUE端口>
 | `discover_agents(...)` | 从原始 `result[].agent_card` 发现 Agent | `list[DiscoveredAgent]` |
 | `create_group(...)` | 使用 `target_agents + group_config` 请求建群 | `GroupInfo` |
 | `get_group_snapshot(group_id)` | 查询 SDK 已提交的只读群组快照 | `GroupConfigSnapshot | None` |
-| `send_message(...)` | 按群组缓存自动解析地址并发送 `/A2A/message` | `MessageReceipt` |
+| `send_message(...)` | 按群组缓存直接调用完整 `service_endpoints` | `MessageReceipt` |
 | `create_offloading_session(...)` | 创建计算卸载会话 | `OffloadingSession` |
 | `start_video_upload(...)` | 启动视频上传 | `VideoUploadHandle` |
 | `get_processed_video_stream(...)` | 获取处理后视频流 | `RemoteVideoStream` |
