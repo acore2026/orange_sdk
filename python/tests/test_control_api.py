@@ -238,6 +238,79 @@ async def test_create_group_rejects_blank_dnn(sdk_fixture):
     assert runtime.requests == []
 
 
+async def test_single_interface_failure_keeps_sdk_ready_for_later_calls(
+    sdk_fixture,
+):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    original_request = runtime.request
+    failed_once = False
+
+    async def fail_one_profile_request(method, path, body):
+        nonlocal failed_once
+        if path == "/arf/v1/agent-cards" and not failed_once:
+            failed_once = True
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "test profile rejection",
+            )
+        return await original_request(method, path, body)
+
+    runtime.request = fail_one_profile_request
+
+    with pytest.raises(AgentSdkError) as failed_call:
+        await sdk.register_capabilities(
+            "did:example:agent-a", 2, [{"id": "vc-camera"}]
+        )
+
+    assert failed_call.value.code is ErrorCode.RUNTIME_REJECTED
+    assert sdk.state == "READY"
+    assert sdk_fixture["server"].started is True
+    assert sdk_fixture["masque"].connected is True
+    assert sdk_fixture["tun"].closed is False
+    assert runtime.closed is False
+
+    discovered = await sdk.discover_agents(
+        agent_id="did:example:agent-a",
+        task_description="continue after a failed profile request",
+        required_skills=["camera"],
+    )
+
+    assert [agent.agent_id for agent in discovered] == [
+        "did:example:agent-b"
+    ]
+    log_text = sdk_fixture["log_path"].read_text(encoding="utf-8")
+    assert '"event":"interface_failure_isolated"' in log_text
+    assert '"sdk_kept_running":true' in log_text
+
+
+async def test_close_drains_http_server_before_stopping_uplink_and_masque(
+    sdk_fixture,
+):
+    sdk = sdk_fixture["sdk"]
+    server = sdk_fixture["server"]
+    masque = sdk_fixture["masque"]
+    original_server_close = server.close
+    observed: dict[str, bool] = {}
+
+    async def observe_server_close():
+        observed["masque_connected"] = masque.connected
+        observed["uplink_pump_running"] = (
+            sdk._pump_task is not None and not sdk._pump_task.done()
+        )
+        await original_server_close()
+
+    server.close = observe_server_close
+
+    await sdk.close()
+
+    assert observed == {
+        "masque_connected": True,
+        "uplink_pump_running": True,
+    }
+    assert sdk.state == "CLOSED"
+
+
 async def test_control_requests_use_identity_signature_and_other_proofs(
     sdk_fixture,
 ):

@@ -271,7 +271,46 @@ grep -E '"event":"(http_error|function_error)"|"status_code":[45][0-9][0-9]' \
 
 `authorization`、token、密码、签名、`proof/jws`、公私钥、DID key、VC 和 credentials 会写成 `[REDACTED]`。业务消息结构和非敏感字段保留，便于定位问题。日志目录必须预先允许 SDK 进程写入；无法创建日志文件时，`init()` 返回 `LOG_SETUP_FAILED`。
 
-### 3.4 SDK 内建的消息签名和联调验签策略
+### 3.4 单接口失败隔离与业务异常处理
+
+SDK 在 `READY` 状态下调用身份、能力、发现、建组、消息或算力接口时，单次
+HTTP 超时、Runtime 拒绝、对端返回错误或本地参数错误只会使当前调用抛出
+`AgentSdkError`，不会自动执行 `close()`，也不会关闭 TUN、MASQUE、Runtime
+WebSocket 或本地 A2A HTTP 服务。应用捕获本次异常后，可以继续调用其他接口，
+也可以根据 `exc.retryable` 决定是否由业务侧重试：
+
+```python
+from agent_sdk import AgentSdkError
+
+try:
+    agents = await sdk.discover_agents(
+        agent_id=profile.agent_id,
+        task_description="find a text agent",
+        required_skills=["text"],
+    )
+except AgentSdkError as exc:
+    logger.error(
+        "discovery failed: code=%s retryable=%s",
+        exc.code.value,
+        exc.retryable,
+    )
+
+# SDK 仍为 READY；后续接口可正常调用。
+ability = await sdk.get_network_ability(profile.agent_id)
+```
+
+SDK 不自动重试写接口。身份申请、能力注册、建组和消息发送发生超时时，远端
+可能已经受理但响应丢失，自动重试可能产生重复业务操作，应由应用结合
+`request_id`、业务状态和接口幂等语义决定。日志会记录
+`interface_failure_isolated`、`sdk_state=READY` 和 `sdk_kept_running=true`。
+
+`init()` 是例外：初始化尚未成功时没有可继续使用的业务链路，失败后 SDK 会
+清理半初始化资源并进入 `CLOSED`；调用方仍可在外部条件恢复后对同一个实例再次
+调用 `init()`。只有应用显式调用 `close()`，SDK 才会退出运行态。关闭时 SDK
+先排空本地 A2A HTTP 服务，并保持上行转发和 MASQUE 存活到响应发送完成，避免
+监听器刚返回就关闭导致对端收不到 HTTP 响应。
+
+### 3.5 SDK 内建的消息签名和联调验签策略
 
 用户不配置密钥，也不实现安全回调。第一次 `init()` 会生成一套独立于
 MASQUE TLS 的 P-256 消息签名密钥：

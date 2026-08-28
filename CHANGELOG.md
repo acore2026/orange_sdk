@@ -2,6 +2,24 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-28 — 隔离单接口失败并保持 SDK 业务链路运行
+
+### 修改原因
+
+- Agent A/B 在真实业务运行中可能遇到单次 Runtime HTTP 拒绝、超时或对端消息投递失败；该次失败必须可由应用捕获，不能导致 SDK 的 TUN、MASQUE、WebSocket 和本地 HTTP 服务退出。
+- 应用在 A2A listener 收到消息后立即关闭时，旧关闭顺序会先停止上行转发和 MASQUE，存在本地 HTTP 200 已构造但响应包尚未送回对端就被丢弃的窗口。
+
+### 修改方式
+
+- 所有已装饰的公开业务接口在异常日志中增加 `sdk_state` 和 `sdk_kept_running`；READY 状态下额外记录 `interface_failure_isolated`，异常继续仅返回给当前调用方，SDK 不自动关闭或重试。
+- 调整 `AgentSdk.close()` 顺序：先排空本地 A2A HTTP 服务，同时保留 TUN 上行泵、路由和 MASQUE；HTTP 服务结束后再依次释放转发资源。
+- README 增加真实业务异常处理示例，明确应用捕获 `AgentSdkError` 后可继续调用接口，以及写请求不应由 SDK 自动重试的原因。
+
+### 验证内容
+
+- 新增回归测试：能力注册接口单次失败后 SDK 仍为 READY，HTTP、TUN、MASQUE 和 Runtime 均保持运行，随后能力发现接口可以成功调用。
+- 新增关闭顺序测试：本地 HTTP 服务关闭时上行泵和 MASQUE 仍处于运行状态。
+
 ## 2026-08-28 — 建组接口增加必填 DNN
 
 ### 修改原因

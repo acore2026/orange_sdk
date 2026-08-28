@@ -95,6 +95,7 @@ def logged_async(function):
         try:
             result = await function(self, *args, **kwargs)
         except Exception as exc:
+            sdk_state = getattr(self, "state", "UNKNOWN")
             self._log(
                 logging.ERROR,
                 "function_error",
@@ -104,7 +105,17 @@ def logged_async(function):
                 error_type=type(exc).__name__,
                 error=str(exc),
                 error_code=getattr(getattr(exc, "code", None), "value", None),
+                sdk_state=sdk_state,
+                sdk_kept_running=sdk_state == "READY",
             )
+            if sdk_state == "READY":
+                self._log(
+                    logging.WARNING,
+                    "interface_failure_isolated",
+                    function=function.__name__,
+                    sdk_state=sdk_state,
+                    sdk_kept_running=True,
+                )
             raise
         self._log(
             logging.INFO,
@@ -131,6 +142,7 @@ def logged_sync(function):
         try:
             result = function(self, *args, **kwargs)
         except Exception as exc:
+            sdk_state = getattr(self, "state", "UNKNOWN")
             self._log(
                 logging.ERROR,
                 "function_error",
@@ -140,7 +152,17 @@ def logged_sync(function):
                 error_type=type(exc).__name__,
                 error=str(exc),
                 error_code=getattr(getattr(exc, "code", None), "value", None),
+                sdk_state=sdk_state,
+                sdk_kept_running=sdk_state == "READY",
             )
+            if sdk_state == "READY":
+                self._log(
+                    logging.WARNING,
+                    "interface_failure_isolated",
+                    function=function.__name__,
+                    sdk_state=sdk_state,
+                    sdk_kept_running=True,
+                )
             raise
         self._log(
             logging.INFO,
@@ -1238,6 +1260,12 @@ class AgentSdk:
             return
         try:
             self._state = "CLOSING"
+            # Drain the inbound HTTP server while routes, MASQUE and the TUN are
+            # still alive.  In particular, an application may call close as
+            # soon as its A2A listener returns; closing MASQUE first can discard
+            # the listener's HTTP response before it reaches the sender.
+            if self._server is not None:
+                await self._server.close()
             if self._pump_task is not None:
                 self._pump_task.cancel()
                 await asyncio.gather(self._pump_task, return_exceptions=True)
@@ -1248,8 +1276,6 @@ class AgentSdk:
                 await self._routes.close()
             if self._masque is not None:
                 await self._masque.close()
-            if self._server is not None:
-                await self._server.close()
             if self._runtime is not None:
                 await self._runtime.close()
             if self._tun is not None:
