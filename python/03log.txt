@@ -1,35 +1,14 @@
-{"role": "A", "event": "TEST_STARTING", "interactive": false}
-{"role": "A", "event": "STEP_AUTO", "interface": "sdk.register_network_message_listener", "description": "注册核心网邀请和群组配置监听器；不发送 HTTP。"}
-{"role": "A", "event": "STEP_AUTO", "interface": "sdk.register_group_message_listener", "description": "注册群组内 A2A 消息监听器；不发送 HTTP。"}
-{"role": "A", "event": "STEP_AUTO", "interface": "sdk.init", "description": "GET /v1/ue/info，并建立 WebSocket、TUN、MASQUE 和本地消息服务。"}
-{"role": "A", "event": "SDK_INITIALIZED", "agent_tun_cidr": "10.60.0.3/32", "agent_tcp_endpoint": "10.60.0.3:4001", "masque_endpoint": "https://101.245.78.174:8444/.well-known/masque/ip"}
-{"role": "A", "event": "STEP_AUTO", "interface": "sdk.apply_identity", "description": "POST /idm/v1/identity-applications，为 Agent A 申请数字身份。"}
-{"role": "A", "event": "IDENTITY_READY", "agent_id": "did:udid:agent.tgdle3dwvmvhrkgrgm67vsii6ywbp7n2@6gc.local"}
-{"role": "A", "event": "STEP_AUTO", "interface": "sdk.get_network_ability", "description": "POST /idm/v1/network-ability，取得 Agent A 的运营商网络能力凭证。"}
-{"role": "A", "event": "SDK_CLOSED"}
-{"role": "A", "event": "TEST_FAILED", "error_type": "AgentSdkError", "error": "Runtime response contains an invalid RFC3339 timestamp", "error_code": "RUNTIME_REJECTED", "runtime": "http://101.245.78.174:8089", "masque_url": "https://101.245.78.174:8444/.well-known/masque/ip", "local_vlan_ip": "7.246.186.53", "sdk_log_file": "./logs/agent-a-test.log"}
-Traceback (most recent call last):
-  File "/mnt/d/sdk/orange_sdk/python/src/agent_sdk/sdk.py", line 1214, in _parse_optional_datetime
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
-ValueError: Invalid isoformat string: '2027-08-28T06:34:01.931526637+00:00'
+  cd /mnt/d/sdk/orange_sdk/python
 
-The above exception was the direct cause of the following exception:
+  deactivate 2>/dev/null || true
 
-Traceback (most recent call last):
-  File "/mnt/d/sdk/orange_sdk/python/examples/agent_a_test.py", line 407, in <module>
-    asyncio.run(main(arguments))
-  File "/usr/lib/python3.10/asyncio/runners.py", line 44, in run
-    return loop.run_until_complete(main)
-  File "/usr/lib/python3.10/asyncio/base_events.py", line 649, in run_until_complete
-    return future.result()
-  File "/mnt/d/sdk/orange_sdk/python/examples/agent_a_test.py", line 401, in main
-    await run_agent_a(args, gate=gate)
-  File "/mnt/d/sdk/orange_sdk/python/examples/agent_a_test.py", line 177, in run_agent_a
-    ability = await client.get_network_ability(profile.agent_id)
-  File "/mnt/d/sdk/orange_sdk/python/src/agent_sdk/sdk.py", line 96, in wrapper
-    result = await function(self, *args, **kwargs)
-  File "/mnt/d/sdk/orange_sdk/python/src/agent_sdk/sdk.py", line 811, in get_network_ability
-    valid_until = self._parse_optional_datetime(vc1.get("valid_until"))
-  File "/mnt/d/sdk/orange_sdk/python/src/agent_sdk/sdk.py", line 1216, in _parse_optional_datetime
-    raise AgentSdkError(
-agent_sdk.errors.AgentSdkError: Runtime response contains an
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  source ~/.local/bin/env
+
+  uv python install 3.12
+  mv .venv .venv-py310-backup
+  uv venv --python 3.12 --seed .venv
+
+  source .venv/bin/activate
+  python --version
+  python -m pip install -r requirements.txt
