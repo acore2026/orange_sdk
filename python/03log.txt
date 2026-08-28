@@ -1,14 +1,229 @@
-  cd /mnt/d/sdk/orange_sdk/python
+2026-08-28T14:33:58.273 INFO agent_sdk.client.127949279197120 {"event":"log_initialized","file_path":"logs/agent-a-test.log","log_level":"INFO","max_bytes":10485760,"backup_count":5}
+2026-08-28T14:33:58.274 INFO agent_sdk.client.127949279197120 {"event":"function_enter","buffered_before_init":true,"function":"register_network_message_listener","arguments":{"listener":"<AgentANetworkListener>"}}
+2026-08-28T14:33:58.274 INFO agent_sdk.client.127949279197120 {"event":"function_exit","buffered_before_init":true,"function":"register_network_message_listener","duration_ms":0.038,"result":"<function>"}
+2026-08-28T14:33:58.275 INFO agent_sdk.client.127949279197120 {"event":"function_enter","buffered_before_init":true,"function":"register_group_message_listener","arguments":{"listener":"<AgentAGroupListener>"}}
+2026-08-28T14:33:58.275 INFO agent_sdk.client.127949279197120 {"event":"function_exit","buffered_before_init":true,"function":"register_group_message_listener","duration_ms":0.02,"result":"<function>"}
+2026-08-28T14:33:58.276 INFO agent_sdk.client.127949279197120 {"event":"function_enter","function":"init","arguments":{"agent_runtime_ip":"101.245.78.174","agent_runtime_port":8089,"local_vlan_ip":"7.246.186.53","local_tcp_port":4001,"local_udp_port":28443,"masque_server_url":"https://101.245.78.174:8444/.well-known/masque/ip","masque_authorization":"[REDACTED]","tun_name":"agent_tun_a","tun_mtu":1280,"log_file_path":"./logs/agent-a-test.log","log_level":"INFO","log_max_bytes":10485760,"log_backup_count":5}}
+2026-08-28T14:33:58.276 WARNING agent_sdk.client.127949279197120 {"event":"inbound_signature_verification_disabled","security_profile":"internal-test-only","group_config_proof_verification":"disabled","a2a_message_proof":"not_defined_by_contract","control_request_signing":"enabled"}
+2026-08-28T14:33:58.673 INFO agent_sdk.client.127949279197120 {"event":"http_request","request_id":"50a0b76ff9ca4af4b4875344a595eeb8","direction":"outbound","peer":"AgentRuntime","method":"GET","url":"http://101.245.78.174:8089/v1/ue/info","body":null}
+2026-08-28T14:33:58.770 INFO agent_sdk.client.127949279197120 {"event":"http_response","request_id":"50a0b76ff9ca4af4b4875344a595eeb8","direction":"inbound","peer":"AgentRuntime","method":"GET","url":"http://101.245.78.174:8089/v1/ue/info","status_code":200,"body":{"identity":{"supi":"imsi-208930000000002","imei":"356938035643809","imeisv":"4370816125816152"},"serving_plmn":{"mcc":"208","mnc":"93"},"nas":{"state":"session_ready","registered":true,"security_context":true},"pdu_sessions":[{"pdu_session_id":1,"state":"active","dnn":"internet","type":"IPv4","snssai":{"sst":1,"sd":"010203"},"ssc_mode":1,"ipv4":"10.60.0.3","auto_establish":true,"default_route":true}]}}
+2026-08-28T14:33:59.767 WARNING agent_sdk.client.127949279197120 {"event":"masque_server_certificate_verification_disabled","security_profile":"internal-test-only","supplied_ca_ignored":false}
+2026-08-28T14:33:59.768 INFO agent_sdk.client.127949279197120 {"event":"masque_tls_identity_ready","client_public_key_sha256":"7b03362d35dc239c3e74fbf6e5235d840abc9ea12aece77cb1ce09ca3444d4f7","server_name":"101.245.78.174","server_certificate_verification":"disabled"}
+2026-08-28T14:33:59.768 INFO agent_sdk.client.127949279197120 {"event":"masque_connect_start","server":"101.245.78.174:8444","local_address":"7.246.186.53","timeout_seconds":10.0,"phase":"QUIC handshake"}
+2026-08-28T14:33:59.823 INFO agent_sdk.client.127949279197120 {"event":"http_request","direction":"outbound","peer":"MASQUE Proxy","protocol":"HTTP/3 CONNECT-IP","stream_id":0,"method":"CONNECT","url":"https://101.245.78.174:8444/.well-known/masque/ip","headers":{":method":"CONNECT",":scheme":"https",":authority":"101.245.78.174:8444",":path":"/.well-known/masque/ip",":protocol":"connect-ip","capsule-protocol":"?1"},"body":null}
+2026-08-28T14:34:00.382 INFO agent_sdk.client.127949279197120 {"event":"http_response","direction":"inbound","peer":"MASQUE Proxy","protocol":"HTTP/3 CONNECT-IP","stream_id":0,"status_code":200,"headers":{":status":"200","capsule-protocol":"?1","date":"Fri, 28 Aug 2026 06:34:01 GMT"},"body":null}
+2026-08-28T14:34:00.384 INFO agent_sdk.client.127949279197120 {"event":"masque_http3_settings_received","h3_datagram":1,"settings":{"6":1048576,"51":1,"8":1}}
+2026-08-28T14:34:00.386 INFO agent_sdk.client.127949279197120 {"event":"masque_keep_alive_started","interval_seconds":15.0}
+2026-08-28T14:34:00.388 INFO agent_sdk.client.127949279197120 {"event":"websocket_connect","direction":"outbound","peer":"AgentRuntime","method":"GET","url":"http://101.245.78.174:8089/v1/acn/downlink-websocket"}
+2026-08-28T14:34:00.463 INFO agent_sdk.client.127949279197120 {"event":"websocket_connected","direction":"outbound","peer":"AgentRuntime","method":"GET","url":"http://101.245.78.174:8089/v1/acn/downlink-websocket"}
+2026-08-28T14:34:00.465 INFO agent_sdk.client.127949279197120 {"event":"function_exit","function":"init","duration_ms":2189.363,"result":{"runtime_connected":true,"masque_connected":true,"local_tcp_endpoint":"7.246.186.53:4001","local_udp_endpoint":"7.246.186.53:28443","agent_tcp_endpoint":"10.60.0.3:4001","agent_udp_endpoint":"10.60.0.3:28443","agent_tun_cidr":"10.60.0.3/32","masque_proxy_endpoint":"https://101.245.78.174:8444/.well-known/masque/ip"}}
+2026-08-28T14:34:00.467 INFO agent_sdk.client.127949279197120 {"event":"function_enter","function":"apply_identity","arguments":{"owner":"ab-test-owner-a","name":"Agent-A","description":"Agent A capability discovery test","metadata":{"region":"CN","os":"Linux","version":"0.14.0"}}}
+2026-08-28T14:34:00.470 INFO agent_sdk.client.127949279197120 {"event":"http_request","request_id":"8228a9a1aa8d4a11ab4767732d9c53aa","direction":"outbound","peer":"AgentRuntime","method":"POST","url":"http://101.245.78.174:8089/idm/v1/identity-applications","body":{"request_id":"35191d85-3700-4bd7-871d-a5fe6981d9ab","owner":"ab-test-owner-a","name":"Agent-A","public_key":"[REDACTED]","description":"Agent A capability discovery test","metadata":{"region":"CN","os":"Linux","version":"0.14.0"},"timestamp":"2026-08-28T06:34:00.469Z","signature":"[REDACTED]","signature_encoding":"base64"}}
+2026-08-28T14:34:00.528 INFO agent_sdk.client.127949279197120 {"event":"http_response","request_id":"8228a9a1aa8d4a11ab4767732d9c53aa","direction":"inbound","peer":"AgentRuntime","method":"POST","url":"http://101.245.78.174:8089/idm/v1/identity-applications","status_code":200,"body":{"result":"success","agent_id":"did:udid:agent.tgdle3dwvmvhrkgrgm67vsii6ywbp7n2@6gc.local","vc0":"[REDACTED]"}}
+2026-08-28T14:34:00.528 INFO agent_sdk.client.127949279197120 {"event":"function_exit","function":"apply_identity","duration_ms":61.021,"result":{"agent_id":"did:udid:agent.tgdle3dwvmvhrkgrgm67vsii6ywbp7n2@6gc.local","agent_name":"Agent-A","identity_vc":"[REDACTED]"}}
+2026-08-28T14:34:00.529 INFO agent_sdk.client.127949279197120 {"event":"function_enter","function":"get_network_ability","arguments":{"agent_id":"did:udid:agent.tgdle3dwvmvhrkgrgm67vsii6ywbp7n2@6gc.local"}}
+2026-08-28T14:34:00.529 INFO agent_sdk.client.127949279197120 {"event":"http_request","request_id":"71cc954cfeaa49ff9db75f292f619203","direction":"outbound","peer":"AgentRuntime","method":"POST","url":"http://101.245.78.174:8089/idm/v1/network-ability","body":{"request_id":"324c29e2-02cf-43be-859d-f9c7d8b11be9","agent_id":"did:udid:agent.tgdle3dwvmvhrkgrgm67vsii6ywbp7n2@6gc.local","intent":"Issue Network Ability Credential","timestamp":"2026-08-28T06:34:00.529Z","proof":"[REDACTED]"}}
+2026-08-28T14:34:00.584 INFO agent_sdk.client.127949279197120 {"event":"http_response","request_id":"71cc954cfeaa49ff9db75f292f619203","direction":"inbound","peer":"AgentRuntime","method":"POST","url":"http://101.245.78.174:8089/idm/v1/network-ability","status_code":200,"body":{"timestamp":"2026-08-28T06:34:01.931Z","vc1":"[REDACTED]"}}
+2026-08-28T14:34:00.585 ERROR agent_sdk.client.127949279197120 {"event":"function_error","function":"get_network_ability","duration_ms":56.172,"error_type":"AgentSdkError","error":"Runtime response contains an invalid RFC3339 timestamp","error_code":"RUNTIME_REJECTED"}
+Traceback (most recent call last):
+  File "/mnt/d/sdk/orange_sdk/python/src/agent_sdk/sdk.py", line 1214, in _parse_optional_datetime
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+ValueError: Invalid isoformat string: '2027-08-28T06:34:01.931526637+00:00'
 
-  deactivate 2>/dev/null || true
+The above exception was the direct cause of the following exception:
 
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  source ~/.local/bin/env
+Traceback (most recent call last):
+  File "/mnt/d/sdk/orange_sdk/python/src/agent_sdk/sdk.py", line 96, in wrapper
+    result = await function(self, *args, **kwargs)
+  File "/mnt/d/sdk/orange_sdk/python/src/agent_sdk/sdk.py", line 811, in get_network_ability
+    valid_until = self._parse_optional_datetime(vc1.get("valid_until"))
+  File "/mnt/d/sdk/orange_sdk/python/src/agent_sdk/sdk.py", line 1216, in _parse_optional_datetime
+    raise AgentSdkError(
+agent_sdk.errors.AgentSdkError: Runtime response contains an invalid RFC3339 timestamp
+2026-08-28T14:34:00.597 INFO agent_sdk.client.127949279197120 {"event":"function_enter","function":"close","arguments":{}}
+2026-08-28T14:34:01.073 WARNING agent_sdk.client.127949279197120 {"event":"connect_ip_connection_closed","error_code":0,"reason_phrase":""}
+2026-08-28T14:34:01.112 INFO agent_sdk.client.127949279197120 {"event":"function_exit","function":"close","duration_ms":515.062,"result":null}
+2026-08-28T15:02:00.395 INFO agent_sdk.client.129443638694576 {"event":"log_initialized","file_path":"logs/agent-a-test.log","log_level":"INFO","max_bytes":10485760,"backup_count":5}
+2026-08-28T15:02:00.395 INFO agent_sdk.client.129443638694576 {"event":"function_enter","buffered_before_init":true,"function":"register_network_message_listener","arguments":{"listener":"<AgentANetworkListener>"}}
+2026-08-28T15:02:00.395 INFO agent_sdk.client.129443638694576 {"event":"function_exit","buffered_before_init":true,"function":"register_network_message_listener","duration_ms":0.035,"result":"<function>"}
+2026-08-28T15:02:00.396 INFO agent_sdk.client.129443638694576 {"event":"function_enter","buffered_before_init":true,"function":"register_group_message_listener","arguments":{"listener":"<AgentAGroupListener>"}}
+2026-08-28T15:02:00.396 INFO agent_sdk.client.129443638694576 {"event":"function_exit","buffered_before_init":true,"function":"register_group_message_listener","duration_ms":0.02,"result":"<function>"}
+2026-08-28T15:02:00.396 INFO agent_sdk.client.129443638694576 {"event":"function_enter","function":"init","arguments":{"agent_runtime_ip":"101.245.78.174","agent_runtime_port":8089,"local_vlan_ip":"7.246.186.53","local_tcp_port":4001,"local_udp_port":28443,"masque_server_url":"https://101.245.78.174:8444/.well-known/masque/ip","masque_authorization":"[REDACTED]","tun_name":"agent_tun_a","tun_mtu":1280,"log_file_path":"./logs/agent-a-test.log","log_level":"INFO","log_max_bytes":10485760,"log_backup_count":5}}
+2026-08-28T15:02:00.396 WARNING agent_sdk.client.129443638694576 {"event":"inbound_signature_verification_disabled","security_profile":"internal-test-only","group_config_proof_verification":"disabled","a2a_message_proof":"not_defined_by_contract","control_request_signing":"enabled"}
+2026-08-28T15:02:00.738 INFO agent_sdk.client.129443638694576 {"event":"http_request","request_id":"880a895d20f34462b2c217b4b8a9a2c5","direction":"outbound","peer":"AgentRuntime","method":"GET","url":"http://101.245.78.174:8089/v1/ue/info","body":null}
+2026-08-28T15:02:00.847 INFO agent_sdk.client.129443638694576 {"event":"http_response","request_id":"880a895d20f34462b2c217b4b8a9a2c5","direction":"inbound","peer":"AgentRuntime","method":"GET","url":"http://101.245.78.174:8089/v1/ue/info","status_code":200,"body":{"identity":{"supi":"imsi-208930000000002","imei":"356938035643809","imeisv":"4370816125816152"},"serving_plmn":{"mcc":"208","mnc":"93"},"nas":{"state":"session_ready","registered":true,"security_context":true},"pdu_sessions":[{"pdu_session_id":1,"state":"active","dnn":"internet","type":"IPv4","snssai":{"sst":1,"sd":"010203"},"ssc_mode":1,"ipv4":"10.60.0.3","auto_establish":true,"default_route":true}]}}
+2026-08-28T15:02:01.854 WARNING agent_sdk.client.129443638694576 {"event":"masque_server_certificate_verification_disabled","security_profile":"internal-test-only","supplied_ca_ignored":false}
+2026-08-28T15:02:01.854 INFO agent_sdk.client.129443638694576 {"event":"masque_tls_identity_ready","client_public_key_sha256":"7b03362d35dc239c3e74fbf6e5235d840abc9ea12aece77cb1ce09ca3444d4f7","server_name":"101.245.78.174","server_certificate_verification":"disabled"}
+2026-08-28T15:02:01.854 INFO agent_sdk.client.129443638694576 {"event":"masque_connect_start","server":"101.245.78.174:8444","local_address":"7.246.186.53","timeout_seconds":10.0,"phase":"QUIC handshake"}
+2026-08-28T15:02:01.924 INFO agent_sdk.client.129443638694576 {"event":"http_request","direction":"outbound","peer":"MASQUE Proxy","protocol":"HTTP/3 CONNECT-IP","stream_id":0,"method":"CONNECT","url":"https://101.245.78.174:8444/.well-known/masque/ip","headers":{":method":"CONNECT",":scheme":"https",":authority":"101.245.78.174:8444",":path":"/.well-known/masque/ip",":protocol":"connect-ip","capsule-protocol":"?1"},"body":null}
+2026-08-28T15:02:01.964 INFO agent_sdk.client.129443638694576 {"event":"http_response","direction":"inbound","peer":"MASQUE Proxy","protocol":"HTTP/3 CONNECT-IP","stream_id":0,"status_code":200,"headers":{":status":"200","capsule-protocol":"?1","date":"Fri, 28 Aug 2026 07:02:04 GMT"},"body":null}
+2026-08-28T15:02:01.965 INFO agent_sdk.client.129443638694576 {"event":"masque_http3_settings_received","h3_datagram":1,"settings":{"6":1048576,"51":1,"8":1}}
+2026-08-28T15:02:01.965 INFO agent_sdk.client.129443638694576 {"event":"masque_keep_alive_started","interval_seconds":15.0}
+2026-08-28T15:02:01.966 INFO agent_sdk.client.129443638694576 {"event":"websocket_connect","direction":"outbound","peer":"AgentRuntime","method":"GET","url":"http://101.245.78.174:8089/v1/acn/downlink-websocket"}
+2026-08-28T15:02:02.040 INFO agent_sdk.client.129443638694576 {"event":"websocket_connected","direction":"outbound","peer":"AgentRuntime","method":"GET","url":"http://101.245.78.174:8089/v1/acn/downlink-websocket"}
+2026-08-28T15:02:02.040 INFO agent_sdk.client.129443638694576 {"event":"function_exit","function":"init","duration_ms":1644.205,"result":{"runtime_connected":true,"masque_connected":true,"local_tcp_endpoint":"7.246.186.53:4001","local_udp_endpoint":"7.246.186.53:28443","agent_tcp_endpoint":"10.60.0.3:4001","agent_udp_endpoint":"10.60.0.3:28443","agent_tun_cidr":"10.60.0.3/32","masque_proxy_endpoint":"https://101.245.78.174:8444/.well-known/masque/ip"}}
+2026-08-28T15:02:02.040 INFO agent_sdk.client.129443638694576 {"event":"function_enter","function":"apply_identity","arguments":{"owner":"ab-test-owner-a","name":"Agent-A","description":"Agent A capability discovery test","metadata":{"region":"CN","os":"Linux","version":"0.14.0"}}}
+2026-08-28T15:02:02.041 INFO agent_sdk.client.129443638694576 {"event":"http_request","request_id":"ccb18cb65a0b464d805c7936144151ff","direction":"outbound","peer":"AgentRuntime","method":"POST","url":"http://101.245.78.174:8089/idm/v1/identity-applications","body":{"request_id":"e68609fe-7b85-4796-94ed-c1e306cad84f","owner":"ab-test-owner-a","name":"Agent-A","public_key":"[REDACTED]","description":"Agent A capability discovery test","metadata":{"region":"CN","os":"Linux","version":"0.14.0"},"timestamp":"2026-08-28T07:02:02.041Z","signature":"[REDACTED]","signature_encoding":"base64"}}
+2026-08-28T15:02:02.100 INFO agent_sdk.client.129443638694576 {"event":"http_response","request_id":"ccb18cb65a0b464d805c7936144151ff","direction":"inbound","peer":"AgentRuntime","method":"POST","url":"http://101.245.78.174:8089/idm/v1/identity-applications","status_code":200,"body":{"result":"success","agent_id":"did:udid:agent.tgdle3dwvmvhrkgrgm67vsii6ywbp7n2@6gc.local","vc0":"[REDACTED]"}}
+2026-08-28T15:02:02.101 INFO agent_sdk.client.129443638694576 {"event":"function_exit","function":"apply_identity","duration_ms":60.281,"result":{"agent_id":"did:udid:agent.tgdle3dwvmvhrkgrgm67vsii6ywbp7n2@6gc.local","agent_name":"Agent-A","identity_vc":"[REDACTED]"}}
+2026-08-28T15:02:02.102 INFO agent_sdk.client.129443638694576 {"event":"function_enter","function":"get_network_ability","arguments":{"agent_id":"did:udid:agent.tgdle3dwvmvhrkgrgm67vsii6ywbp7n2@6gc.local"}}
+2026-08-28T15:02:02.104 INFO agent_sdk.client.129443638694576 {"event":"http_request","request_id":"ff876e21d25b4ac387ac425f8a7eb250","direction":"outbound","peer":"AgentRuntime","method":"POST","url":"http://101.245.78.174:8089/idm/v1/network-ability","body":{"request_id":"2dc07aa3-cc5d-4ce5-88cf-23ed680b11ad","agent_id":"did:udid:agent.tgdle3dwvmvhrkgrgm67vsii6ywbp7n2@6gc.local","intent":"Issue Network Ability Credential","timestamp":"2026-08-28T07:02:02.102Z","proof":"[REDACTED]"}}
+2026-08-28T15:02:02.163 INFO agent_sdk.client.129443638694576 {"event":"http_response","request_id":"ff876e21d25b4ac387ac425f8a7eb250","direction":"inbound","peer":"AgentRuntime","method":"POST","url":"http://101.245.78.174:8089/idm/v1/network-ability","status_code":200,"body":{"timestamp":"2026-08-28T07:02:04.368Z","vc1":"[REDACTED]"}}
+2026-08-28T15:02:02.163 INFO agent_sdk.client.129443638694576 {"event":"function_exit","function":"get_network_ability","duration_ms":61.648,"result":{"ability_vc":"[REDACTED]","abilities":["agent_discovery","computational_offloading"],"valid_until":"<datetime>"}}
+2026-08-28T15:02:02.164 INFO agent_sdk.client.129443638694576 {"event":"function_enter","function":"register_capabilities","arguments":{"agent_id":"did:udid:agent.tgdle3dwvmvhrkgrgm67vsii6ywbp7n2@6gc.local","priority":1,"credentials":"[REDACTED]"}}
+2026-08-28T15:02:02.165 INFO agent_sdk.client.129443638694576 {"event":"http_request","request_id":"57879fcae9c94187928c9e8cc860ba61","direction":"outbound","peer":"AgentRuntime","method":"POST","url":"http://101.245.78.174:8089/arf/v1/agent-cards","body":{"request_id":"b52144d5-5c0f-4646-acc3-3596fbfd4a9c","agent_id":"did:udid:agent.tgdle3dwvmvhrkgrgm67vsii6ywbp7n2@6gc.local","priority":1,"service_endpoints":"http://10.60.0.3:4001/A2A/message","vc_list":"[REDACTED]","timestamp":"2026-08-28T07:02:02.165Z","proof":"[REDACTED]"}}
+2026-08-28T15:02:02.215 INFO agent_sdk.client.129443638694576 {"event":"http_response","request_id":"57879fcae9c94187928c9e8cc860ba61","direction":"inbound","peer":"AgentRuntime","method":"POST","url":"http://101.245.78.174:8089/arf/v1/agent-cards","status_code":200,"body":{}}
+2026-08-28T15:02:02.216 INFO agent_sdk.client.129443638694576 {"event":"function_exit","function":"register_capabilities","duration_ms":51.592,"result":{"success":true,"operation_id":"","message":""}}
+2026-08-28T15:02:02.216 INFO agent_sdk.client.129443638694576 {"event":"function_enter","function":"discover_agents","arguments":{"agent_id":"did:udid:agent.tgdle3dwvmvhrkgrgm67vsii6ywbp7n2@6gc.local","task_description":"discover a text-capable Agent B","required_skills":["text"],"discovery_scope":"intra_plmn","max_results":10}}
+2026-08-28T15:02:02.216 INFO agent_sdk.client.129443638694576 {"event":"http_request","request_id":"e4dd22908ed24defa18c6f43a5095f38","direction":"outbound","peer":"AgentRuntime","method":"POST","url":"http://101.245.78.174:8089/arf/v1/agent-discoveries","body":{"request_id":"9fbc56fa-2dbc-4a55-b9d3-f4fc21486883","agent_id":"did:udid:agent.tgdle3dwvmvhrkgrgm67vsii6ywbp7n2@6gc.local","task_description":"discover a text-capable Agent B","required_skills":["text"],"discovery_scope":"intra_plmn","max_results":10,"timestamp":"2026-08-28T07:02:02.216Z","proof":"[REDACTED]"}}
+2026-08-28T15:02:02.305 INFO agent_sdk.client.129443638694576 {"event":"http_response","request_id":"e4dd22908ed24defa18c6f43a5095f38","direction":"inbound","peer":"AgentRuntime","method":"POST","url":"http://101.245.78.174:8089/arf/v1/agent-discoveries","status_code":200,"body":{"task_description":"discover a text-capable Agent B","result":[{"agent_card":{"agent_id":"did:udid:agent.7npz6nncsas24eacxk4rbugg3ytcfg5a@6gc.local","service_endpoints":"http://10.60.0.2:4001/A2A/message","skills":["text"]},"priority":1}],"timestamp":"2026-08-28T07:02:04.522Z"}}
+2026-08-28T15:02:02.306 INFO agent_sdk.client.129443638694576 {"event":"function_exit","function":"discover_agents","duration_ms":89.994,"result":[{"agent_id":"did:udid:agent.7npz6nncsas24eacxk4rbugg3ytcfg5a@6gc.local","service_endpoints":"http://10.60.0.2:4001/A2A/message","skills":["text"],"priority":1}]}
+2026-08-28T15:02:02.307 INFO agent_sdk.client.129443638694576 {"event":"function_enter","function":"create_group","arguments":{"agent_id":"did:udid:agent.tgdle3dwvmvhrkgrgm67vsii6ywbp7n2@6gc.local","target_agent_ids":["did:udid:agent.7npz6nncsas24eacxk4rbugg3ytcfg5a@6gc.local"],"group_name":"agent-a-b-test-group","dnn":"internet","scope":"private","max_members":2}}
+2026-08-28T15:02:02.308 INFO agent_sdk.client.129443638694576 {"event":"http_request","request_id":"54252c473938447d997923b96db44495","direction":"outbound","peer":"AgentRuntime","method":"POST","url":"http://101.245.78.174:8089/acf/v1/agents-grouping","body":{"request_id":"6b05eddf-dce1-43fe-9b95-35af6d43d37d","agent_id":"did:udid:agent.tgdle3dwvmvhrkgrgm67vsii6ywbp7n2@6gc.local","target_agents":["did:udid:agent.7npz6nncsas24eacxk4rbugg3ytcfg5a@6gc.local"],"group_config":{"group_name":"agent-a-b-test-group","scope":"private","max_members":2,"dnn":"internet"},"timestamp":"2026-08-28T07:02:02.307Z","proof":"[REDACTED]"}}
+2026-08-28T15:02:16.673 ERROR agent_sdk.client.129443638694576 {"event":"http_error","request_id":"54252c473938447d997923b96db44495","direction":"outbound","peer":"AgentRuntime","method":"POST","url":"http://101.245.78.174:8089/acf/v1/agents-grouping","error_type":"ReadTimeout","error":""}
+Traceback (most recent call last):
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_transports/default.py", line 101, in map_httpcore_exceptions
+    yield
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_transports/default.py", line 394, in handle_async_request
+    resp = await self._pool.handle_async_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_async/connection_pool.py", line 256, in handle_async_request
+    raise exc from None
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_async/connection_pool.py", line 236, in handle_async_request
+    response = await connection.handle_async_request(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_async/connection.py", line 103, in handle_async_request
+    return await self._connection.handle_async_request(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_async/http11.py", line 136, in handle_async_request
+    raise exc
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_async/http11.py", line 106, in handle_async_request
+    ) = await self._receive_response_headers(**kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_async/http11.py", line 177, in _receive_response_headers
+    event = await self._receive_event(timeout=timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_async/http11.py", line 217, in _receive_event
+    data = await self._network_stream.read(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_backends/anyio.py", line 32, in read
+    with map_exceptions(exc_map):
+         ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.local/share/uv/python/cpython-3.12.14-linux-x86_64-gnu/lib/python3.12/contextlib.py", line 158, in __exit__
+    self.gen.throw(value)
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_exceptions.py", line 14, in map_exceptions
+    raise to_exc(exc) from exc
+httpcore.ReadTimeout
 
-  uv python install 3.12
-  mv .venv .venv-py310-backup
-  uv venv --python 3.12 --seed .venv
+The above exception was the direct cause of the following exception:
 
-  source .venv/bin/activate
-  python --version
-  python -m pip install -r requirements.txt
+Traceback (most recent call last):
+  File "/mnt/d/sdk/orange_sdk/python/src/agent_sdk/runtime.py", line 288, in _request_json
+    response = await self._client.request(method, path, **request_arguments)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_client.py", line 1540, in request
+    return await self.send(request, auth=auth, follow_redirects=follow_redirects)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_client.py", line 1629, in send
+    response = await self._send_handling_auth(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_client.py", line 1657, in _send_handling_auth
+    response = await self._send_handling_redirects(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_client.py", line 1694, in _send_handling_redirects
+    response = await self._send_single_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_client.py", line 1730, in _send_single_request
+    response = await transport.handle_async_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_transports/default.py", line 393, in handle_async_request
+    with map_httpcore_exceptions():
+         ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.local/share/uv/python/cpython-3.12.14-linux-x86_64-gnu/lib/python3.12/contextlib.py", line 158, in __exit__
+    self.gen.throw(value)
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_transports/default.py", line 118, in map_httpcore_exceptions
+    raise mapped_exc(message) from exc
+httpx.ReadTimeout
+2026-08-28T15:02:16.698 ERROR agent_sdk.client.129443638694576 {"event":"function_error","function":"create_group","duration_ms":10047.385,"error_type":"AgentSdkError","error":"Runtime request timed out: /acf/v1/agents-grouping","error_code":"TIMEOUT"}
+Traceback (most recent call last):
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_transports/default.py", line 101, in map_httpcore_exceptions
+    yield
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_transports/default.py", line 394, in handle_async_request
+    resp = await self._pool.handle_async_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_async/connection_pool.py", line 256, in handle_async_request
+    raise exc from None
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_async/connection_pool.py", line 236, in handle_async_request
+    response = await connection.handle_async_request(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_async/connection.py", line 103, in handle_async_request
+    return await self._connection.handle_async_request(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_async/http11.py", line 136, in handle_async_request
+    raise exc
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_async/http11.py", line 106, in handle_async_request
+    ) = await self._receive_response_headers(**kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_async/http11.py", line 177, in _receive_response_headers
+    event = await self._receive_event(timeout=timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_async/http11.py", line 217, in _receive_event
+    data = await self._network_stream.read(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_backends/anyio.py", line 32, in read
+    with map_exceptions(exc_map):
+         ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.local/share/uv/python/cpython-3.12.14-linux-x86_64-gnu/lib/python3.12/contextlib.py", line 158, in __exit__
+    self.gen.throw(value)
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpcore/_exceptions.py", line 14, in map_exceptions
+    raise to_exc(exc) from exc
+httpcore.ReadTimeout
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/mnt/d/sdk/orange_sdk/python/src/agent_sdk/runtime.py", line 288, in _request_json
+    response = await self._client.request(method, path, **request_arguments)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_client.py", line 1540, in request
+    return await self.send(request, auth=auth, follow_redirects=follow_redirects)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_client.py", line 1629, in send
+    response = await self._send_handling_auth(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_client.py", line 1657, in _send_handling_auth
+    response = await self._send_handling_redirects(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_client.py", line 1694, in _send_handling_redirects
+    response = await self._send_single_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_client.py", line 1730, in _send_single_request
+    response = await transport.handle_async_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_transports/default.py", line 393, in handle_async_request
+    with map_httpcore_exceptions():
+         ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.local/share/uv/python/cpython-3.12.14-linux-x86_64-gnu/lib/python3.12/contextlib.py", line 158, in __exit__
+    self.gen.throw(value)
+  File "/mnt/d/sdk/orange_sdk/python/.venv/lib/python3.12/site-packages/httpx/_transports/default.py", line 118, in map_httpcore_exceptions
+    raise mapped_exc(message) from exc
+httpx.ReadTimeout
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/mnt/d/sdk/orange_sdk/python/src/agent_sdk/sdk.py", line 96, in wrapper
+    result = await function(self, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/src/agent_sdk/sdk.py", line 986, in create_group
+    response = await self._runtime.request("POST", path, body)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/src/agent_sdk/runtime.py", line 451, in request
+    return await self._request_json(method, path, body)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/sdk/orange_sdk/python/src/agent_sdk/runtime.py", line 304, in _request_json
+    raise AgentSdkError(
+agent_sdk.errors.AgentSdkError: Runtime request timed out: /acf/v1/agents-grouping
+2026-08-28T15:02:16.710 INFO agent_sdk.client.129443638694576 {"event":"function_enter","function":"close","arguments":{}}
+2026-08-28T15:02:17.045 WARNING agent_sdk.client.129443638694576 {"event":"connect_ip_connection_closed","error_code":0,"reason_phrase":""}
+2026-08-28T15:02:17.080 INFO agent_sdk.client.129443638694576 {"event":"function_exit","function":"close","duration_ms":369.065,"result":null}
