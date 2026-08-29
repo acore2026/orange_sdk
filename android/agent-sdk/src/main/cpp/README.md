@@ -5,8 +5,9 @@ implemented in Kotlin. RFC 9484 QUIC packet I/O is provided by a separately
 built native HTTP/3 implementation because Android's public Kotlin HTTP APIs do
 not expose extended CONNECT plus HTTP Datagrams.
 
-The ARM64 implementation is shipped under `src/main/jniLibs/arm64-v8a/` and its
-source is in `android/native/masque_core`. It exports these instance methods on
+The implementation is shipped for `arm64-v8a`, `armeabi-v7a`, `x86_64`, and
+`x86` under `src/main/jniLibs/<abi>/`; its source is in
+`android/native/masque_core`. Every variant exports these instance methods on
 `com/rayneo/agent/sdk/masque/NativeMasqueBridge`:
 
 | Method | JNI descriptor | Ownership/result |

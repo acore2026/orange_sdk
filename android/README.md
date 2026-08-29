@@ -20,10 +20,12 @@ ANDROID_HOME=/opt/android-sdk ./gradlew :agent-sdk:assembleRelease
 ANDROID_HOME=/opt/android-sdk ./gradlew :example-app:assembleDebug
 ```
 
-The AAR already packages the Android ARM64 `libmasque_core.so`; applications do
-not supply a native library. The core implements HTTP/3 CONNECT-IP, ADDRESS_ASSIGN
-and ROUTE_ADVERTISEMENT capsule handling, bidirectional packet pumps, and TUN fd
-replacement. It binds the QUIC UDP socket to `localVlanIp` and calls
+The AAR already packages `libmasque_core.so` for `arm64-v8a`, `armeabi-v7a`,
+`x86_64`, and `x86`; applications do not supply a native library. This supports
+physical ARM devices as well as x86/x86_64 Android emulators. The core implements
+HTTP/3 CONNECT-IP, ADDRESS_ASSIGN and ROUTE_ADVERTISEMENT capsule handling,
+bidirectional packet pumps, and TUN fd replacement. It binds the QUIC UDP socket
+to `localVlanIp` and calls
 `AgentVpnService.protectQuicSocket(fd)` before connecting, preventing VPN recursion.
 
 This repository ships only the endpoint SDK and CONNECT-IP client. It does not
@@ -111,13 +113,18 @@ val group = sdk.createGroup(
 )
 ```
 
-To rebuild the shipped ARM64 library after native source changes:
+To rebuild all shipped native libraries after native source changes:
 
 ```bash
 cd android/native/masque_core
-ANDROID_NDK_ROOT=/opt/android-sdk/ndk/27.0.12077973 ./build-android-arm64.sh
 go test ./...
+ANDROID_NDK_ROOT=/opt/android-sdk/ndk/27.0.12077973 ./build-android.sh
 ```
+
+Build only selected ABIs by appending their names, for example
+`./build-android.sh arm64-v8a x86_64`. Gradle's `verifyMasqueNativeAbis` task is
+attached to `preBuild` and fails the AAR/APK build if any supported ABI is
+missing.
 
 The example takes all network values from intent extras. Example ADB launch:
 

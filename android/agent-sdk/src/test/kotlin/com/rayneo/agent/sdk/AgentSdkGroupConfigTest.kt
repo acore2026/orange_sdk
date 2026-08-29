@@ -97,7 +97,7 @@ class AgentSdkGroupConfigTest {
         val target = snapshot!!.membersByAgentId[PEER_ID]!!
         assertEquals("8.8.8.8", target.agentIp)
         assertEquals(4001, target.tcpPort)
-        assertEquals(28443, target.udpPort)
+        assertEquals(0, target.udpPort)
         assertEquals(setOf("8.8.8.8"), tunnel.groupPeers["g1"])
     }
 

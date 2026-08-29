@@ -2,6 +2,23 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-29 — Android MASQUE Native 支持 ARM 与 x86 全 ABI
+
+### 修改原因
+
+- 原 AAR 只打包 `arm64-v8a/libmasque_core.so`，无法在 ARMv7 设备以及 x86/x86_64 Android 模拟器或终端上加载 JNI 核心。
+
+### 修改方式
+
+- 新增统一 native 构建脚本，使用 Android NDK API 26 工具链交叉编译 `arm64-v8a`、`armeabi-v7a`、`x86_64` 和 `x86`；保留原 ARM64 脚本作为兼容入口。
+- Android Library 明确声明四个 ABI filter，并将 `verifyMasqueNativeAbis` 接入 `preBuild`，任一 so 缺失时直接阻止 AAR/APK 构建。
+- 修正一个遗留单测断言：现行群组配置只通过 `service_endpoints` 提供 TCP URL，不再携带 UDP 端口，缓存中的兼容字段应为 `0` 而不是旧值 `28443`。
+- 更新 Android 使用说明、JNI 契约和仓库入口文档，明确真机与模拟器的 ABI 覆盖及全量/按需构建命令。
+
+### 验证内容
+
+- Go 单元测试、四 ABI 交叉编译、ELF 架构检查、Gradle 单元测试以及 AAR/APK 四 ABI 内容检查。
+
 ## 2026-08-28 — 隔离单接口失败并保持 SDK 业务链路运行
 
 ### 修改原因

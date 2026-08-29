@@ -24,7 +24,8 @@
 proof 验签；应用不配置密钥或安全回调。控制面出站签名字段保持不变，
 便于 Runtime/核心网继续按现有契约处理。除 MASQUE 的
 HTTPS/HTTP/3 外，SDK 与 AgentRuntime、对端 Agent 的接口统一使用 HTTP。
-Android AAR 已包含真实的 ARM64 `libmasque_core.so`，不再要求客户另行提供
+Android AAR 已包含真实的 ARM64、ARMv7、x86_64 和 x86
+`libmasque_core.so`，不再要求客户另行提供
 Native Core。
 
 Linux/Python 和 Android 的 AgentCard 发布接口默认接收已经签发的 VC。封闭
