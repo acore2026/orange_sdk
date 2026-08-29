@@ -1,7 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
-        android:label="Agent SDK Example"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:icon="@drawable/ic_agent_link_lab"
+        android:label="Agent Link Lab"
+        android:theme="@style/Theme.AgentLinkLab">
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -12,4 +13,3 @@
         </activity>
     </application>
 </manifest>
-

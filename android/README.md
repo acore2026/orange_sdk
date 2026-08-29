@@ -126,22 +126,71 @@ Build only selected ABIs by appending their names, for example
 attached to `preBuild` and fails the AAR/APK build if any supported ABI is
 missing.
 
-The example takes all network values from intent extras. Example ADB launch:
+## A/B 联调 App
+
+`example-app` 已按 Linux 的 `agent_a_test.py/agent_b_test.py` 流程实现为两页
+Android 应用：
+
+- 第 1 页“配置”：选择角色 A 或 B，填写服务器地址、Runtime HTTP 端口、
+  MASQUE QUIC 端口与路径、本机 Wi-Fi/VLAN IP、A2A TCP/UDP 端口以及
+  Agent 测试参数。Token 只保存在当前内存，不写入 SharedPreferences。
+- 第 2 页“日志”：逐步显示 VPN、`GET /v1/ue/info`、CONNECT-IP、身份申请、
+  网络能力、Agent Card、发现、建组、群组配置和 A2A 消息结果。失败时停留在
+  当前步骤，点击“重试当前接口”即可继续；SDK 不会因单个业务接口失败退出。
+
+角色 B 执行身份申请、获取网络能力、发布用户填写的能力，然后自动接受邀请并
+等待消息。角色 A 执行身份申请和能力注册，按同一能力发现 B，携带 DNN 建组，
+等待群组配置进入 SDK 缓存后调用 `sendMessage`。两端都不会在流程完成后自动
+关闭 TUN、MASQUE 或本地消息服务；必须点击“停止”。
+
+构建并安装：
+
+```bash
+cd android
+ANDROID_HOME=/opt/android-sdk ./gradlew :example-app:assembleDebug
+adb install -r example-app/build/outputs/apk/debug/example-app-debug.apk
+```
+
+安装后可以直接在第 1 页填写参数，也可用 intent extras 预填。角色 A 示例：
 
 ```bash
 adb shell am start -n com.rayneo.agent.example/.MainActivity \
-  --es runtime_ip 192.168.3.10 \
-  --ei runtime_port 8080 \
-  --es local_vlan_ip 192.168.1.10 \
+  --es role A \
+  --es server_ip '<SERVER_IP>' \
+  --ei runtime_port 8088 \
+  --ei masque_port 8443 \
+  --es masque_path '/.well-known/masque/ip' \
+  --es local_vlan_ip '<DEVICE_A_WIFI_IP>' \
   --ei tcp_port 4001 \
   --ei udp_port 28443 \
-  --es agent_id 'did:example:agent-a' \
-  --es agent_name 'Agent A' \
-  --es test_capabilities 'robot-control,voice' \
-  --ei priority 1 \
-  --es masque_token 'replace-with-device-secret' \
-  --es masque_url https://192.168.3.10:4433
+  --es owner 'android-test-owner-a' \
+  --es agent_name 'Agent-A' \
+  --es capability 'text' \
+  --es dnn 'internet' \
+  --es group_name 'android-ab-test-group' \
+  --es message 'hello Agent B from Android A'
 ```
+
+角色 B 示例：
+
+```bash
+adb shell am start -n com.rayneo.agent.example/.MainActivity \
+  --es role B \
+  --es server_ip '<SERVER_IP>' \
+  --ei runtime_port 8089 \
+  --ei masque_port 8444 \
+  --es masque_path '/.well-known/masque/ip' \
+  --es local_vlan_ip '<DEVICE_B_WIFI_IP>' \
+  --ei tcp_port 4001 \
+  --ei udp_port 28443 \
+  --es owner 'android-test-owner-b' \
+  --es agent_name 'Agent-B' \
+  --es capability 'text'
+```
+
+`server_ip`、两个服务器端口和两个设备的物理 IP 都是部署参数，示例 App 与
+SDK 不内置这些地址。建议先启动 B，等日志显示“Agent B 已就绪”后再启动 A。
+如使用授权值，既可在页面填写，也可加 `--es masque_token '<TOKEN>'`。
 
 The application does not provide an Agent TUN IP. `GET /v1/ue/info` must report
 `nas.registered=true`, `nas.state=session_ready`, a ready security context, and

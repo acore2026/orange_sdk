@@ -1,0 +1,54 @@
+package com.rayneo.agent.example
+
+enum class TestRole(
+    val displayName: String,
+    val defaultRuntimePort: Int,
+    val defaultMasquePort: Int,
+) {
+    A("角色 A · 发起方", 8088, 8443),
+    B("角色 B · 能力提供方", 8089, 8444),
+}
+
+data class TestConfig(
+    val role: TestRole,
+    val serverIp: String,
+    val runtimePort: Int,
+    val masquePort: Int,
+    val masquePath: String,
+    val localVlanIp: String,
+    val localTcpPort: Int,
+    val localUdpPort: Int,
+    val masqueToken: String?,
+    val owner: String,
+    val agentName: String,
+    val capability: String,
+    val dnn: String,
+    val groupName: String,
+    val message: String,
+) {
+    val masqueServerUrl: String
+        get() = "https://$serverIp:$masquePort${normalizedMasquePath()}"
+
+    fun validate(): List<String> = buildList {
+        if (serverIp.isBlank()) add("服务器 IP 不能为空")
+        if (localVlanIp.isBlank()) add("本机 Wi-Fi/VLAN IP 不能为空")
+        listOf(
+            "Runtime HTTP 端口" to runtimePort,
+            "MASQUE QUIC 端口" to masquePort,
+            "本地 TCP 端口" to localTcpPort,
+            "本地 UDP 端口" to localUdpPort,
+        ).forEach { (name, port) ->
+            if (port !in 1..65535) add("$name 必须在 1..65535")
+        }
+        if (masquePath.isBlank()) add("MASQUE 路径不能为空")
+        if (owner.isBlank()) add("Owner 不能为空")
+        if (agentName.isBlank()) add("Agent 名称不能为空")
+        if (capability.isBlank()) add("发现能力不能为空")
+        if (role == TestRole.A && dnn.isBlank()) add("角色 A 的 DNN 不能为空")
+        if (role == TestRole.A && groupName.isBlank()) add("角色 A 的群组名不能为空")
+        if (role == TestRole.A && message.isBlank()) add("角色 A 的测试消息不能为空")
+    }
+
+    private fun normalizedMasquePath(): String =
+        masquePath.trim().let { if (it.startsWith('/')) it else "/$it" }
+}

@@ -14,6 +14,7 @@
 - [Agent B：发布能力、接受建组并接收消息](python/examples/agent_b_test.py)
 - [A/B 双实例 MASQUE 消息联调脚本](python/examples/masque_two_instance_test.py)
 - [Android/RayNeoOS 使用说明](android/README.md)
+- [Android A/B 两页联调 App](android/example-app/src/main/kotlin/com/rayneo/agent/example/MainActivity.kt)
 - [Proof 生成与校验说明](Agent-SDK-Proof生成与校验说明.md)
 
 当前封闭内测构建保留 MASQUE TLS 1.3 加密，但关闭服务端证书链和名称校验；

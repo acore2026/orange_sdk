@@ -2,6 +2,25 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-29 — 新增 Android A/B 两页端到端联调 App
+
+### 修改原因
+
+- 原 Android example 只能通过 ADB extras 注入已有 `agent_id`，界面只有一个状态文本，无法像 Linux A/B 脚本一样由初次拿到 SDK 的联调人员完成参数配置、全流程调用和现场日志观察。
+- Android 真机与模拟器的 Runtime/MASQUE 端口可能不同，需要在应用页面配置，且单接口失败后必须能保留 SDK 链路并继续联调。
+
+### 修改方式
+
+- 将 example-app 改为两页原生 Android 工具：第 1 页选择角色 A/B，并填写服务器地址、Runtime HTTP 端口、MASQUE QUIC 端口/路径、本地物理 IP、A2A 端口和测试参数；第 2 页提供深色分级日志、当前步骤状态、复制日志、重试当前接口和显式停止。
+- 角色 B 自动完成初始化、身份申请、网络能力获取、能力发布、邀请接受和消息接收；角色 A 自动完成初始化、身份申请、能力注册、按能力发现 B、携带 DNN 建组、等待群组配置和定向 A2A 发送。
+- 配置页不接收 Agent TUN IP，由 SDK 继续从 `GET /v1/ue/info` 获取；MASQUE Token 不持久化。业务接口异常由 App 捕获并停留在当前步骤，只有用户点击停止才关闭 SDK/TUN/MASQUE。
+- 更新 Android 手册和仓库入口，加入 UI 使用方法、APK 构建安装命令以及 A/B 两套可选 ADB 预填参数。
+
+### 验证内容
+
+- example-app 配置单元测试覆盖角色端口默认值、MASQUE URL 拼装、A/B 字段差异和非法端口拦截。
+- 执行 Android SDK 单元测试、example-app 单元测试和 Debug APK 构建，并检查 APK 同时包含 ARM64、ARMv7、x86_64 与 x86 Native Core。
+
 ## 2026-08-29 — Android MASQUE Native 支持 ARM 与 x86 全 ABI
 
 ### 修改原因
