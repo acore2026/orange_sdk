@@ -66,6 +66,12 @@ class MainActivity : Activity() {
     private var stopButton: TextView? = null
     private var logOutput: TextView? = null
     private var logScroll: ScrollView? = null
+    private var manualMessagePanel: View? = null
+    private var manualRouteLabel: TextView? = null
+    private var manualMessageInput: EditText? = null
+    private var manualSendButton: TextView? = null
+    private var manualMessageSession: ManualMessageSession? = null
+    private var manualMessageSending = false
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -89,6 +95,11 @@ class MainActivity : Activity() {
 
     private fun showConfigScreen() {
         fields.clear()
+        manualMessagePanel = null
+        manualRouteLabel = null
+        manualMessageInput = null
+        manualSendButton = null
+        manualMessageSession = null
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Palette.CANVAS)
@@ -101,11 +112,11 @@ class MainActivity : Activity() {
 
                 addView(eyebrow("AGENT LINK LAB  /  ANDROID"))
                 addView(title("A/B 端到端联调"))
-                addView(body("填写端侧与服务器参数。应用会按 Linux 示例完成身份、能力、发现、建组和 MASQUE A2A 验证。"))
+                addView(body("填写端侧与服务器参数。应用完成身份、能力、发现和建组后，A/B 可通过 MASQUE 手动双向发消息。"))
                 addView(roleSelector())
 
                 addView(section("01  测试角色"))
-                addView(body("A 按能力发现并向 B 发消息；B 发布能力并自动接受邀请。"))
+                addView(body("A 按能力发现 B 并发起建组；B 自动接受邀请。群组配置生效后双方均可手动发送。"))
 
                 addView(section("02  服务器与隧道"))
                 addView(field("server_ip", "服务器 IP / 域名", "由部署方提供"))
@@ -128,13 +139,14 @@ class MainActivity : Activity() {
                 addView(field("agent_name", "Agent 名称", "Agent-A"))
                 addView(field("capability", "B 发布 / A 发现的能力", "text"))
 
+                addView(section("05  建组与双向消息"))
+                addView(body("A 端填写建组参数；双方日志页会在群组就绪后显示消息发送区。"))
                 aOnlyContainer = LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.VERTICAL
-                    addView(section("05  A 端任务"))
                     addView(field("dnn", "DNN", "internet"))
                     addView(field("group_name", "群组名称", "android-ab-test-group"))
-                    addView(field("message", "发送给 B 的消息", "hello Agent B from Android A"))
                 }.also(::addView)
+                addView(field("message", "手动消息预填内容", selectedRole.defaultMessage))
 
                 addView(actionButton("启动角色 A", filled = true) { startTest() }.also {
                     startButton = it
@@ -198,6 +210,11 @@ class MainActivity : Activity() {
             val oldDefault = "android-test-owner-${previous.name.lowercase()}"
             if (value.text.isBlank() || value.text.toString() == oldDefault) {
                 value.setText("android-test-owner-${role.name.lowercase()}")
+            }
+        }
+        fields["message"]?.let { value ->
+            if (value.text.isBlank() || value.text.toString() == previous.defaultMessage) {
+                value.setText(role.defaultMessage)
             }
         }
         if (updatePorts) {
@@ -273,7 +290,13 @@ class MainActivity : Activity() {
         }
         val config = activeConfig ?: return
         val value = AgentSdk.create(service)
-        val flow = AgentTestRunner(value, config, ::appendLog, ::setRunnerStatus)
+        val flow = AgentTestRunner(
+            value,
+            config,
+            ::appendLog,
+            ::setRunnerStatus,
+            ::setManualMessageSession,
+        )
         sdk = value
         runner = flow
         runnerJob = scope.launch {
@@ -294,6 +317,8 @@ class MainActivity : Activity() {
 
     private fun showLogScreen(config: TestConfig) {
         logLines.clear()
+        manualMessageSession = null
+        manualMessageSending = false
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(22), dp(18), dp(18))
@@ -344,6 +369,11 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(18) })
 
+        root.addView(manualMessageComposer(config), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(12) })
+
         logOutput = TextView(this).apply {
             setTextColor(Palette.LOG_TEXT)
             textSize = 12f
@@ -380,11 +410,130 @@ class MainActivity : Activity() {
         setContentView(root)
     }
 
+    private fun manualMessageComposer(config: TestConfig): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(16), dp(14), dp(16), dp(16))
+        background = rounded(Palette.INK_SURFACE, 14f, Palette.INK_LINE)
+        visibility = View.GONE
+        manualMessagePanel = this
+
+        addView(TextView(this@MainActivity).apply {
+            text = "MANUAL A2A  /  GROUP ROUTE"
+            setTextColor(Palette.LINK)
+            textSize = 11f
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = .08f
+        })
+        manualRouteLabel = TextView(this@MainActivity).apply {
+            text = "${config.role.name} → 等待群组配置"
+            setTextColor(Color.WHITE)
+            textSize = 17f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, dp(5), 0, dp(3))
+        }.also(::addView)
+        addView(TextView(this@MainActivity).apply {
+            text = "消息经 SDK 的群组缓存解析对端 Agent ID、IP 和端口。"
+            setTextColor(Palette.INK_MUTED)
+            textSize = 12f
+        })
+        manualMessageInput = EditText(this@MainActivity).apply {
+            setText(config.message)
+            hint = "输入要发送的文本"
+            setHintTextColor(Palette.INK_HINT)
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            minLines = 2
+            maxLines = 4
+            gravity = Gravity.TOP or Gravity.START
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = rounded(Palette.INK_INPUT, 10f, Palette.INK_LINE)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        }.also {
+            addView(it, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) })
+        }
+        manualSendButton = actionButton("发送消息", filled = true) {
+            sendManualMessage()
+        }.apply {
+            isEnabled = false
+            alpha = .45f
+        }.also {
+            addView(it, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48),
+            ).apply { topMargin = dp(10) })
+        }
+    }
+
     private fun setRunnerStatus(status: RunnerStatus) {
         runOnUiThread {
             logStatusTitle?.text = status.title
             logStatusDetail?.text = status.detail
             retryButton?.visibility = if (status.canRetry) View.VISIBLE else View.GONE
+        }
+    }
+
+    private fun setManualMessageSession(session: ManualMessageSession?) {
+        runOnUiThread {
+            manualMessageSession = session
+            manualMessagePanel?.visibility = if (session == null) View.GONE else View.VISIBLE
+            if (session != null) {
+                manualRouteLabel?.text =
+                    "${activeConfig?.role?.name ?: "Agent"} → ${session.targetAgentName}"
+                manualMessageInput?.hint = "发送给 ${session.targetAgentName}"
+            }
+            updateManualSendButton()
+        }
+    }
+
+    private fun sendManualMessage() {
+        val flow = runner ?: return
+        val session = manualMessageSession ?: run {
+            Toast.makeText(this, "群组尚未就绪", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val content = manualMessageInput?.text?.toString()?.trim().orEmpty()
+        if (content.isEmpty()) {
+            manualMessageInput?.error = "请输入消息内容"
+            return
+        }
+        if (manualMessageSending) return
+        manualMessageSending = true
+        updateManualSendButton()
+        scope.launch {
+            try {
+                val receipt = flow.sendManualMessage(content)
+                manualMessageInput?.text?.clear()
+                setRunnerStatus(
+                    RunnerStatus(
+                        "消息发送成功",
+                        "→ ${session.targetAgentName} · ${receipt.messageId.take(8)}",
+                    ),
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                setRunnerStatus(
+                    RunnerStatus(
+                        "消息发送失败",
+                        "${error.message ?: error::class.java.simpleName}；SDK 未关闭，可继续发送",
+                    ),
+                )
+            } finally {
+                manualMessageSending = false
+                updateManualSendButton()
+            }
+        }
+    }
+
+    private fun updateManualSendButton() {
+        manualSendButton?.apply {
+            val ready = manualMessageSession != null && !manualMessageSending
+            isEnabled = ready
+            alpha = if (ready) 1f else .45f
+            text = if (manualMessageSending) "发送中…" else "发送消息"
         }
     }
 
@@ -426,6 +575,7 @@ class MainActivity : Activity() {
             runnerJob = null
             runner?.close()
             runner = null
+            setManualMessageSession(null)
             withContext(Dispatchers.IO) { sdk?.close() }
             sdk = null
             if (serviceBound) {
@@ -485,7 +635,7 @@ class MainActivity : Activity() {
         setValue("group_name", intent.getStringExtra("group_name")
             ?: preferences.getString("group_name", "android-ab-test-group"))
         setValue("message", intent.getStringExtra("message")
-            ?: preferences.getString("message", "hello Agent B from Android A"))
+            ?: preferences.getString("message", selectedRole.defaultMessage))
         setValue("masque_token", intent.getStringExtra("masque_token") ?: "")
     }
 
@@ -644,8 +794,10 @@ class MainActivity : Activity() {
         val ACCENT = Color.rgb(0, 112, 128)
         val INK = Color.rgb(8, 17, 25)
         val INK_SURFACE = Color.rgb(16, 30, 41)
+        val INK_INPUT = Color.rgb(9, 22, 31)
         val INK_LINE = Color.rgb(43, 62, 74)
         val INK_MUTED = Color.rgb(158, 176, 187)
+        val INK_HINT = Color.rgb(105, 126, 139)
         val LINK = Color.rgb(67, 210, 202)
         val LOG_TEXT = Color.rgb(191, 207, 216)
         val SUCCESS = Color.rgb(88, 217, 146)

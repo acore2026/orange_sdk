@@ -3,6 +3,8 @@ package com.rayneo.agent.example
 import com.rayneo.agent.sdk.AgentSdk
 import com.rayneo.agent.sdk.model.AgentLifecycleState
 import com.rayneo.agent.sdk.model.AgentProfile
+import com.rayneo.agent.sdk.model.GroupConfigSnapshot
+import com.rayneo.agent.sdk.model.MessageReceipt
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import com.rayneo.agent.sdk.model.NetworkMessageType
 import com.rayneo.agent.sdk.transport.GroupMessageListener
@@ -13,6 +15,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -26,15 +30,48 @@ data class RunnerStatus(
     val canRetry: Boolean = false,
 )
 
+data class ManualMessageSession(
+    val groupId: String,
+    val localAgentId: String,
+    val targetAgentId: String,
+    val targetAgentName: String,
+)
+
+internal fun selectManualMessageSession(
+    snapshot: GroupConfigSnapshot,
+    localAgentId: String,
+): ManualMessageSession {
+    check(snapshot.membersByAgentId.containsKey(localAgentId)) {
+        "群组配置中不存在本端 Agent"
+    }
+    val peers = snapshot.membersByAgentId.values.filter { it.agentId != localAgentId }
+    check(peers.size == 1) {
+        "A/B 联调 App 要求群组中恰好有一个对端，实际为 ${peers.size}"
+    }
+    val peer = peers.single()
+    return ManualMessageSession(
+        groupId = snapshot.groupId,
+        localAgentId = localAgentId,
+        targetAgentId = peer.agentId,
+        targetAgentName = peer.agentName,
+    )
+}
+
 class AgentTestRunner(
     private val sdk: AgentSdk,
     private val config: TestConfig,
     private val onLog: (LabLogLevel, String, String) -> Unit,
     private val onStatus: (RunnerStatus) -> Unit,
+    private val onManualMessageSession: (ManualMessageSession?) -> Unit,
 ) {
     private val retrySignal = Channel<Unit>(Channel.CONFLATED)
+    private val sendMutex = Mutex()
     private var networkListener: AutoCloseable? = null
     private var groupListener: AutoCloseable? = null
+    @Volatile
+    private var localAgentId: String? = null
+    @Volatile
+    private var manualMessageSession: ManualMessageSession? = null
 
     fun retryCurrentStep() {
         retrySignal.trySend(Unit)
@@ -82,7 +119,7 @@ class AgentTestRunner(
                     metadata = buildJsonObject {
                         put("region", "CN")
                         put("os", "Android")
-                        put("version", "0.1.0")
+                        put("version", "0.2.0")
                     },
                 )
             }
@@ -92,6 +129,7 @@ class AgentTestRunner(
             onLog(LabLogLevel.SUCCESS, "H-ID", "复用已保存身份 agent_id=${profile?.agentId}")
         }
         val activeProfile = checkNotNull(profile) { "Persisted Agent state has no profile" }
+        localAgentId = activeProfile.agentId
 
         if (lifecycleState == AgentLifecycleState.IDENTITY_READY) {
             val networkAbility = retryableStep(
@@ -146,7 +184,50 @@ class AgentTestRunner(
     fun close() {
         runCatching { networkListener?.close() }
         runCatching { groupListener?.close() }
+        manualMessageSession = null
+        onManualMessageSession(null)
         retrySignal.close()
+    }
+
+    suspend fun sendManualMessage(content: String): MessageReceipt = sendMutex.withLock {
+        val normalized = content.trim()
+        require(normalized.isNotEmpty()) { "消息内容不能为空" }
+        val session = checkNotNull(manualMessageSession) { "群组尚未就绪，不能发送消息" }
+        onLog(
+            LabLogLevel.INFO,
+            "A2A SEND",
+            "to=${session.targetAgentName}(${session.targetAgentId})，group_id=${session.groupId}，" +
+                "content=${normalized.take(300)}",
+        )
+        try {
+            sdk.sendMessage(
+                groupId = session.groupId,
+                targetAgentId = session.targetAgentId,
+                jsonMessage = buildJsonObject {
+                    put("type", "text")
+                    put("content", normalized)
+                },
+                messageType = "text",
+                taskId = "android-ab-manual-message",
+                timeoutSeconds = 10.0,
+            ).also { receipt ->
+                check(receipt.delivered) { "对端未返回 status=OK" }
+                onLog(
+                    LabLogLevel.SUCCESS,
+                    "A2A SEND",
+                    "message_id=${receipt.messageId}，投递成功",
+                )
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            onLog(
+                LabLogLevel.ERROR,
+                "A2A SEND",
+                "发送失败：${error.message ?: error::class.java.simpleName}；SDK 保持运行",
+            )
+            throw error
+        }
     }
 
     private fun installListeners() {
@@ -163,11 +244,13 @@ class AgentTestRunner(
                     }
 
                     NetworkMessageType.GROUP_CONFIG -> {
+                        val groupId = payload["group_id"]?.jsonPrimitive?.content
                         onLog(
                             LabLogLevel.SUCCESS,
                             "DOWNLINK",
-                            "群组配置已缓存，group_id=${payload["group_id"]?.jsonPrimitive?.content}",
+                            "群组配置已缓存，group_id=$groupId",
                         )
+                        if (!groupId.isNullOrBlank()) activateManualMessaging(groupId)
                         NetworkMessageAction.ACK
                     }
 
@@ -226,22 +309,7 @@ class AgentTestRunner(
             }
         }
         onLog(LabLogLevel.SUCCESS, "GROUP CONFIG", "成员路由已进入 SDK 缓存")
-
-        val receipt = retryableStep("H-A2A", "向 Agent B 发送测试消息") {
-            sdk.sendMessage(
-                groupId = group.groupId,
-                targetAgentId = discovered.agentId,
-                jsonMessage = buildJsonObject {
-                    put("type", "text")
-                    put("content", config.message)
-                },
-                messageType = "text",
-                taskId = "android-ab-test",
-                timeoutSeconds = 10.0,
-            ).also { check(it.delivered) { "Agent B 未返回 status=OK" } }
-        }
-        onLog(LabLogLevel.SUCCESS, "H-A2A", "message_id=${receipt.messageId}，投递成功")
-        onStatus(RunnerStatus("A 端流程通过", "消息已送达 B；SDK 保持运行"))
+        activateManualMessaging(group.groupId)
         waitUntilCancelled()
     }
 
@@ -249,6 +317,37 @@ class AgentTestRunner(
         onStatus(RunnerStatus("Agent B 已就绪", "请启动 Agent A；邀请将自动接受"))
         onLog(LabLogLevel.INFO, "READY", "等待建组邀请、群组配置和 A2A 消息")
         waitUntilCancelled()
+    }
+
+    private suspend fun activateManualMessaging(groupId: String) {
+        val localId = localAgentId ?: run {
+            onLog(LabLogLevel.WARNING, "A2A READY", "本端 Agent ID 尚未就绪")
+            return
+        }
+        val snapshot = sdk.getGroupSnapshot(groupId) ?: run {
+            onLog(LabLogLevel.WARNING, "A2A READY", "群组配置尚未进入 SDK 缓存")
+            return
+        }
+        val session = try {
+            selectManualMessageSession(snapshot, localId)
+        } catch (error: Exception) {
+            onLog(LabLogLevel.ERROR, "A2A READY", error.message ?: "无法解析群组对端")
+            return
+        }
+        if (manualMessageSession == session) return
+        manualMessageSession = session
+        onManualMessageSession(session)
+        onLog(
+            LabLogLevel.SUCCESS,
+            "A2A READY",
+            "${config.role.name} → ${session.targetAgentName}，手动发送已启用",
+        )
+        onStatus(
+            RunnerStatus(
+                "群组已就绪 · 可双向发送",
+                "目标 ${session.targetAgentName} · ${session.groupId}",
+            ),
+        )
     }
 
     private suspend fun waitUntilCancelled(): Nothing {

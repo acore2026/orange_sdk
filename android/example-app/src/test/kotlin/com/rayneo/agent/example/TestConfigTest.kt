@@ -11,6 +11,8 @@ class TestConfigTest {
         assertEquals(8443, TestRole.A.defaultMasquePort)
         assertEquals(8089, TestRole.B.defaultRuntimePort)
         assertEquals(8444, TestRole.B.defaultMasquePort)
+        assertTrue(TestRole.A.defaultMessage.contains("Agent B"))
+        assertTrue(TestRole.B.defaultMessage.contains("Agent A"))
     }
 
     @Test
@@ -21,13 +23,13 @@ class TestConfigTest {
     }
 
     @Test
-    fun roleARequiresTaskFieldsButRoleBDoesNot() {
+    fun roleARequiresGroupFieldsButBothRolesRequireAMessageDraft() {
         val invalidA = validConfig(dnn = "", groupName = "", message = "")
-        val validB = invalidA.copy(role = TestRole.B)
+        val validB = invalidA.copy(role = TestRole.B, message = TestRole.B.defaultMessage)
 
         assertTrue(invalidA.validate().any { it.contains("DNN") })
         assertTrue(invalidA.validate().any { it.contains("群组名") })
-        assertTrue(invalidA.validate().any { it.contains("测试消息") })
+        assertTrue(invalidA.validate().any { it.contains("手动消息") })
         assertTrue(validB.validate().isEmpty())
     }
 

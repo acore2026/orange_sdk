@@ -4,9 +4,10 @@ enum class TestRole(
     val displayName: String,
     val defaultRuntimePort: Int,
     val defaultMasquePort: Int,
+    val defaultMessage: String,
 ) {
-    A("角色 A · 发起方", 8088, 8443),
-    B("角色 B · 能力提供方", 8089, 8444),
+    A("角色 A · 发起方", 8088, 8443, "hello Agent B from Android A"),
+    B("角色 B · 能力提供方", 8089, 8444, "hello Agent A from Android B"),
 }
 
 data class TestConfig(
@@ -44,7 +45,7 @@ data class TestConfig(
         if (capability.isBlank()) add("发现能力不能为空")
         if (role == TestRole.A && dnn.isBlank()) add("角色 A 的 DNN 不能为空")
         if (role == TestRole.A && groupName.isBlank()) add("角色 A 的群组名不能为空")
-        if (role == TestRole.A && message.isBlank()) add("角色 A 的测试消息不能为空")
+        if (message.isBlank()) add("手动消息预填内容不能为空")
     }
 
     private fun normalizedMasquePath(): String =

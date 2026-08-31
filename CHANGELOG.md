@@ -2,6 +2,25 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-31 — Android A/B 建组后双向手动消息
+
+### 修改原因
+
+- 原 Android 联调 App 在 A 建组成功后自动向 B 发送固定消息，B 只能被动接收，无法在同一条群组链路上反复验证 A→B 和 B→A 双向通信。
+- 联调人员需要在不重启 SDK、TUN、MASQUE 的情况下修改消息内容，并能在单次投递失败后继续发送。
+
+### 修改方式
+
+- A/B 收到并缓存群组配置后，从 SDK `GroupConfigSnapshot` 中以本端 Agent ID 排除自身并解析唯一对端；日志页显示“本端 → 对端”群组路由和手动消息输入区。
+- 删除 A 建组后的自动首条消息，A/B 均由用户点击“发送消息”调用 `sendMessage`；目标 Agent ID 交给 SDK 继续解析对端 IP、端口和 `/A2A/message` URL，不在 App 暴露路由配置。
+- 手动发送使用互斥保护，按钮在发送期间禁用；成功记录消息 ID 和投递回执，失败记录原因并恢复按钮，SDK、TUN、MASQUE 与本地 A2A 服务保持运行。
+- 配置页为 A/B 分别提供默认消息草稿，example-app 版本升级为 `0.2.0`，Android 手册补充双向手动发送步骤。
+
+### 验证内容
+
+- example-app 单元测试覆盖 A/B 对端互选、非双成员群组拒绝、双端消息草稿及配置校验。
+- 执行 Android SDK/example-app 单元测试、Lint、Debug APK 构建，并检查 APK 同时包含 ARM64、ARMv7、x86_64 与 x86 Native Core。
+
 ## 2026-08-31 — 持久化 Agent 身份与 Agent Card 三态生命周期
 
 ### 修改原因

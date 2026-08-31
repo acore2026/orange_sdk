@@ -149,12 +149,16 @@ Android 应用：
   Wi-Fi/VLAN IP 由系统自动选择，Token 只保存在当前内存，不写入
   SharedPreferences。
 - 第 2 页“日志”：逐步显示 VPN、`GET /v1/ue/info`、CONNECT-IP、身份申请、
-  网络能力、Agent Card、发现、建组、群组配置和 A2A 消息结果。失败时停留在
-  当前步骤，点击“重试当前接口”即可继续；SDK 不会因单个业务接口失败退出。
+  网络能力、Agent Card、发现、建组、群组配置和 A2A 消息结果。群组配置进入
+  SDK 缓存后，页面显示“本端 → 对端”路由、消息输入框和发送按钮，A/B 两端均可
+  重复手动发送。失败时停留在当前步骤，点击“重试当前接口”即可继续；SDK 不会因
+  单个业务接口或单次消息发送失败退出。
 
 角色 B 执行身份申请、获取网络能力、发布用户填写的能力，然后自动接受邀请并
-等待消息。角色 A 执行身份申请和能力注册，按同一能力发现 B，携带 DNN 建组，
-等待群组配置进入 SDK 缓存后调用 `sendMessage`。两端都不会在流程完成后自动
+等待群组配置。角色 A 执行身份申请和能力注册，按同一能力发现 B，携带 DNN 建组。
+双方收到群组配置后，App 从 SDK 群组缓存选择唯一对端；用户点击“发送消息”时才
+调用 `sendMessage`，不再由 A 自动发送首条消息。发送目标的 Agent ID、IP、端口和
+`/A2A/message` URL 均由 SDK 解析，页面不要求用户填写。两端都不会在流程完成后自动
 关闭 TUN、MASQUE 或本地消息服务；必须点击“停止”。
 
 构建并安装：
@@ -197,12 +201,16 @@ adb shell am start -n com.rayneo.agent.example/.MainActivity \
   --ei udp_port 28443 \
   --es owner 'android-test-owner-b' \
   --es agent_name 'Agent-B' \
-  --es capability 'text'
+  --es capability 'text' \
+  --es message 'hello Agent A from Android B'
 ```
 
 `server_ip` 和两个服务器端口是部署参数，示例 App 与 SDK 不内置这些地址。
 SDK 使用系统路由自动选择能到达 MASQUE Server 的物理源地址，并在日志页显示
 最终选择结果。建议先启动 B，等日志显示“Agent B 已就绪”后再启动 A。
+等两端日志页均出现“群组已就绪 · 可双向发送”和手动发送区后，即可分别输入文本并
+点击“发送消息”；接收方日志会显示 `A2A RECEIVE`，发送方日志会显示 `A2A SEND`
+及投递回执。
 如使用授权值，既可在页面填写，也可加 `--es masque_token '<TOKEN>'`。
 
 The application does not provide an Agent TUN IP. `GET /v1/ue/info` must report
