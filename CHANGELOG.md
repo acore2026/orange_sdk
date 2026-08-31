@@ -2,6 +2,25 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-31 — Android 自动选择 MASQUE 本机出口地址
+
+### 修改原因
+
+- A/B 联调 App 要求用户填写本机 Wi-Fi/VLAN IP，但该地址只是 MASQUE 外层 QUIC 的源地址；只要系统存在到服务器的可达路由，就不应把网卡选择暴露成普通用户配置。
+- Runtime 下行已经使用 WebSocket，A2A 地址由 Agent TUN IP 表示，因此 SDK 不再需要监听物理 IP 上的本地 TCP/UDP 服务。
+
+### 修改方式
+
+- Android SDK 在创建 Agent TUN 前对 MASQUE Server 执行 UDP 路由探测，取得系统选择的本机源地址，再用该地址创建、保护并绑定 QUIC Socket；`initialize.localVlanIp` 改为可选高级覆盖参数。
+- 本地 A2A TCP/UDP 服务只绑定 `GET /v1/ue/info` 返回的 Agent TUN IP；初始化结果新增 `masqueOuterSourceIp` 用于日志与诊断。
+- A/B App 配置页删除本机 Wi-Fi/VLAN IP，日志页显示系统实际选择的 MASQUE 出口；删除对应 SharedPreferences 和 ADB extra。
+- 更新 Android/仓库使用手册，明确默认调用不传物理地址以及多网卡测试的可选覆盖方法。
+
+### 验证内容
+
+- Android SDK 单测覆盖自动路由选择、显式出口覆盖以及 A2A 服务只接收 Agent TUN IP；example-app 配置单测确认不再需要物理地址。
+- 执行 Android SDK/example-app 单元测试、Lint 和 Debug APK 构建，并检查 APK 的四 ABI Native Core。
+
 ## 2026-08-29 — 新增 Android A/B 两页端到端联调 App
 
 ### 修改原因

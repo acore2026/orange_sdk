@@ -31,22 +31,12 @@ class TcpJsonLocalServer(
     private val jobs = mutableListOf<Job>()
 
     override suspend fun start(
-        physicalIp: String,
         agentIp: String,
         tcpPort: Int,
         udpPort: Int,
         onA2aMessage: suspend (JsonObject) -> Unit,
     ) {
         try {
-            val physical = bindTcp(physicalIp, tcpPort)
-            tcpSockets += physical
-            jobs += acceptLoop(physical) { path, _ ->
-                throw AgentSdkException(
-                    ErrorCode.INVALID_ARGUMENT,
-                    "Runtime downlink uses WebSocket; path $path is not available",
-                )
-            }
-
             val agent = bindTcp(agentIp, tcpPort)
             tcpSockets += agent
             jobs += acceptLoop(agent) { path, payload ->
@@ -60,17 +50,15 @@ class TcpJsonLocalServer(
                 buildJsonObject { put("status", "OK") }
             }
 
-            listOf(physicalIp, agentIp).distinct().forEach { address ->
-                udpSockets += DatagramSocket(null).apply {
-                    reuseAddress = false
-                    bind(InetSocketAddress(InetAddress.getByName(address), udpPort))
-                }
+            udpSockets += DatagramSocket(null).apply {
+                reuseAddress = false
+                bind(InetSocketAddress(InetAddress.getByName(agentIp), udpPort))
             }
         } catch (error: Exception) {
             close()
             throw AgentSdkException(
                 ErrorCode.LOCAL_PORT_IN_USE,
-                "Failed to bind SDK TCP/UDP listeners",
+                "Failed to bind SDK TCP/UDP listeners on the Agent TUN address",
                 cause = error,
             )
         }

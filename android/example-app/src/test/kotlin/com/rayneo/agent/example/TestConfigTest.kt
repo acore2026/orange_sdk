@@ -51,7 +51,6 @@ class TestConfigTest {
         runtimePort = runtimePort,
         masquePort = 8443,
         masquePath = masquePath,
-        localVlanIp = "device.test",
         localTcpPort = 4001,
         localUdpPort = 28443,
         masqueToken = null,

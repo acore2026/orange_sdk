@@ -4,6 +4,7 @@ import com.rayneo.agent.sdk.model.NetworkMessageAction
 import com.rayneo.agent.sdk.model.NetworkMessageType
 import com.rayneo.agent.sdk.model.OffloadingSession
 import kotlinx.serialization.json.JsonObject
+import java.net.URI
 
 internal fun interface ProofVerifier {
     suspend fun verifyGroupConfig(payload: JsonObject)
@@ -60,6 +61,10 @@ data class MasqueConfiguration(
     val identityDirectory: String,
 )
 
+fun interface LocalAddressResolver {
+    fun resolve(serverUri: URI): String
+}
+
 interface MasqueTransport {
     val connected: Boolean
     suspend fun start(tunFd: Int, configuration: MasqueConfiguration)
@@ -69,7 +74,6 @@ interface MasqueTransport {
 
 interface LocalServer {
     suspend fun start(
-        physicalIp: String,
         agentIp: String,
         tcpPort: Int,
         udpPort: Int,

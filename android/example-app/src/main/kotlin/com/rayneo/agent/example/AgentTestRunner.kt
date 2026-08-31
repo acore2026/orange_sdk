@@ -52,7 +52,6 @@ class AgentTestRunner(
             sdk.initialize(
                 agentRuntimeIp = config.serverIp,
                 agentRuntimePort = config.runtimePort,
-                localVlanIp = config.localVlanIp,
                 localTcpPort = config.localTcpPort,
                 localUdpPort = config.localUdpPort,
                 masqueServerUrl = config.masqueServerUrl,
@@ -62,7 +61,8 @@ class AgentTestRunner(
         onLog(
             LabLogLevel.SUCCESS,
             "INIT",
-            "Agent TUN=${initResult.agentTunCidr}，A2A=${initResult.agentTcpEndpoint}",
+            "系统选择MASQUE出口=${initResult.masqueOuterSourceIp}，" +
+                "Agent TUN=${initResult.agentTunCidr}，A2A=${initResult.agentTcpEndpoint}",
         )
 
         val profile = retryableStep("H-ID", "申请 Agent 数字身份") {

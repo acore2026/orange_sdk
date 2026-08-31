@@ -27,7 +27,8 @@ proof 验签；应用不配置密钥或安全回调。控制面出站签名字�
 HTTPS/HTTP/3 外，SDK 与 AgentRuntime、对端 Agent 的接口统一使用 HTTP。
 Android AAR 已包含真实的 ARM64、ARMv7、x86_64 和 x86
 `libmasque_core.so`，不再要求客户另行提供
-Native Core。
+Native Core。Android 初始化默认根据 MASQUE Server 自动选择可达的本机出口
+地址，应用不再配置物理 Wi-Fi/VLAN IP；A2A 服务只监听 Agent TUN IP。
 
 Linux/Python 和 Android 的 AgentCard 发布接口默认接收已经签发的 VC。封闭
 联调时也可传 `capabilities=[...]`，SDK 为每个能力生成一张 IDM 兼容的

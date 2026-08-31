@@ -15,7 +15,6 @@ data class TestConfig(
     val runtimePort: Int,
     val masquePort: Int,
     val masquePath: String,
-    val localVlanIp: String,
     val localTcpPort: Int,
     val localUdpPort: Int,
     val masqueToken: String?,
@@ -31,7 +30,6 @@ data class TestConfig(
 
     fun validate(): List<String> = buildList {
         if (serverIp.isBlank()) add("服务器 IP 不能为空")
-        if (localVlanIp.isBlank()) add("本机 Wi-Fi/VLAN IP 不能为空")
         listOf(
             "Runtime HTTP 端口" to runtimePort,
             "MASQUE QUIC 端口" to masquePort,

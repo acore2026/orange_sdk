@@ -116,8 +116,8 @@ class MainActivity : Activity() {
                 addView(field("masque_path", "CONNECT-IP 路径", "/.well-known/masque/ip"))
                 addView(field("masque_token", "MASQUE Token（可选，不保存）", "Bearer token", password = true))
 
-                addView(section("03  端侧网络"))
-                addView(field("local_vlan_ip", "本机 Wi-Fi / VLAN IP", "当前设备可达服务器的地址"))
+                addView(section("03  Agent 服务端口"))
+                addView(body("MASQUE 外层源地址由 Android 系统路由自动选择，无需填写本机 Wi-Fi 或 VLAN 地址。"))
                 addView(twoColumns(
                     field("tcp_port", "A2A TCP 端口", "4001", numeric = true),
                     field("udp_port", "A2A UDP 端口", "28443", numeric = true),
@@ -448,7 +448,6 @@ class MainActivity : Activity() {
         runtimePort = intValue("runtime_port"),
         masquePort = intValue("masque_port"),
         masquePath = value("masque_path"),
-        localVlanIp = value("local_vlan_ip"),
         localTcpPort = intValue("tcp_port"),
         localUdpPort = intValue("udp_port"),
         masqueToken = value("masque_token").ifBlank { null },
@@ -474,8 +473,6 @@ class MainActivity : Activity() {
         setValue("masque_path", intent.getStringExtra("masque_path")
             ?: legacyMasque?.path?.takeIf(String::isNotBlank)
             ?: preferences.getString("masque_path", "/.well-known/masque/ip"))
-        setValue("local_vlan_ip", intent.getStringExtra("local_vlan_ip")
-            ?: preferences.getString("local_vlan_ip", ""))
         setValue("tcp_port", intentInt("tcp_port", preferences.getInt("tcp_port", 4001)))
         setValue("udp_port", intentInt("udp_port", preferences.getInt("udp_port", 28443)))
         setValue("owner", intent.getStringExtra("owner")
@@ -499,7 +496,6 @@ class MainActivity : Activity() {
             .putInt("runtime_port", config.runtimePort)
             .putInt("masque_port", config.masquePort)
             .putString("masque_path", config.masquePath)
-            .putString("local_vlan_ip", config.localVlanIp)
             .putInt("tcp_port", config.localTcpPort)
             .putInt("udp_port", config.localUdpPort)
             .putString("owner", config.owner)

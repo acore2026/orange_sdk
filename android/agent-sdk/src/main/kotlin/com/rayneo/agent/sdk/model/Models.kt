@@ -59,6 +59,7 @@ data class SdkInitResult(
     val agentUdpEndpoint: String,
     val agentTunCidr: String,
     val masqueProxyEndpoint: String,
+    val masqueOuterSourceIp: String = "",
 )
 
 data class AgentProfile(

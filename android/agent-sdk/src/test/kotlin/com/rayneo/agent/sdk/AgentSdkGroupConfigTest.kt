@@ -4,6 +4,7 @@ import com.rayneo.agent.sdk.model.AgentProfile
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import com.rayneo.agent.sdk.model.NetworkMessageType
 import com.rayneo.agent.sdk.transport.LocalServer
+import com.rayneo.agent.sdk.transport.LocalAddressResolver
 import com.rayneo.agent.sdk.transport.ControlRequestAuthenticator
 import com.rayneo.agent.sdk.transport.DevicePublicKeyProvider
 import com.rayneo.agent.sdk.transport.GroupMessageListener
@@ -51,6 +52,7 @@ class AgentSdkGroupConfigTest {
     private lateinit var peer: FakePeer
     private lateinit var media: FakeMedia
     private lateinit var testCapabilityIssuer: TestCapabilityVcIssuer
+    private lateinit var addressResolver: FakeLocalAddressResolver
     private lateinit var sdk: AgentSdk
 
     @Before
@@ -61,6 +63,7 @@ class AgentSdkGroupConfigTest {
         server = FakeServer()
         peer = FakePeer()
         media = FakeMedia()
+        addressResolver = FakeLocalAddressResolver()
         testCapabilityIssuer = TestCapabilityVcIssuer(
             Files.createTempDirectory("agent-sdk-test-capability-")
                 .resolve("issuer-private-key.pem")
@@ -76,6 +79,7 @@ class AgentSdkGroupConfigTest {
             peerMessenger = peer,
             runtimeFactory = { _, _ -> runtime },
             localServerFactory = { server },
+            localAddressResolver = addressResolver,
             mediaOffloadAdapter = media,
             testCapabilityVcIssuer = testCapabilityIssuer,
         )
@@ -109,6 +113,26 @@ class AgentSdkGroupConfigTest {
         assertEquals("", runtime.lastPath)
         assertNotNull(runtime.downlinkHandler)
         assertEquals("8.8.8.7/32", tunnel.establishedConfiguration?.agentTunCidr)
+        assertEquals(1, addressResolver.calls)
+        assertEquals("192.168.1.10", masque.configuration?.localVlanIp)
+        assertEquals("8.8.8.7", server.agentIp)
+    }
+
+    @Test
+    fun `explicit outer source address bypasses automatic route selection`() = runTest {
+        val result = sdk.initialize(
+            agentRuntimeIp = "192.168.3.10",
+            agentRuntimePort = 8080,
+            localVlanIp = "192.168.9.10",
+            localTcpPort = 4001,
+            localUdpPort = 28443,
+            masqueServerUrl = "https://192.168.3.10:4433",
+        )
+
+        assertEquals(0, addressResolver.calls)
+        assertEquals("192.168.9.10", masque.configuration?.localVlanIp)
+        assertEquals("192.168.9.10", result.masqueOuterSourceIp)
+        assertEquals("8.8.8.7:4001", result.localTcpEndpoint)
     }
 
     @Test
@@ -500,12 +524,12 @@ class AgentSdkGroupConfigTest {
         val result = sdk.initialize(
             agentRuntimeIp = "192.168.3.10",
             agentRuntimePort = 8080,
-            localVlanIp = "192.168.1.10",
             localTcpPort = 4001,
             localUdpPort = 28443,
             masqueServerUrl = "https://192.168.3.10:4433",
         )
         assertEquals("8.8.8.7:4001", result.agentTcpEndpoint)
+        assertEquals("192.168.1.10", result.masqueOuterSourceIp)
         assertEquals("8.8.8.7/32", result.agentTunCidr)
         assertEquals("8.8.8.7/32", tunnel.establishedConfiguration?.agentTunCidr)
         assertTrue(tunnel.establishedConfiguration?.routes?.isEmpty() == true)
@@ -654,14 +678,24 @@ class AgentSdkGroupConfigTest {
     }
 
     private class FakeServer : LocalServer {
+        var agentIp = ""
         override suspend fun start(
-            physicalIp: String,
             agentIp: String,
             tcpPort: Int,
             udpPort: Int,
             onA2aMessage: suspend (JsonObject) -> Unit,
-        ) = Unit
+        ) {
+            this.agentIp = agentIp
+        }
         override suspend fun close() = Unit
+    }
+
+    private class FakeLocalAddressResolver : LocalAddressResolver {
+        var calls = 0
+        override fun resolve(serverUri: java.net.URI): String {
+            calls += 1
+            return "192.168.1.10"
+        }
     }
 
     private class FakePeer : PeerMessenger {

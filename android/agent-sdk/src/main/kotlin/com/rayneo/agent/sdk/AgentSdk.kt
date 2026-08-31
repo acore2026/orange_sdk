@@ -25,6 +25,7 @@ import com.rayneo.agent.sdk.transport.GroupMessageListener
 import com.rayneo.agent.sdk.transport.ControlRequestAuthenticator
 import com.rayneo.agent.sdk.transport.DevicePublicKeyProvider
 import com.rayneo.agent.sdk.transport.LocalServer
+import com.rayneo.agent.sdk.transport.LocalAddressResolver
 import com.rayneo.agent.sdk.transport.MediaOffloadAdapter
 import com.rayneo.agent.sdk.transport.MasqueConfiguration
 import com.rayneo.agent.sdk.transport.MasqueTransport
@@ -36,6 +37,7 @@ import com.rayneo.agent.sdk.transport.OkHttpRuntimeTransport
 import com.rayneo.agent.sdk.transport.PeerMessenger
 import com.rayneo.agent.sdk.transport.ProofVerifier
 import com.rayneo.agent.sdk.transport.RuntimeTransport
+import com.rayneo.agent.sdk.transport.RouteLocalAddressResolver
 import com.rayneo.agent.sdk.transport.TunnelConfiguration
 import com.rayneo.agent.sdk.transport.TunnelController
 import com.rayneo.agent.sdk.transport.VideoTrack
@@ -55,6 +57,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.URI
 import java.time.Instant
@@ -73,6 +77,7 @@ class AgentSdk internal constructor(
         OkHttpRuntimeTransport(host, port)
     },
     private val localServerFactory: () -> LocalServer = { TcpJsonLocalServer() },
+    private val localAddressResolver: LocalAddressResolver = RouteLocalAddressResolver(),
     private val mediaOffloadAdapter: MediaOffloadAdapter? = null,
     private val testCapabilityVcIssuer: TestCapabilityVcIssuer? = null,
 ) {
@@ -95,7 +100,7 @@ class AgentSdk internal constructor(
     suspend fun initialize(
         agentRuntimeIp: String,
         agentRuntimePort: Int,
-        localVlanIp: String,
+        localVlanIp: String? = null,
         localTcpPort: Int,
         localUdpPort: Int,
         masqueServerUrl: String,
@@ -133,13 +138,16 @@ class AgentSdk internal constructor(
             runtime = runtimeFactory(agentRuntimeIp, agentRuntimePort)
             this.agentTunIp = runtime!!.getUeAgentIp()
             this.agentTunCidr = "$agentTunIp/32"
+            val masqueOuterSourceIp = localVlanIp
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+                ?: withContext(Dispatchers.IO) { localAddressResolver.resolve(uri) }
             tunnelController.establish(
                 TunnelConfiguration(this.agentTunCidr, emptySet(), tunMtu)
             )
             groupCache = GroupMemberCache(tunnelController)
             localServer = localServerFactory().also { server ->
                 server.start(
-                    physicalIp = localVlanIp,
                     agentIp = agentTunIp,
                     tcpPort = localTcpPort,
                     udpPort = localUdpPort,
@@ -151,7 +159,7 @@ class AgentSdk internal constructor(
                 MasqueConfiguration(
                     serverUrl = masqueServerUrl,
                     authorization = masqueAuthorization,
-                    localVlanIp = localVlanIp,
+                    localVlanIp = masqueOuterSourceIp,
                     agentTunCidr = this.agentTunCidr,
                     mtu = tunMtu,
                     identityDirectory = tunnelController.clientIdentityDirectory,
@@ -163,12 +171,13 @@ class AgentSdk internal constructor(
             return SdkInitResult(
                 runtimeConnected = true,
                 masqueConnected = masqueTransport.connected,
-                localTcpEndpoint = "$localVlanIp:$localTcpPort",
-                localUdpEndpoint = "$localVlanIp:$localUdpPort",
+                localTcpEndpoint = "$agentTunIp:$localTcpPort",
+                localUdpEndpoint = "$agentTunIp:$localUdpPort",
                 agentTcpEndpoint = "$agentTunIp:$localTcpPort",
                 agentUdpEndpoint = "$agentTunIp:$localUdpPort",
                 agentTunCidr = this.agentTunCidr,
                 masqueProxyEndpoint = masqueServerUrl,
+                masqueOuterSourceIp = masqueOuterSourceIp,
             )
         } catch (error: Exception) {
             close()

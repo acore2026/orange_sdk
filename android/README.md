@@ -25,8 +25,11 @@ The AAR already packages `libmasque_core.so` for `arm64-v8a`, `armeabi-v7a`,
 physical ARM devices as well as x86/x86_64 Android emulators. The core implements
 HTTP/3 CONNECT-IP, ADDRESS_ASSIGN and ROUTE_ADVERTISEMENT capsule handling,
 bidirectional packet pumps, and TUN fd replacement. It binds the QUIC UDP socket
-to `localVlanIp` and calls
+to the source address selected by Android's route to the MASQUE server, then calls
 `AgentVpnService.protectQuicSocket(fd)` before connecting, preventing VPN recursion.
+Applications normally omit `localVlanIp`; the SDK performs the route lookup before
+establishing its Agent TUN. An explicit `localVlanIp` remains available only as an
+advanced override for controlled multi-interface tests.
 
 This repository ships only the endpoint SDK and CONNECT-IP client. It does not
 ship a MASQUE server, AgentRuntime server, UERANSIM adapter, server certificate,
@@ -132,8 +135,9 @@ missing.
 Android 应用：
 
 - 第 1 页“配置”：选择角色 A 或 B，填写服务器地址、Runtime HTTP 端口、
-  MASQUE QUIC 端口与路径、本机 Wi-Fi/VLAN IP、A2A TCP/UDP 端口以及
-  Agent 测试参数。Token 只保存在当前内存，不写入 SharedPreferences。
+  MASQUE QUIC 端口与路径、A2A TCP/UDP 端口以及 Agent 测试参数。本机
+  Wi-Fi/VLAN IP 由系统自动选择，Token 只保存在当前内存，不写入
+  SharedPreferences。
 - 第 2 页“日志”：逐步显示 VPN、`GET /v1/ue/info`、CONNECT-IP、身份申请、
   网络能力、Agent Card、发现、建组、群组配置和 A2A 消息结果。失败时停留在
   当前步骤，点击“重试当前接口”即可继续；SDK 不会因单个业务接口失败退出。
@@ -160,7 +164,6 @@ adb shell am start -n com.rayneo.agent.example/.MainActivity \
   --ei runtime_port 8088 \
   --ei masque_port 8443 \
   --es masque_path '/.well-known/masque/ip' \
-  --es local_vlan_ip '<DEVICE_A_WIFI_IP>' \
   --ei tcp_port 4001 \
   --ei udp_port 28443 \
   --es owner 'android-test-owner-a' \
@@ -180,7 +183,6 @@ adb shell am start -n com.rayneo.agent.example/.MainActivity \
   --ei runtime_port 8089 \
   --ei masque_port 8444 \
   --es masque_path '/.well-known/masque/ip' \
-  --es local_vlan_ip '<DEVICE_B_WIFI_IP>' \
   --ei tcp_port 4001 \
   --ei udp_port 28443 \
   --es owner 'android-test-owner-b' \
@@ -188,8 +190,9 @@ adb shell am start -n com.rayneo.agent.example/.MainActivity \
   --es capability 'text'
 ```
 
-`server_ip`、两个服务器端口和两个设备的物理 IP 都是部署参数，示例 App 与
-SDK 不内置这些地址。建议先启动 B，等日志显示“Agent B 已就绪”后再启动 A。
+`server_ip` 和两个服务器端口是部署参数，示例 App 与 SDK 不内置这些地址。
+SDK 使用系统路由自动选择能到达 MASQUE Server 的物理源地址，并在日志页显示
+最终选择结果。建议先启动 B，等日志显示“Agent B 已就绪”后再启动 A。
 如使用授权值，既可在页面填写，也可加 `--es masque_token '<TOKEN>'`。
 
 The application does not provide an Agent TUN IP. `GET /v1/ue/info` must report
@@ -199,6 +202,22 @@ as `/32`; the address must match the device's `agent_ip + uesimtun` mapping on
 the external AgentRuntime/MASQUE/5GC system. That mapping is not configured by
 the Android application or this SDK. The effective CIDR is available as
 `SdkInitResult.agentTunCidr`.
+
+应用正常初始化时不传物理地址：
+
+```kotlin
+sdk.initialize(
+    agentRuntimeIp = serverIp,
+    agentRuntimePort = runtimePort,
+    localTcpPort = 4001,
+    localUdpPort = 28443,
+    masqueServerUrl = masqueUrl,
+)
+```
+
+SDK 的 A2A TCP/UDP 服务仅绑定 Agent TUN IP，不监听自动选择的物理源地址。
+自动选择结果可从 `SdkInitResult.masqueOuterSourceIp` 读取。只有需要固定特定
+网卡出口的多网卡测试才显式传入 `localVlanIp = "..."`。
 
 Core-network downlink frames use `kind + request_id + message_type +
 transaction_id + payload`. Each frame is handled in its own coroutine, so
