@@ -12,7 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .capability_vc import issue_test_capability_vcs
+from .agent_state import (
+    AgentCardContext,
+    AgentLifecycleState,
+    AgentStateStore,
+    IdentityApplicationContext,
+)
+from .capability_vc import TEST_CAPABILITY_ISSUER_DID, issue_test_capability_vcs
 from .config import SdkConfig
 from .contracts import (
     ConnectIpTransport,
@@ -191,6 +197,7 @@ class AgentSdk:
         server_factory: ServerFactory | None = None,
         route_backend_factory: RouteBackendFactory | None = None,
         media_offload_adapter: MediaOffloadAdapter | None = None,
+        agent_state_directory: str | Path | None = None,
     ) -> None:
         self._logger = logging.getLogger(f"agent_sdk.client.{id(self)}")
         self._logger.propagate = False
@@ -235,6 +242,7 @@ class AgentSdk:
             )
         )
         self._media_offload_adapter = media_offload_adapter
+        self._agent_state_store = AgentStateStore(agent_state_directory)
 
         self._state = "NEW"
         self._config: SdkConfig | None = None
@@ -248,6 +256,9 @@ class AgentSdk:
         self._network_listener: NetworkMessageListener | None = None
         self._group_listener: GroupMessageListener | None = None
         self._profile: AgentProfile | None = None
+        self._agent_lifecycle_state = AgentLifecycleState.NO_IDENTITY
+        self._identity_application_context: IdentityApplicationContext | None = None
+        self._agent_card_context: AgentCardContext | None = None
         self._group_info: dict[str, GroupInfo] = {}
         self._offloading_sessions: dict[str, OffloadingSession] = {}
 
@@ -298,6 +309,14 @@ class AgentSdk:
     @property
     def state(self) -> str:
         return self._state
+
+    @property
+    def agent_lifecycle_state(self) -> AgentLifecycleState:
+        return self._agent_lifecycle_state
+
+    @property
+    def local_profile(self) -> AgentProfile | None:
+        return self._profile
 
     async def init(
         self,
@@ -399,6 +418,27 @@ class AgentSdk:
                 log_backup_count=log_backup_count,
             )
             self._config = config
+            restored = self._agent_state_store.load(
+                config.agent_runtime_ip,
+                config.agent_runtime_port,
+                config.agent_tun_ip,
+            )
+            self._agent_lifecycle_state = restored.state
+            self._profile = restored.profile
+            self._identity_application_context = restored.identity_application
+            self._agent_card_context = restored.agent_card
+            self._log(
+                logging.INFO,
+                "agent_state_restored",
+                agent_lifecycle_state=restored.state.value,
+                agent_id=restored.profile.agent_id if restored.profile else None,
+                state_file=str(
+                    self._agent_state_store.state_file(
+                        config.agent_runtime_ip,
+                        config.agent_runtime_port,
+                    )
+                ),
+            )
             self._tun = await self._tun_factory(
                 config.tun_name, config.agent_tun_cidr, config.tun_mtu
             )
@@ -459,6 +499,98 @@ class AgentSdk:
             raise AgentSdkError(
                 ErrorCode.SDK_NOT_INITIALIZED, "SDK is not initialized"
             )
+
+    def _require_agent_state(
+        self,
+        expected: AgentLifecycleState | set[AgentLifecycleState],
+        *,
+        operation: str,
+        agent_id: str | None = None,
+    ) -> None:
+        accepted = {expected} if isinstance(expected, AgentLifecycleState) else expected
+        if self._agent_lifecycle_state not in accepted:
+            expected_text = ", ".join(sorted(item.value for item in accepted))
+            raise AgentSdkError(
+                ErrorCode.AGENT_STATE_TRANSITION_INVALID,
+                f"{operation} requires Agent state {expected_text}; current state is "
+                f"{self._agent_lifecycle_state.value}",
+                details={
+                    "operation": operation,
+                    "current_state": self._agent_lifecycle_state.value,
+                    "expected_states": sorted(item.value for item in accepted),
+                },
+            )
+        if agent_id is not None and (
+            self._profile is None or self._profile.agent_id != agent_id
+        ):
+            raise AgentSdkError(
+                ErrorCode.AGENT_STATE_TRANSITION_INVALID,
+                f"{operation} agent_id does not match the persisted local identity",
+                field="agent_id",
+            )
+
+    def _persist_agent_state(
+        self,
+        state: AgentLifecycleState,
+        profile: AgentProfile,
+        *,
+        identity_application: IdentityApplicationContext | None = None,
+        agent_card: AgentCardContext | None = None,
+    ) -> None:
+        if self._config is None:
+            raise AgentSdkError(
+                ErrorCode.SDK_NOT_INITIALIZED,
+                "SDK configuration is unavailable for Agent state persistence",
+            )
+        resolved_identity_application = (
+            identity_application or self._identity_application_context
+        )
+        if resolved_identity_application is None:
+            raise AgentSdkError(
+                ErrorCode.AGENT_STATE_INVALID,
+                "identity application context is unavailable",
+            )
+        self._agent_state_store.save(
+            self._config.agent_runtime_ip,
+            self._config.agent_runtime_port,
+            self._config.agent_tun_ip,
+            state,
+            profile,
+            resolved_identity_application,
+            agent_card,
+        )
+        self._profile = profile
+        self._agent_lifecycle_state = state
+        self._identity_application_context = resolved_identity_application
+        self._agent_card_context = agent_card
+        self._log(
+            logging.INFO,
+            "agent_state_transition",
+            agent_lifecycle_state=state.value,
+            agent_id=profile.agent_id,
+        )
+
+    def _clear_agent_state(self) -> None:
+        if self._config is None:
+            raise AgentSdkError(
+                ErrorCode.SDK_NOT_INITIALIZED,
+                "SDK configuration is unavailable for Agent state persistence",
+            )
+        self._agent_state_store.clear(
+            self._config.agent_runtime_ip,
+            self._config.agent_runtime_port,
+        )
+        previous_agent_id = self._profile.agent_id if self._profile else None
+        self._profile = None
+        self._agent_lifecycle_state = AgentLifecycleState.NO_IDENTITY
+        self._identity_application_context = None
+        self._agent_card_context = None
+        self._log(
+            logging.INFO,
+            "agent_state_transition",
+            agent_lifecycle_state=AgentLifecycleState.NO_IDENTITY.value,
+            agent_id=previous_agent_id,
+        )
 
     def _allowed(self, ip: str) -> bool:
         assert self._routes is not None
@@ -712,10 +844,33 @@ class AgentSdk:
         metadata: Mapping[str, Any],
     ) -> AgentProfile:
         self._require_ready()
-        assert self._runtime is not None
         path = "/idm/v1/identity-applications"
         self._validate_identity_application(owner, name, description, metadata)
         normalized_metadata = self._normalize_identity_metadata(metadata)
+        identity_application = IdentityApplicationContext(
+            owner,
+            name,
+            description,
+            dict(normalized_metadata),
+        )
+        if self._agent_lifecycle_state is AgentLifecycleState.IDENTITY_READY:
+            assert self._profile is not None
+            previous_agent_id = self._profile.agent_id
+            replacement = await self.deregister_identity(
+                previous_agent_id,
+                reason="replaced",
+            )
+            if not replacement.success:
+                raise AgentSdkError(
+                    ErrorCode.RUNTIME_REJECTED,
+                    "cannot replace local identity because deregistration failed",
+                    details={"agent_id": previous_agent_id},
+                )
+        self._require_agent_state(
+            AgentLifecycleState.NO_IDENTITY,
+            operation="apply_identity",
+        )
+        assert self._runtime is not None
         body = await self._authenticate_control_request(
             path,
             {
@@ -746,19 +901,43 @@ class AgentSdk:
             agent_name=response_name,
             identity_vc=dict(vc0),
         )
-        self._profile = profile
+        self._persist_agent_state(
+            AgentLifecycleState.IDENTITY_READY,
+            profile,
+            identity_application=identity_application,
+        )
         return profile
 
     @logged_sync
-    def set_local_profile_for_restore(self, profile: AgentProfile) -> None:
+    def set_local_profile_for_restore(
+        self,
+        profile: AgentProfile,
+    ) -> None:
         """Restore a previously verified profile from secure local storage."""
-        self._profile = profile
+        identity_application = self._identity_application_context or (
+            IdentityApplicationContext(
+                owner="restored-local-profile",
+                name=profile.agent_name,
+                description="Profile restored by the host application",
+                metadata={"region": "unknown", "os": "unknown", "version": "unknown"},
+            )
+        )
+        self._persist_agent_state(
+            AgentLifecycleState.IDENTITY_READY,
+            profile,
+            identity_application=identity_application,
+        )
 
     @logged_async
     async def deregister_identity(
         self, agent_id: str, reason: str = "retired"
     ) -> OperationResult:
         self._require_ready()
+        self._require_agent_state(
+            {AgentLifecycleState.IDENTITY_READY, AgentLifecycleState.CARD_PUBLISHED},
+            operation="deregister_identity",
+            agent_id=agent_id,
+        )
         assert self._runtime is not None
         path = "/acn-agent/v1/agent-deletions"
         allowed_reasons = {
@@ -785,13 +964,14 @@ class AgentSdk:
             },
         )
         response = await self._runtime.request("POST", path, body)
-        if self._profile and self._profile.agent_id == agent_id:
-            self._profile = None
-        return OperationResult(
+        result = OperationResult(
             bool(response.get("success", True)),
             str(response.get("operation_id", "")),
             str(response.get("message", "")),
         )
+        if result.success:
+            self._clear_agent_state()
+        return result
 
     @logged_async
     async def get_network_ability(
@@ -848,6 +1028,12 @@ class AgentSdk:
         agent_name: str | None = None,
         test_vc_private_key_path: str | Path | None = None,
     ) -> OperationResult:
+        self._require_ready()
+        self._require_agent_state(
+            AgentLifecycleState.IDENTITY_READY,
+            operation="register_capabilities",
+            agent_id=agent_id,
+        )
         vc_list = list(credentials or ())
         if capabilities is not None:
             resolved_agent_name = agent_name
@@ -894,11 +1080,22 @@ class AgentSdk:
                 "vc_list": vc_list,
             },
         )
-        return await self._operation(
+        result = await self._operation(
             "POST",
             path,
             body,
         )
+        if result.success:
+            assert self._profile is not None
+            self._persist_agent_state(
+                AgentLifecycleState.CARD_PUBLISHED,
+                self._profile,
+                agent_card=AgentCardContext(
+                    priority,
+                    tuple(dict(item) for item in vc_list),
+                ),
+            )
+        return result
 
     @logged_async
     async def update_capabilities(
@@ -907,20 +1104,69 @@ class AgentSdk:
         update_items: Sequence[Mapping[str, Any]],
         credentials: Sequence[Mapping[str, Any]],
     ) -> OperationResult:
-        path = "/arf/v1/agent-cards-update"
-        body = await self._authenticate_control_request(
-            path,
-            {
-                "request_id": str(uuid.uuid4()),
-                "agent_id": agent_id,
-                "update_items": list(update_items),
-                "credentials": list(credentials),
-            },
+        self._require_ready()
+        self._require_agent_state(
+            AgentLifecycleState.CARD_PUBLISHED,
+            operation="update_capabilities",
+            agent_id=agent_id,
         )
-        return await self._operation(
-            "POST",
-            path,
-            body,
+        identity_application = self._identity_application_context
+        card_context = self._agent_card_context
+        if identity_application is None or card_context is None:
+            raise AgentSdkError(
+                ErrorCode.AGENT_STATE_INVALID,
+                "cannot rebuild Agent Card because persisted registration context is missing",
+            )
+        replacement_vcs = self._apply_capability_updates(
+            card_context.vc_list,
+            update_items,
+            credentials,
+        )
+        old_agent_id = agent_id
+        for credential in replacement_vcs:
+            claims = credential.get("claims")
+            claims_mapping = claims if isinstance(claims, Mapping) else {}
+            is_network_ability = any(
+                field in claims_mapping
+                for field in ("network_abilities", "abilities", "agent_attribute")
+            ) and "skill_name" not in claims_mapping
+            is_reissuable_test_capability = (
+                credential.get("issuer") == TEST_CAPABILITY_ISSUER_DID
+                and isinstance(claims_mapping.get("skill_name"), str)
+            )
+            if (
+                claims_mapping.get("agent_id") == old_agent_id
+                and not is_network_ability
+                and not is_reissuable_test_capability
+            ):
+                raise AgentSdkError(
+                    ErrorCode.CREDENTIAL_EXPIRED,
+                    "an existing capability credential is bound to the current Agent ID "
+                    "but cannot be reissued by the SDK",
+                    field="credentials",
+                )
+        deregistered = await self.deregister_identity(old_agent_id, reason="replaced")
+        if not deregistered.success:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "cannot rebuild Agent Card because identity deregistration failed",
+                details={"agent_id": old_agent_id},
+            )
+        profile = await self.apply_identity(
+            identity_application.owner,
+            identity_application.name,
+            identity_application.description,
+            identity_application.metadata,
+        )
+        replacement_vcs = await self._refresh_rebound_credentials(
+            replacement_vcs,
+            old_agent_id=old_agent_id,
+            new_profile=profile,
+        )
+        return await self.register_capabilities(
+            profile.agent_id,
+            priority=card_context.priority,
+            credentials=replacement_vcs,
         )
 
     @logged_async
@@ -1151,6 +1397,171 @@ class AgentSdk:
             str(response.get("operation_id", "")),
             str(response.get("message", "")),
         )
+
+    def _apply_capability_updates(
+        self,
+        published_vcs: Sequence[Mapping[str, Any]],
+        update_items: Sequence[Mapping[str, Any]],
+        credentials: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not update_items:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "update_items must contain at least one item",
+                field="update_items",
+            )
+        result = [dict(item) for item in published_vcs]
+        supplied = [dict(item) for item in credentials]
+
+        def credential_id(credential: Mapping[str, Any]) -> str | None:
+            value = credential.get("id")
+            return value if isinstance(value, str) and value else None
+
+        def add_or_replace(credential: Mapping[str, Any]) -> None:
+            identifier = credential_id(credential)
+            if identifier is None:
+                result.append(dict(credential))
+                return
+            for index, current in enumerate(result):
+                if credential_id(current) == identifier:
+                    result[index] = dict(credential)
+                    return
+            result.append(dict(credential))
+
+        for credential in supplied:
+            add_or_replace(credential)
+
+        for index, item in enumerate(update_items):
+            if not isinstance(item, Mapping):
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "each update item must be an object",
+                    field=f"update_items[{index}]",
+                )
+            update_type = item.get("update_type")
+            skill_name = item.get("skill_name")
+            if update_type not in {"add_skill", "remove_skill"}:
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "update_type must be add_skill or remove_skill",
+                    field=f"update_items[{index}].update_type",
+                )
+            if not isinstance(skill_name, str) or not skill_name:
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "skill_name must be a non-empty string",
+                    field=f"update_items[{index}].skill_name",
+                )
+            reference_id = item.get("reference_vc_id")
+            if update_type == "add_skill":
+                if not isinstance(reference_id, str) or not reference_id:
+                    raise AgentSdkError(
+                        ErrorCode.INVALID_ARGUMENT,
+                        "add_skill requires reference_vc_id",
+                        field=f"update_items[{index}].reference_vc_id",
+                    )
+                referenced = next(
+                    (
+                        credential
+                        for credential in supplied
+                        if credential_id(credential) == reference_id
+                    ),
+                    None,
+                )
+                if referenced is None:
+                    raise AgentSdkError(
+                        ErrorCode.INVALID_ARGUMENT,
+                        "reference_vc_id was not provided in credentials",
+                        field=f"update_items[{index}].reference_vc_id",
+                    )
+                add_or_replace(referenced)
+                if (
+                    self._credential_skill_name(referenced) != skill_name
+                    and not any(
+                        self._credential_skill_name(credential) == skill_name
+                        for credential in result
+                    )
+                ):
+                    if self._profile is None:
+                        raise AgentSdkError(
+                            ErrorCode.AGENT_STATE_INVALID,
+                            "local profile is unavailable while rebuilding Agent Card",
+                        )
+                    for generated in issue_test_capability_vcs(
+                        agent_id=self._profile.agent_id,
+                        agent_name=self._profile.agent_name,
+                        capabilities=[skill_name],
+                    ):
+                        add_or_replace(generated)
+            else:
+                result = [
+                    credential
+                    for credential in result
+                    if self._credential_skill_name(credential) != skill_name
+                    and (
+                        not isinstance(reference_id, str)
+                        or credential_id(credential) != reference_id
+                    )
+                ]
+        if not result:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "capability update would produce an empty Agent Card",
+                field="update_items",
+            )
+        return result
+
+    async def _refresh_rebound_credentials(
+        self,
+        credentials: Sequence[Mapping[str, Any]],
+        *,
+        old_agent_id: str,
+        new_profile: AgentProfile,
+    ) -> list[dict[str, Any]]:
+        refreshed: list[dict[str, Any]] = []
+        network_refreshed = False
+        for credential in credentials:
+            claims = credential.get("claims")
+            claims_mapping = claims if isinstance(claims, Mapping) else {}
+            is_network_ability = any(
+                field in claims_mapping
+                for field in ("network_abilities", "abilities", "agent_attribute")
+            ) and "skill_name" not in claims_mapping
+            if is_network_ability:
+                if not network_refreshed:
+                    ability = await self.get_network_ability(new_profile.agent_id)
+                    refreshed.append(dict(ability.ability_vc))
+                    network_refreshed = True
+                continue
+            if (
+                credential.get("issuer") == TEST_CAPABILITY_ISSUER_DID
+                and isinstance(claims_mapping.get("skill_name"), str)
+            ):
+                refreshed.extend(
+                    issue_test_capability_vcs(
+                        agent_id=new_profile.agent_id,
+                        agent_name=new_profile.agent_name,
+                        capabilities=[str(claims_mapping["skill_name"])],
+                    )
+                )
+                continue
+            if claims_mapping.get("agent_id") == old_agent_id:
+                raise AgentSdkError(
+                    ErrorCode.CREDENTIAL_EXPIRED,
+                    "an existing capability credential is bound to the deregistered Agent ID "
+                    "and cannot be reissued by the SDK",
+                    field="credentials",
+                )
+            refreshed.append(dict(credential))
+        return refreshed
+
+    @staticmethod
+    def _credential_skill_name(credential: Mapping[str, Any]) -> str | None:
+        claims = credential.get("claims")
+        if not isinstance(claims, Mapping):
+            return None
+        skill_name = claims.get("skill_name")
+        return skill_name if isinstance(skill_name, str) else None
 
     async def _authenticate_control_request(
         self, path: str, body: Mapping[str, Any]

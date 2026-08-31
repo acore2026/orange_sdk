@@ -119,6 +119,7 @@ async def test_linux_agent_full_flow_executes_every_business_api():
     )
     stream = SimpleNamespace(recv=AsyncMock(return_value={"frame": "processed"}))
     sdk = SimpleNamespace(
+        local_profile=profile,
         init=AsyncMock(return_value=SimpleNamespace(agent_tun_cidr="8.8.8.7/32")),
         apply_identity=AsyncMock(return_value=profile),
         set_local_profile_for_restore=Mock(),

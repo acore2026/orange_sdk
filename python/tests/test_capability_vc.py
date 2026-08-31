@@ -150,7 +150,7 @@ async def test_register_capabilities_accepts_existing_vcs_and_raw_capabilities(
     assert body["proof"] == {"jws": "test-proof"}
 
 
-async def test_register_raw_capabilities_requires_agent_name_without_profile(
+async def test_register_raw_capabilities_rejects_non_local_agent_id(
     sdk_fixture,
     tmp_path,
 ):
@@ -164,8 +164,8 @@ async def test_register_raw_capabilities_requires_agent_name_without_profile(
             test_vc_private_key_path=private_key_path,
         )
 
-    assert captured.value.code is ErrorCode.INVALID_ARGUMENT
-    assert captured.value.field == "agent_name"
+    assert captured.value.code is ErrorCode.AGENT_STATE_TRANSITION_INVALID
+    assert captured.value.field == "agent_id"
 
 
 def test_test_capability_vc_rejects_invalid_inputs_and_missing_key(tmp_path):

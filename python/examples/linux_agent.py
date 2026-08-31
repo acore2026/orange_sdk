@@ -171,7 +171,7 @@ async def run_full_flow(
         metadata={
             "region": args.region,
             "os": "Linux",
-            "version": "0.14.0",
+            "version": "0.15.0",
         },
     )
     print("[2 apply_identity]", profile.agent_id)
@@ -221,7 +221,7 @@ async def run_full_flow(
     await _before_step(
         before_step,
         "sdk.update_capabilities",
-        "POST /arf/v1/agent-cards-update 更新 Agent 能力属性；"
+        "注销并重新申请身份后 POST /arf/v1/agent-cards 重建 Agent Card；"
         f"update_skill={args.update_skill!r}",
     )
     updated = await sdk.update_capabilities(
@@ -236,6 +236,7 @@ async def run_full_flow(
         credentials=[ability.ability_vc],
     )
     print("[6 update_capabilities]", updated.success)
+    profile = sdk.local_profile or profile
 
     await _before_step(
         before_step,

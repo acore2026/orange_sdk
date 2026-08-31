@@ -11,9 +11,11 @@ from agent_sdk.rest_server import AiohttpLocalServer
 from agent_sdk.runtime import HttpRuntimeTransport
 
 
-async def test_public_function_entry_exit_error_and_redaction(sdk_fixture):
-    sdk = sdk_fixture["sdk"]
-    log_path = sdk_fixture["log_path"]
+async def test_public_function_entry_exit_error_and_redaction(
+    sdk_without_profile_fixture,
+):
+    sdk = sdk_without_profile_fixture["sdk"]
+    log_path = sdk_without_profile_fixture["log_path"]
 
     await sdk.apply_identity(
         "Alice",

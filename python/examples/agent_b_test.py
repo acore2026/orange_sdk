@@ -12,7 +12,12 @@ import asyncio
 import json
 from typing import Any
 
-from agent_sdk import AgentSdk, NetworkMessageAction, NetworkMessageType
+from agent_sdk import (
+    AgentLifecycleState,
+    AgentSdk,
+    NetworkMessageAction,
+    NetworkMessageType,
+)
 from interactive_linux_agent import EnterStepGate, InteractiveDemoAborted
 
 
@@ -126,52 +131,73 @@ async def run_agent_b(
             masque_endpoint=initialized.masque_proxy_endpoint,
         )
 
-        await _before_step(
-            gate,
-            "sdk.apply_identity",
-            "POST /idm/v1/identity-applications，为 Agent B 申请数字身份。",
-        )
-        profile = await client.apply_identity(
-            owner=args.owner,
-            name=args.agent_name,
-            description=args.description,
-            metadata={
-                "region": args.region,
-                "os": "Linux",
-                "version": "0.14.0",
-            },
-        )
-        _emit("IDENTITY_READY", agent_id=profile.agent_id)
-
-        await _before_step(
-            gate,
-            "sdk.get_network_ability",
-            "POST /idm/v1/network-ability，取得 Agent B 的运营商网络能力凭证。",
-        )
-        ability = await client.get_network_ability(profile.agent_id)
+        lifecycle_state = client.agent_lifecycle_state
+        profile = client.local_profile
         _emit(
-            "NETWORK_ABILITY_READY",
-            network_abilities=ability.abilities,
-            valid_until=(
-                ability.valid_until.isoformat() if ability.valid_until else None
-            ),
+            "AGENT_STATE_RESTORED",
+            agent_lifecycle_state=lifecycle_state.value,
+            agent_id=profile.agent_id if profile else None,
         )
+        if lifecycle_state is AgentLifecycleState.NO_IDENTITY:
+            await _before_step(
+                gate,
+                "sdk.apply_identity",
+                "状态1：POST /idm/v1/identity-applications，为 Agent B 申请数字身份。",
+            )
+            profile = await client.apply_identity(
+                owner=args.owner,
+                name=args.agent_name,
+                description=args.description,
+                metadata={
+                    "region": args.region,
+                    "os": "Linux",
+                    "version": "0.15.0",
+                },
+            )
+            lifecycle_state = AgentLifecycleState.IDENTITY_READY
+            _emit("IDENTITY_READY", agent_id=profile.agent_id)
+        else:
+            if profile is None:
+                raise RuntimeError("persisted Agent state has no local profile")
+            _emit("IDENTITY_REUSED", agent_id=profile.agent_id)
 
-        await _before_step(
-            gate,
-            "sdk.register_capabilities",
-            "POST /arf/v1/agent-cards，发布供 Agent A 发现的 B 能力。",
-        )
-        registration = await client.register_capabilities(
-            profile.agent_id,
-            priority=args.priority,
-            credentials=[ability.ability_vc],
-            capabilities=[args.capability],
-            test_vc_private_key_path=args.third_party_private_key,
-        )
-        if not registration.success:
-            raise RuntimeError(
-                f"Agent B capability registration failed: {registration.message}"
+        if lifecycle_state is AgentLifecycleState.IDENTITY_READY:
+            await _before_step(
+                gate,
+                "sdk.get_network_ability",
+                "状态2：POST /idm/v1/network-ability，取得运营商网络能力凭证。",
+            )
+            ability = await client.get_network_ability(profile.agent_id)
+            _emit(
+                "NETWORK_ABILITY_READY",
+                network_abilities=ability.abilities,
+                valid_until=(
+                    ability.valid_until.isoformat() if ability.valid_until else None
+                ),
+            )
+
+            await _before_step(
+                gate,
+                "sdk.register_capabilities",
+                "状态2：POST /arf/v1/agent-cards，发布供 Agent A 发现的 B 能力。",
+            )
+            registration = await client.register_capabilities(
+                profile.agent_id,
+                priority=args.priority,
+                credentials=[ability.ability_vc],
+                capabilities=[args.capability],
+                test_vc_private_key_path=args.third_party_private_key,
+            )
+            if not registration.success:
+                raise RuntimeError(
+                    f"Agent B capability registration failed: {registration.message}"
+                )
+            lifecycle_state = AgentLifecycleState.CARD_PUBLISHED
+        else:
+            _emit(
+                "PROFILE_REUSED",
+                agent_id=profile.agent_id,
+                reason="Agent Card is already published; skip register_capabilities",
             )
         _emit(
             "B_READY",

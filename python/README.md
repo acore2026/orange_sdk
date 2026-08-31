@@ -8,7 +8,7 @@ SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.14.0-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
+- `agent_connect_sdk-0.15.0-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/interactive_linux_agent.py`：复用真实 Linux 全流程参数，每按一次回车只调用下一个 SDK 接口。
@@ -46,7 +46,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.14.0-py3-none-any.whl
+dist/agent_connect_sdk-0.15.0-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -58,7 +58,7 @@ dist/agent_connect_sdk-0.14.0-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.14.0-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.15.0-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -92,14 +92,14 @@ python -m pip install -e '.[test]'
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.14.0-py3-none-any.whl
+  ./agent_connect_sdk-0.15.0-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.14.0-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.15.0-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -386,12 +386,31 @@ sdk.register_group_message_listener(GroupListener())
 
 ### 4.2 身份、能力、发现和建群
 
+SDK 会按 AgentRuntime 的 `IP:端口` 持久化 Agent 业务状态：
+
+| `sdk.agent_lifecycle_state` | 含义 | 下一步 |
+|---|---|---|
+| `NO_IDENTITY` | 未获取数字身份 | 调用 `apply_identity()` |
+| `IDENTITY_READY` | 已保存 `AgentProfile`，未发布 Agent Card | 调用 `register_capabilities()`，或注销回到状态1 |
+| `CARD_PUBLISHED` | 身份和 Agent Card 均已就绪 | 调用 `update_capabilities()`，或注销回到状态1 |
+
+状态文件默认位于 `$XDG_STATE_HOME/agent-sdk/agents` 或
+`~/.local/state/agent-sdk/agents`，目录/文件权限为 `0700/0600`。应用只读取
+`sdk.agent_lifecycle_state` 和 `sdk.local_profile`，不要自行编辑 JSON。状态3再次调用
+`register_capabilities()` 会在本地返回 `AGENT_STATE_TRANSITION_INVALID`，不会重复发布。
+状态2再次调用 `apply_identity()` 时，SDK 会先以 `replaced` 注销旧身份，再使用本次
+参数申请新身份。状态3调用 `update_capabilities()` 时，SDK 先根据持久化的身份申请
+上下文、上次完整 `vc_list/priority` 和本次更新项合成新 Card，再依次执行
+`deregister_identity()`、`apply_identity()`、`register_capabilities()`；不会调用
+`/arf/v1/agent-cards-update`。流程成功后 `agent_id` 可能变化，应重新读取
+`sdk.local_profile`。
+
 ```python
 profile = await sdk.apply_identity(
     owner="customer-a",
     name="Agent A",
     description="RayNeo edge agent",
-    metadata={"region": "CN", "os": "Linux", "version": "0.14.0"},
+    metadata={"region": "CN", "os": "Linux", "version": "0.15.0"},
 )
 
 ability = await sdk.get_network_ability(profile.agent_id)
@@ -413,6 +432,7 @@ await sdk.update_capabilities(
     ],
     credentials=[ability.ability_vc],
 )
+profile = sdk.local_profile  # 重建后使用新 agent_id
 
 agents = await sdk.discover_agents(
     agent_id=profile.agent_id,
@@ -848,6 +868,11 @@ WebSocket、A2A HTTP 监听仍然正常工作。交互步骤覆盖监听器注�
 
 ### 5.4 A 按能力发现 B、建组并发送消息
 
+两个自动脚本都会在 `sdk.init()` 后恢复上述状态机：状态1执行身份申请和 Agent Card
+发布；状态2只获取网络能力并发布 Agent Card；状态3复用保存的 Profile，跳过
+`apply_identity()`、`get_network_ability()` 和 `register_capabilities()`。因此脚本重启不会
+重复发布 Agent Card。只有显式增加 `--deregister-on-exit` 才在退出前回到状态1。
+
 本测试使用两个独立脚本。B 必须先启动并完成能力发布；A 随后以
 `required_skills=[target_capability]` 调用能力发现，用发现到的 B Agent ID 创建
 群组，等待 WebSocket 群组配置写入 SDK 缓存，最后调用
@@ -942,7 +967,7 @@ ss -lunp | grep <MASQUE端口>
 | `deregister_identity(...)` | 注销身份 | `OperationResult` |
 | `get_network_ability(...)` | 获取网络能力，直接解析原始 `vc1` | `NetworkAbility` |
 | `register_capabilities(...)` | 发布已有 VC；内测时也可将能力字符串签成三方 VC 后发布 | `OperationResult` |
-| `update_capabilities(...)` | `POST /arf/v1/agent-cards-update` 更新能力 | `OperationResult` |
+| `update_capabilities(...)` | 注销旧身份、重新申请并通过 `POST /arf/v1/agent-cards` 发布更新后的完整 Card | `OperationResult`；新 Profile 从 `local_profile` 读取 |
 | `discover_agents(...)` | 从原始 `result[].agent_card` 发现 Agent | `list[DiscoveredAgent]` |
 | `create_group(..., dnn, ...)` | 使用 `target_agents + group_config` 请求建群；`dnn` 必填 | `GroupInfo` |
 | `get_group_snapshot(group_id)` | 查询 SDK 已提交的只读群组快照 | `GroupConfigSnapshot | None` |

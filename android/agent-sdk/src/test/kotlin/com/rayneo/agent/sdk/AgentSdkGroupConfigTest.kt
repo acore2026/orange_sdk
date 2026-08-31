@@ -1,6 +1,7 @@
 package com.rayneo.agent.sdk
 
 import com.rayneo.agent.sdk.model.AgentProfile
+import com.rayneo.agent.sdk.model.AgentLifecycleState
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import com.rayneo.agent.sdk.model.NetworkMessageType
 import com.rayneo.agent.sdk.transport.LocalServer
@@ -331,27 +332,55 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
-    fun `capability update uses dedicated POST endpoint`() = runTest {
-        initializeSdk()
+    fun `capability update rebuilds identity and registers full card`() = runTest {
+        initializeSdk(restoreProfile = false)
+        val profile = sdk.applyIdentity(
+            owner = "Alice",
+            name = "AliceAgent",
+            description = "AgentModel-X",
+            metadata = buildJsonObject {
+                put("region", "CN")
+                put("os", "Android")
+                put("version", "0.14.0")
+            },
+        )
+        sdk.registerCapabilities(
+            profile.agentId,
+            priority = 1,
+            credentials = listOf(buildJsonObject { put("id", "vc-network-a") }),
+        )
+        runtime.paths.clear()
         val updates = listOf(buildJsonObject {
             put("update_type", "add_skill")
             put("skill_name", "camera")
             put("reference_vc_id", "vc-camera-002")
         })
-        val credentials = listOf(buildJsonObject { put("id", "vc-camera-002") })
+        val credentials = listOf(buildJsonObject {
+            put("id", "vc-camera-002")
+            put("claims", buildJsonObject { put("skill_name", "camera") })
+        })
 
         sdk.updateCapabilities(LOCAL_ID, updates, credentials)
 
         assertEquals("POST", runtime.lastMethod)
-        assertEquals("/arf/v1/agent-cards-update", runtime.lastPath)
+        assertEquals("/arf/v1/agent-cards", runtime.lastPath)
         assertEquals(LOCAL_ID, runtime.lastBody!!["agent_id"].toString().trim('"'))
         UUID.fromString(runtime.lastBody!!["request_id"].toString().trim('"'))
         assertFalse(runtime.lastBody!!.containsKey("request_type"))
+        assertEquals(AgentLifecycleState.CARD_PUBLISHED, sdk.agentLifecycleState)
+        assertEquals(
+            listOf(
+                "/acn-agent/v1/agent-deletions",
+                "/idm/v1/identity-applications",
+                "/arf/v1/agent-cards",
+            ),
+            runtime.paths,
+        )
     }
 
     @Test
     fun `identity application sends exact required HTTP fields`() = runTest {
-        initializeSdk()
+        initializeSdk(restoreProfile = false)
 
         val profile = sdk.applyIdentity(
             owner = "Alice",
@@ -381,8 +410,29 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
-    fun `identity application accepts string metadata and normalizes order`() = runTest {
+    fun `identity application replaces an identity-ready profile`() = runTest {
         initializeSdk()
+
+        val replacement = sdk.applyIdentity(
+            owner = "Alice",
+            name = "AliceAgentReplacement",
+            description = "AgentModel-X replacement",
+            metadata = buildJsonObject {
+                put("region", "CN")
+                put("os", "Android")
+                put("version", "0.14.0")
+            },
+        )
+
+        assertEquals(LOCAL_ID, replacement.agentId)
+        assertEquals(AgentLifecycleState.IDENTITY_READY, sdk.agentLifecycleState)
+        assertEquals(replacement, sdk.localProfile)
+        assertEquals("/idm/v1/identity-applications", runtime.lastPath)
+    }
+
+    @Test
+    fun `identity application accepts string metadata and normalizes order`() = runTest {
+        initializeSdk(restoreProfile = false)
 
         sdk.applyIdentity(
             owner = "Alice",
@@ -406,7 +456,7 @@ class AgentSdkGroupConfigTest {
 
     @Test
     fun `identity application rejects non-string metadata value`() = runTest {
-        initializeSdk()
+        initializeSdk(restoreProfile = false)
 
         val error = runCatching {
             sdk.applyIdentity(
@@ -424,6 +474,29 @@ class AgentSdkGroupConfigTest {
 
         assertEquals(ErrorCode.INVALID_ARGUMENT, error.code)
         assertEquals("metadata", error.field)
+    }
+
+    @Test
+    fun `invalid identity replacement keeps the current identity`() = runTest {
+        initializeSdk()
+
+        val error = runCatching {
+            sdk.applyIdentity(
+                owner = "Alice",
+                name = "AliceAgentReplacement",
+                description = "AgentModel-X replacement",
+                metadata = buildJsonObject {
+                    put("region", "CN")
+                    put("os", "Android")
+                    put("version", 1)
+                },
+            )
+        }.exceptionOrNull() as AgentSdkException
+
+        assertEquals(ErrorCode.INVALID_ARGUMENT, error.code)
+        assertEquals(AgentLifecycleState.IDENTITY_READY, sdk.agentLifecycleState)
+        assertEquals(LOCAL_ID, sdk.localProfile?.agentId)
+        assertEquals("", runtime.lastPath)
     }
 
     @Test
@@ -520,7 +593,9 @@ class AgentSdkGroupConfigTest {
         assertEquals("dnn", error.field)
     }
 
-    private suspend fun initializeSdk() {
+    private suspend fun initializeSdk(
+        restoreProfile: Boolean = true,
+    ) {
         val result = sdk.initialize(
             agentRuntimeIp = "192.168.3.10",
             agentRuntimePort = 8080,
@@ -534,9 +609,11 @@ class AgentSdkGroupConfigTest {
         assertEquals("8.8.8.7/32", tunnel.establishedConfiguration?.agentTunCidr)
         assertTrue(tunnel.establishedConfiguration?.routes?.isEmpty() == true)
         assertEquals(tunnel.clientIdentityDirectory, masque.configuration?.identityDirectory)
-        sdk.restoreLocalProfile(
-            AgentProfile(LOCAL_ID, "Agent A", buildJsonObject { put("id", "vc-a") })
-        )
+        if (restoreProfile) {
+            sdk.restoreLocalProfile(
+                AgentProfile(LOCAL_ID, "Agent A", buildJsonObject { put("id", "vc-a") }),
+            )
+        }
     }
 
     private fun groupConfig(peerPort: String = "4001"): JsonObject = buildJsonObject {
@@ -612,6 +689,7 @@ class AgentSdkGroupConfigTest {
         var lastMethod = ""
         var lastPath = ""
         var lastBody: JsonObject? = null
+        val paths = mutableListOf<String>()
         var ueInfoRequests = 0
         var downlinkHandler: (suspend (String, Int, JsonObject) -> NetworkMessageAction)? = null
 
@@ -633,6 +711,7 @@ class AgentSdkGroupConfigTest {
         override suspend fun request(method: String, path: String, body: JsonObject): JsonObject {
             lastMethod = method
             lastPath = path
+            paths += path
             lastBody = body
             return if (path == "/compute/v1/offloading-sessions") {
                 buildJsonObject {

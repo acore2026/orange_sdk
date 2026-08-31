@@ -2,6 +2,27 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-31 — 持久化 Agent 身份与 Agent Card 三态生命周期
+
+### 修改原因
+
+- SDK 重启后原先只保留设备签名密钥，不保存网侧分配的 `AgentProfile` 和 Agent Card 发布状态，A/B 自动脚本会重复申请身份并重复调用能力注册接口。
+- 同一服务器的不同 Runtime 端口对应不同 UE/PDU 会话，持久化状态必须隔离并绑定 Agent TUN IP，不能跨 UE 误用。
+
+### 修改方式
+
+- Python 与 Android SDK 新增 `NO_IDENTITY`、`IDENTITY_READY`、`CARD_PUBLISHED` 三态业务生命周期，与 SDK 连接状态分离；身份申请、能力注册、能力更新和身份注销仅在合法状态执行，成功后才原子迁移。
+- 状态2再次申请身份时先以 `replaced` 注销旧身份再申请；状态3重复调用能力注册会在本地拒绝。状态3调用能力更新时按确认后的闭环执行“注销旧身份 → 重新申请身份 → `register_capabilities/registerCapabilities` 发布更新后的完整 Card”，不再调用增量更新端点。
+- Linux 使用 `$XDG_STATE_HOME/agent-sdk/agents` 或 `~/.local/state/agent-sdk/agents` 的 `0700/0600` JSON 文件；Android 使用 `noBackupFilesDir/agent-sdk/agents`。记录按 Runtime IP/端口哈希分文件，并校验当前 Agent TUN IP；除 Profile 外同时保存身份申请上下文和上次成功发布的完整 `priority/vc_list`，用于状态3重建。
+- Python A/B 自动脚本和 Android A/B App 根据恢复状态补做缺失步骤：状态1执行身份申请，状态2发布 Agent Card，状态3直接复用，避免重复 `register_capabilities/registerCapabilities`。
+- Python/Android README 与本地《SDK设计文档-用户友好版》同步状态定义、迁移规则、存储位置和恢复流程；原始《SDK设计文档》保持不变。
+- Python Wheel 因新增持久化状态文件格式和能力更新重建语义升级为 `0.15.0`。
+
+### 验证内容
+
+- Python 测试覆盖1→2→3、状态2重复申请替换、状态3按“注销→申请→完整注册”重建并回到3、状态2/3注销回到1、重复能力注册不产生 HTTP 请求、Runtime 端口隔离及 TUN IP 不匹配拒绝。
+- Android 单元测试覆盖状态迁移、App 状态恢复分支与应用私有文件存储；执行 SDK/example-app 单元测试和源码编译。
+
 ## 2026-08-31 — Android 自动选择 MASQUE 本机出口地址
 
 ### 修改原因

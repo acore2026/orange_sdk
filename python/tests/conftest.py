@@ -297,8 +297,7 @@ def group_payload(
     }
 
 
-@pytest.fixture
-async def sdk_fixture(tmp_path):
+async def _create_sdk_fixture(tmp_path, *, restore_profile: bool):
     tun = FakeTun()
     masque = FakeMasque()
     runtime = FakeRuntime()
@@ -327,6 +326,7 @@ async def sdk_fixture(tmp_path):
         server_factory=lambda: server,
         route_backend_factory=lambda config, tun_device: backend,
         media_offload_adapter=media,
+        agent_state_directory=tmp_path / "agent-state",
     )
     result = await sdk.init(
         "192.168.3.10",
@@ -337,10 +337,11 @@ async def sdk_fixture(tmp_path):
         masque_server_url="https://192.168.3.10:4433",
         log_file_path=str(tmp_path / "agent-sdk.log"),
     )
-    sdk.set_local_profile_for_restore(
-        AgentProfile(LOCAL_ID, "Agent A", {"id": "vc-a"})
-    )
-    yield {
+    if restore_profile:
+        sdk.set_local_profile_for_restore(
+            AgentProfile(LOCAL_ID, "Agent A", {"id": "vc-a"})
+        )
+    return {
         "sdk": sdk,
         "result": result,
         "tun": tun,
@@ -354,4 +355,17 @@ async def sdk_fixture(tmp_path):
         "media": media,
         "log_path": tmp_path / "agent-sdk.log",
     }
-    await sdk.close()
+
+
+@pytest.fixture
+async def sdk_fixture(tmp_path):
+    fixture = await _create_sdk_fixture(tmp_path, restore_profile=True)
+    yield fixture
+    await fixture["sdk"].close()
+
+
+@pytest.fixture
+async def sdk_without_profile_fixture(tmp_path):
+    fixture = await _create_sdk_fixture(tmp_path, restore_profile=False)
+    yield fixture
+    await fixture["sdk"].close()

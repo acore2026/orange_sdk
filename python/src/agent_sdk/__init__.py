@@ -1,6 +1,7 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from .errors import AgentSdkError, ErrorCode
+from .agent_state import AgentLifecycleState
 from .contracts import (
     MediaOffloadAdapter,
     RemoteVideoStream,
@@ -25,12 +26,13 @@ from .sdk import AgentSdk
 try:
     __version__ = version("agent-connect-sdk")
 except PackageNotFoundError:  # Source checkout without an installed distribution.
-    __version__ = "0.14.0"
+    __version__ = "0.15.0"
 
 __all__ = [
     "AgentSdk",
     "AgentSdkError",
     "AgentProfile",
+    "AgentLifecycleState",
     "DiscoveredAgent",
     "ErrorCode",
     "GroupConfigSnapshot",

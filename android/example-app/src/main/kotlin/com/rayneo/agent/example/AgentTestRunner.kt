@@ -1,6 +1,7 @@
 package com.rayneo.agent.example
 
 import com.rayneo.agent.sdk.AgentSdk
+import com.rayneo.agent.sdk.model.AgentLifecycleState
 import com.rayneo.agent.sdk.model.AgentProfile
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import com.rayneo.agent.sdk.model.NetworkMessageType
@@ -65,54 +66,78 @@ class AgentTestRunner(
                 "Agent TUN=${initResult.agentTunCidr}，A2A=${initResult.agentTcpEndpoint}",
         )
 
-        val profile = retryableStep("H-ID", "申请 Agent 数字身份") {
-            sdk.applyIdentity(
-                owner = config.owner,
-                name = config.agentName,
-                description = "Android ${config.role.name} MASQUE integration test",
-                metadata = buildJsonObject {
-                    put("region", "CN")
-                    put("os", "Android")
-                    put("version", "0.1.0")
-                },
-            )
-        }
-        onLog(LabLogLevel.SUCCESS, "H-ID", "agent_id=${profile.agentId}")
-
-        val networkAbility = retryableStep("H-NETWORK-ABILITY", "获取运营商网络能力") {
-            sdk.getNetworkAbility(profile.agentId)
-        }
+        var lifecycleState = sdk.agentLifecycleState
+        var profile = sdk.localProfile
         onLog(
-            LabLogLevel.SUCCESS,
-            "H-NETWORK-ABILITY",
-            "network_abilities=${networkAbility.abilities.ifEmpty { listOf("<未声明>") }}",
+            LabLogLevel.INFO,
+            "AGENT STATE",
+            "恢复状态=$lifecycleState，agent_id=${profile?.agentId ?: "<无>"}",
         )
+        if (lifecycleState == AgentLifecycleState.NO_IDENTITY) {
+            profile = retryableStep("H-ID", "状态1：申请 Agent 数字身份") {
+                sdk.applyIdentity(
+                    owner = config.owner,
+                    name = config.agentName,
+                    description = "Android ${config.role.name} MASQUE integration test",
+                    metadata = buildJsonObject {
+                        put("region", "CN")
+                        put("os", "Android")
+                        put("version", "0.1.0")
+                    },
+                )
+            }
+            lifecycleState = AgentLifecycleState.IDENTITY_READY
+            onLog(LabLogLevel.SUCCESS, "H-ID", "agent_id=${profile.agentId}")
+        } else {
+            onLog(LabLogLevel.SUCCESS, "H-ID", "复用已保存身份 agent_id=${profile?.agentId}")
+        }
+        val activeProfile = checkNotNull(profile) { "Persisted Agent state has no profile" }
 
-        retryableStep("H-PROFILE", "发布 Agent Card") {
-            sdk.registerCapabilities(
-                agentId = profile.agentId,
-                priority = 1,
-                credentials = listOf(networkAbility.abilityVc),
-                capabilities = if (config.role == TestRole.B) {
-                    listOf(config.capability)
+        if (lifecycleState == AgentLifecycleState.IDENTITY_READY) {
+            val networkAbility = retryableStep(
+                "H-NETWORK-ABILITY",
+                "状态2：获取运营商网络能力",
+            ) {
+                sdk.getNetworkAbility(activeProfile.agentId)
+            }
+            onLog(
+                LabLogLevel.SUCCESS,
+                "H-NETWORK-ABILITY",
+                "network_abilities=${networkAbility.abilities.ifEmpty { listOf("<未声明>") }}",
+            )
+
+            retryableStep("H-PROFILE", "状态2：发布 Agent Card") {
+                sdk.registerCapabilities(
+                    agentId = activeProfile.agentId,
+                    priority = 1,
+                    credentials = listOf(networkAbility.abilityVc),
+                    capabilities = if (config.role == TestRole.B) {
+                        listOf(config.capability)
+                    } else {
+                        emptyList()
+                    },
+                    agentName = activeProfile.agentName,
+                )
+            }
+            onLog(
+                LabLogLevel.SUCCESS,
+                "H-PROFILE",
+                if (config.role == TestRole.B) {
+                    "已发布能力 ${config.capability}，等待 Agent A 发现"
                 } else {
-                    emptyList()
+                    "Agent A Profile 已发布"
                 },
-                agentName = profile.agentName,
+            )
+        } else {
+            onLog(
+                LabLogLevel.SUCCESS,
+                "H-PROFILE",
+                "Agent Card 已发布，跳过重复 registerCapabilities",
             )
         }
-        onLog(
-            LabLogLevel.SUCCESS,
-            "H-PROFILE",
-            if (config.role == TestRole.B) {
-                "已发布能力 ${config.capability}，等待 Agent A 发现"
-            } else {
-                "Agent A Profile 已发布"
-            },
-        )
 
         if (config.role == TestRole.A) {
-            runAgentA(profile)
+            runAgentA(activeProfile)
         } else {
             runAgentB()
         }

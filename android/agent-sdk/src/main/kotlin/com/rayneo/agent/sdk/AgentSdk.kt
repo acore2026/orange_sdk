@@ -4,6 +4,7 @@ import com.rayneo.agent.sdk.group.GroupMemberCache
 import com.rayneo.agent.sdk.masque.NativeMasqueTransport
 import com.rayneo.agent.sdk.masque.NativeMasqueBridge
 import com.rayneo.agent.sdk.model.AgentProfile
+import com.rayneo.agent.sdk.model.AgentLifecycleState
 import com.rayneo.agent.sdk.model.DiscoveredAgent
 import com.rayneo.agent.sdk.model.GroupConfigSnapshot
 import com.rayneo.agent.sdk.model.GroupInfo
@@ -19,8 +20,14 @@ import com.rayneo.agent.sdk.security.DisabledMessageSignatureVerifier
 import com.rayneo.agent.sdk.security.DisabledProofVerifier
 import com.rayneo.agent.sdk.security.RejectUnconfiguredMessageSigner
 import com.rayneo.agent.sdk.security.TestCapabilityVcIssuer
+import com.rayneo.agent.sdk.security.TEST_CAPABILITY_ISSUER_DID
 import com.rayneo.agent.sdk.security.embeddedTestCapabilityIssuerPrivateKeyPem
 import com.rayneo.agent.sdk.server.TcpJsonLocalServer
+import com.rayneo.agent.sdk.state.AgentStateStore
+import com.rayneo.agent.sdk.state.AgentCardContext
+import com.rayneo.agent.sdk.state.FileAgentStateStore
+import com.rayneo.agent.sdk.state.IdentityApplicationContext
+import com.rayneo.agent.sdk.state.InMemoryAgentStateStore
 import com.rayneo.agent.sdk.transport.GroupMessageListener
 import com.rayneo.agent.sdk.transport.ControlRequestAuthenticator
 import com.rayneo.agent.sdk.transport.DevicePublicKeyProvider
@@ -80,6 +87,7 @@ class AgentSdk internal constructor(
     private val localAddressResolver: LocalAddressResolver = RouteLocalAddressResolver(),
     private val mediaOffloadAdapter: MediaOffloadAdapter? = null,
     private val testCapabilityVcIssuer: TestCapabilityVcIssuer? = null,
+    private val agentStateStore: AgentStateStore = InMemoryAgentStateStore(),
 ) {
     private enum class State { NEW, INITIALIZING, READY, CLOSING, CLOSED }
 
@@ -90,6 +98,14 @@ class AgentSdk internal constructor(
     private var networkListener: NetworkMessageListener? = null
     private var groupListener: GroupMessageListener? = null
     private var profile: AgentProfile? = null
+    private var identityApplicationContext: IdentityApplicationContext? = null
+    private var agentCardContext: AgentCardContext? = null
+    var agentLifecycleState: AgentLifecycleState = AgentLifecycleState.NO_IDENTITY
+        private set
+    val localProfile: AgentProfile?
+        get() = profile
+    private var agentRuntimeIp: String = ""
+    private var agentRuntimePort: Int = 0
     private var agentTunIp: String = ""
     private var agentTunCidr: String = ""
     private var localTcpPort: Int = 0
@@ -136,8 +152,16 @@ class AgentSdk internal constructor(
         try {
             devicePublicKeyProvider?.ensure()
             runtime = runtimeFactory(agentRuntimeIp, agentRuntimePort)
+            this.agentRuntimeIp = agentRuntimeIp
+            this.agentRuntimePort = agentRuntimePort
             this.agentTunIp = runtime!!.getUeAgentIp()
             this.agentTunCidr = "$agentTunIp/32"
+            agentStateStore.load(agentRuntimeIp, agentRuntimePort, agentTunIp).also {
+                agentLifecycleState = it.state
+                profile = it.profile
+                identityApplicationContext = it.identityApplication
+                agentCardContext = it.agentCard
+            }
             val masqueOuterSourceIp = localVlanIp
                 ?.trim()
                 ?.takeIf(String::isNotEmpty)
@@ -363,11 +387,28 @@ class AgentSdk internal constructor(
         requireReady()
         validateIdentityApplication(owner, name, description, metadata)
         val normalizedMetadata = normalizeIdentityMetadata(metadata)
+        val identityApplication = IdentityApplicationContext(
+            owner,
+            name,
+            description,
+            normalizedMetadata,
+        )
         val publicKey = devicePublicKeyProvider?.publicKeyBase64
             ?: throw AgentSdkException(
                 ErrorCode.SIGNATURE_ERROR,
                 "SDK device signing identity is unavailable",
             )
+        if (agentLifecycleState == AgentLifecycleState.IDENTITY_READY) {
+            val previousAgentId = checkNotNull(profile).agentId
+            val replacement = deregisterIdentity(previousAgentId, "replaced")
+            if (!replacement.success) {
+                throw AgentSdkException(
+                    ErrorCode.RUNTIME_REJECTED,
+                    "Cannot replace local identity because deregistration failed",
+                )
+            }
+        }
+        requireAgentState(AgentLifecycleState.NO_IDENTITY, "applyIdentity")
         val path = "/idm/v1/identity-applications"
         val response = runtime!!.request("POST", path, authenticateControl(path, buildJsonObject {
             put("request_id", UUID.randomUUID().toString())
@@ -391,14 +432,39 @@ class AgentSdk internal constructor(
             agentId = response.requireString("agent_id"),
             agentName = responseName,
             identityVc = identityVc,
-        ).also { profile = it }
+        ).also {
+            persistAgentState(
+                AgentLifecycleState.IDENTITY_READY,
+                it,
+                identityApplication = identityApplication,
+            )
+        }
     }
 
     fun restoreLocalProfile(restored: AgentProfile) {
-        profile = restored
+        persistAgentState(
+            AgentLifecycleState.IDENTITY_READY,
+            restored,
+            identityApplication = identityApplicationContext ?: IdentityApplicationContext(
+                owner = "restored-local-profile",
+                name = restored.agentName,
+                description = "Profile restored by the host application",
+                metadata = buildJsonObject {
+                    put("region", "unknown")
+                    put("os", "unknown")
+                    put("version", "unknown")
+                },
+            ),
+        )
     }
 
     suspend fun deregisterIdentity(agentId: String, reason: String = "retired"): OperationResult {
+        requireReady()
+        requireAgentState(
+            setOf(AgentLifecycleState.IDENTITY_READY, AgentLifecycleState.CARD_PUBLISHED),
+            "deregisterIdentity",
+            agentId,
+        )
         if (reason !in setOf(
                 "normal", "uninstalled", "replaced", "user_request",
                 "security_event", "retired", "other",
@@ -414,7 +480,7 @@ class AgentSdk internal constructor(
             put("request_id", UUID.randomUUID().toString())
             put("agent_id", agentId)
             put("reason", reason)
-        }).also { if (profile?.agentId == agentId) profile = null }
+        }).also { if (it.success) clearAgentState() }
     }
 
     suspend fun getNetworkAbility(
@@ -457,6 +523,8 @@ class AgentSdk internal constructor(
         capabilities: List<String> = emptyList(),
         agentName: String? = null,
     ): OperationResult {
+        requireReady()
+        requireAgentState(AgentLifecycleState.IDENTITY_READY, "registerCapabilities", agentId)
         val vcList = credentials.toMutableList()
         if (capabilities.isNotEmpty()) {
             val resolvedAgentName = agentName
@@ -488,7 +556,13 @@ class AgentSdk internal constructor(
             put("priority", priority)
             put("service_endpoints", serviceEndpoints)
             put("vc_list", JsonArray(vcList))
-        })
+        }).also {
+            if (it.success) persistAgentState(
+                AgentLifecycleState.CARD_PUBLISHED,
+                profile!!,
+                agentCard = AgentCardContext(priority, vcList.toList()),
+            )
+        }
     }
 
     /** Lab only: import the third-party capability issuer key into app-private storage. */
@@ -505,12 +579,60 @@ class AgentSdk internal constructor(
         agentId: String,
         updateItems: List<JsonObject>,
         credentials: List<JsonObject>,
-    ): OperationResult = operation("POST", "/arf/v1/agent-cards-update", buildJsonObject {
-        put("request_id", UUID.randomUUID().toString())
-        put("agent_id", agentId)
-        put("update_items", JsonArray(updateItems))
-        put("credentials", JsonArray(credentials))
-    })
+    ): OperationResult {
+        requireReady()
+        requireAgentState(AgentLifecycleState.CARD_PUBLISHED, "updateCapabilities", agentId)
+        val identityApplication = identityApplicationContext ?: throw AgentSdkException(
+            ErrorCode.AGENT_STATE_INVALID,
+            "Cannot rebuild Agent Card because identity application context is missing",
+        )
+        val card = agentCardContext ?: throw AgentSdkException(
+            ErrorCode.AGENT_STATE_INVALID,
+            "Cannot rebuild Agent Card because registration context is missing",
+        )
+        val replacementVcs = applyCapabilityUpdates(card.vcList, updateItems, credentials)
+        replacementVcs.forEach { credential ->
+            val claims = credential["claims"] as? JsonObject ?: return@forEach
+            val network = listOf("network_abilities", "abilities", "agent_attribute")
+                .any(claims::containsKey) && !claims.containsKey("skill_name")
+            val testCapability = credential["issuer"]?.jsonPrimitive?.contentOrNull ==
+                TEST_CAPABILITY_ISSUER_DID && claims["skill_name"] != null
+            if (
+                claims["agent_id"]?.jsonPrimitive?.contentOrNull == agentId &&
+                !network && !testCapability
+            ) {
+                throw AgentSdkException(
+                    ErrorCode.CREDENTIAL_EXPIRED,
+                    "An existing capability credential is bound to the current Agent ID " +
+                        "but cannot be reissued by the SDK",
+                    "credentials",
+                )
+            }
+        }
+        val deregistered = deregisterIdentity(agentId, "replaced")
+        if (!deregistered.success) {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "Cannot rebuild Agent Card because identity deregistration failed",
+            )
+        }
+        val newProfile = applyIdentity(
+            identityApplication.owner,
+            identityApplication.name,
+            identityApplication.description,
+            identityApplication.metadata,
+        )
+        val refreshed = refreshReboundCredentials(
+            replacementVcs,
+            oldAgentId = agentId,
+            newProfile = newProfile,
+        )
+        return registerCapabilities(
+            newProfile.agentId,
+            priority = card.priority,
+            credentials = refreshed,
+        )
+    }
 
     suspend fun discoverAgents(
         agentId: String,
@@ -683,6 +805,138 @@ class AgentSdk internal constructor(
         state = State.CLOSED
     }
 
+    private fun applyCapabilityUpdates(
+        publishedVcs: List<JsonObject>,
+        updateItems: List<JsonObject>,
+        credentials: List<JsonObject>,
+    ): List<JsonObject> {
+        if (updateItems.isEmpty()) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "updateItems must contain at least one item",
+                "updateItems",
+            )
+        }
+        var result = publishedVcs.toMutableList()
+        fun credentialId(credential: JsonObject): String? =
+            credential["id"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotEmpty)
+        fun addOrReplace(credential: JsonObject) {
+            val identifier = credentialId(credential)
+            val existing = identifier?.let { id ->
+                result.indexOfFirst { credentialId(it) == id }.takeIf { it >= 0 }
+            }
+            if (existing == null) result += credential else result[existing] = credential
+        }
+        credentials.forEach(::addOrReplace)
+        updateItems.forEachIndexed { index, item ->
+            val updateType = item["update_type"]?.jsonPrimitive?.contentOrNull
+            val skillName = item["skill_name"]?.jsonPrimitive?.contentOrNull
+                ?.takeIf(String::isNotEmpty)
+                ?: throw AgentSdkException(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "skill_name must be a non-empty string",
+                    "updateItems[$index].skillName",
+                )
+            if (updateType !in setOf("add_skill", "remove_skill")) {
+                throw AgentSdkException(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "update_type must be add_skill or remove_skill",
+                    "updateItems[$index].updateType",
+                )
+            }
+            val referenceId = item["reference_vc_id"]?.jsonPrimitive?.contentOrNull
+            if (updateType == "add_skill") {
+                val requiredId = referenceId?.takeIf(String::isNotEmpty)
+                    ?: throw AgentSdkException(
+                        ErrorCode.INVALID_ARGUMENT,
+                        "add_skill requires reference_vc_id",
+                        "updateItems[$index].referenceVcId",
+                    )
+                val referenced = credentials.firstOrNull { credentialId(it) == requiredId }
+                    ?: throw AgentSdkException(
+                        ErrorCode.INVALID_ARGUMENT,
+                        "reference_vc_id was not provided in credentials",
+                        "updateItems[$index].referenceVcId",
+                    )
+                addOrReplace(referenced)
+                if (
+                    credentialSkillName(referenced) != skillName &&
+                    result.none { credentialSkillName(it) == skillName }
+                ) {
+                    val currentProfile = profile ?: throw AgentSdkException(
+                        ErrorCode.AGENT_STATE_INVALID,
+                        "Local profile is unavailable while rebuilding Agent Card",
+                    )
+                    val issuer = testCapabilityVcIssuer ?: throw AgentSdkException(
+                        ErrorCode.SIGNATURE_ERROR,
+                        "Test capability VC issuer is unavailable",
+                    )
+                    issuer.issue(currentProfile.agentId, currentProfile.agentName, listOf(skillName))
+                        .forEach(::addOrReplace)
+                }
+            } else {
+                result = result.filterNot { credential ->
+                    credentialSkillName(credential) == skillName ||
+                        (referenceId != null && credentialId(credential) == referenceId)
+                }.toMutableList()
+            }
+        }
+        if (result.isEmpty()) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "Capability update would produce an empty Agent Card",
+                "updateItems",
+            )
+        }
+        return result
+    }
+
+    private suspend fun refreshReboundCredentials(
+        credentials: List<JsonObject>,
+        oldAgentId: String,
+        newProfile: AgentProfile,
+    ): List<JsonObject> {
+        val refreshed = mutableListOf<JsonObject>()
+        var networkRefreshed = false
+        credentials.forEach { credential ->
+            val claims = credential["claims"] as? JsonObject ?: buildJsonObject { }
+            val network = listOf("network_abilities", "abilities", "agent_attribute")
+                .any(claims::containsKey) && !claims.containsKey("skill_name")
+            when {
+                network -> if (!networkRefreshed) {
+                    refreshed += getNetworkAbility(newProfile.agentId).abilityVc
+                    networkRefreshed = true
+                }
+                credential["issuer"]?.jsonPrimitive?.contentOrNull ==
+                    TEST_CAPABILITY_ISSUER_DID &&
+                    claims["skill_name"]?.jsonPrimitive?.contentOrNull != null -> {
+                    val issuer = testCapabilityVcIssuer ?: throw AgentSdkException(
+                        ErrorCode.SIGNATURE_ERROR,
+                        "Test capability VC issuer is unavailable",
+                    )
+                    refreshed += issuer.issue(
+                        newProfile.agentId,
+                        newProfile.agentName,
+                        listOf(claims.getValue("skill_name").jsonPrimitive.content),
+                    )
+                }
+                claims["agent_id"]?.jsonPrimitive?.contentOrNull == oldAgentId ->
+                    throw AgentSdkException(
+                        ErrorCode.CREDENTIAL_EXPIRED,
+                        "An existing capability credential is bound to the deregistered " +
+                            "Agent ID and cannot be reissued by the SDK",
+                        "credentials",
+                    )
+                else -> refreshed += credential
+            }
+        }
+        return refreshed
+    }
+
+    private fun credentialSkillName(credential: JsonObject): String? =
+        (credential["claims"] as? JsonObject)
+            ?.get("skill_name")?.jsonPrimitive?.contentOrNull
+
     private suspend fun operation(method: String, path: String, body: JsonObject): OperationResult {
         requireReady()
         val response = runtime!!.request(method, path, authenticateControl(path, body))
@@ -763,6 +1017,74 @@ class AgentSdk internal constructor(
         }
     }
 
+    private fun requireAgentState(
+        expected: AgentLifecycleState,
+        operation: String,
+        agentId: String? = null,
+    ) = requireAgentState(setOf(expected), operation, agentId)
+
+    private fun requireAgentState(
+        expected: Set<AgentLifecycleState>,
+        operation: String,
+        agentId: String? = null,
+    ) {
+        if (agentLifecycleState !in expected) {
+            throw AgentSdkException(
+                ErrorCode.AGENT_STATE_TRANSITION_INVALID,
+                "$operation requires ${expected.joinToString { it.name }}; " +
+                    "current state is ${agentLifecycleState.name}",
+            )
+        }
+        if (agentId != null && profile?.agentId != agentId) {
+            throw AgentSdkException(
+                ErrorCode.AGENT_STATE_TRANSITION_INVALID,
+                "$operation agentId does not match the persisted local identity",
+                "agentId",
+            )
+        }
+    }
+
+    private fun persistAgentState(
+        state: AgentLifecycleState,
+        storedProfile: AgentProfile,
+        identityApplication: IdentityApplicationContext? = null,
+        agentCard: AgentCardContext? = null,
+    ) {
+        if (agentRuntimeIp.isBlank() || agentRuntimePort == 0 || agentTunIp.isBlank()) {
+            throw AgentSdkException(
+                ErrorCode.SDK_NOT_INITIALIZED,
+                "SDK configuration is unavailable for Agent state persistence",
+            )
+        }
+        val resolvedIdentityApplication = identityApplication
+            ?: identityApplicationContext
+            ?: throw AgentSdkException(
+                ErrorCode.AGENT_STATE_INVALID,
+                "Identity application context is unavailable",
+            )
+        agentStateStore.save(
+            agentRuntimeIp,
+            agentRuntimePort,
+            agentTunIp,
+            state,
+            storedProfile,
+            resolvedIdentityApplication,
+            agentCard,
+        )
+        profile = storedProfile
+        agentLifecycleState = state
+        identityApplicationContext = resolvedIdentityApplication
+        agentCardContext = agentCard
+    }
+
+    private fun clearAgentState() {
+        agentStateStore.clear(agentRuntimeIp, agentRuntimePort)
+        profile = null
+        agentLifecycleState = AgentLifecycleState.NO_IDENTITY
+        identityApplicationContext = null
+        agentCardContext = null
+    }
+
     private fun requireOffloadingSession(sessionId: String): OffloadingSession {
         requireReady()
         return offloadingSessions[sessionId]?.takeIf { it.state == "CONNECTED" }
@@ -823,6 +1145,9 @@ class AgentSdk internal constructor(
                 messageSigner = security,
                 messageSignatureVerifier = DisabledMessageSignatureVerifier,
                 testCapabilityVcIssuer = testCapabilityIssuer,
+                agentStateStore = FileAgentStateStore(
+                    File(vpnService.noBackupFilesDir, "agent-sdk/agents")
+                ),
                 mediaOffloadAdapter = mediaOffloadAdapter,
                 peerMessenger = peerMessenger,
                 localServerFactory = localServerFactory,

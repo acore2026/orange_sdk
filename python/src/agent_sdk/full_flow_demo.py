@@ -335,7 +335,7 @@ async def run_demo(
             owner="demo-owner",
             name="Agent A",
             description="wheel installation self-check",
-            metadata={"region": "CN", "os": "Linux", "version": "0.14.0"},
+            metadata={"region": "CN", "os": "Linux", "version": "0.15.0"},
         )
         show("2 apply_identity", profile.agent_id)
 
@@ -361,6 +361,7 @@ async def run_demo(
             credentials=[ability.ability_vc],
         )
         show("5 update_capabilities", update.success)
+        profile = sdk.local_profile or profile
 
         discovered = await sdk.discover_agents(
             agent_id=profile.agent_id,
@@ -430,7 +431,7 @@ async def run_demo(
             "media_state": upload.state,
         }
         assert summary == {
-            "runtime_request_count": 8,
+            "runtime_request_count": 11,
             "group_id": "g-demo",
             "peer_endpoint": "http://agent-b:4001/A2A/message",
             "installed_route": True,

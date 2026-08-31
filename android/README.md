@@ -131,6 +131,16 @@ missing.
 
 ## A/B 联调 App
 
+SDK 将 Agent 业务状态按 Runtime `IP:端口` 保存在应用私有
+`noBackupFilesDir/agent-sdk/agents`：`NO_IDENTITY`、`IDENTITY_READY`、
+`CARD_PUBLISHED`。App 启动后读取 `sdk.agentLifecycleState` 和 `sdk.localProfile`；状态1
+才申请身份，状态2才发布 Agent Card，状态3直接复用，不重复调用
+`registerCapabilities()`。状态2再次申请身份时会先注销旧身份；状态2/3显式注销成功后
+都会删除本地记录并回到状态1。状态3调用 `updateCapabilities()` 时，SDK 根据保存的
+身份申请上下文和完整 Agent Card 先注销旧身份、重新申请，再调用
+`registerCapabilities()` 发布更新后的完整 Card；成功后从 `sdk.localProfile` 读取新的
+`agentId`。
+
 `example-app` 已按 Linux 的 `agent_a_test.py/agent_b_test.py` 流程实现为两页
 Android 应用：
 

@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from agent_sdk import NetworkMessageAction, NetworkMessageType
+from agent_sdk import AgentLifecycleState, NetworkMessageAction, NetworkMessageType
 
 
 EXAMPLE_DIR = Path(__file__).parents[1] / "examples"
@@ -68,6 +68,8 @@ async def test_agent_a_discovers_b_groups_and_sends_from_group_cache():
         members_by_agent_id={target.agent_id: member}, generation=1
     )
     sdk = SimpleNamespace(
+        agent_lifecycle_state=AgentLifecycleState.NO_IDENTITY,
+        local_profile=None,
         register_network_message_listener=MagicMock(return_value=lambda: None),
         register_group_message_listener=MagicMock(return_value=lambda: None),
         init=AsyncMock(
@@ -134,6 +136,8 @@ async def test_agent_b_publishes_capability_and_can_exit_after_message_event():
         valid_until=None,
     )
     sdk = SimpleNamespace(
+        agent_lifecycle_state=AgentLifecycleState.NO_IDENTITY,
+        local_profile=None,
         register_network_message_listener=MagicMock(return_value=lambda: None),
         register_group_message_listener=MagicMock(return_value=lambda: None),
         init=AsyncMock(
@@ -169,6 +173,44 @@ async def test_agent_b_publishes_capability_and_can_exit_after_message_event():
         sdk.register_capabilities.await_args.kwargs["test_vc_private_key_path"]
         is None
     )
+    sdk.close.assert_awaited_once()
+
+
+async def test_agent_b_reuses_published_profile_without_registering_again():
+    module = _load_example("agent_b_test")
+    args = _base_arguments(module)
+    args.exit_after_message = True
+    profile = SimpleNamespace(
+        agent_id="did:example:b",
+        agent_name="Agent-B",
+        identity_vc={"id": "vc0-b"},
+    )
+    sdk = SimpleNamespace(
+        agent_lifecycle_state=AgentLifecycleState.CARD_PUBLISHED,
+        local_profile=profile,
+        register_network_message_listener=MagicMock(return_value=lambda: None),
+        register_group_message_listener=MagicMock(return_value=lambda: None),
+        init=AsyncMock(
+            return_value=SimpleNamespace(
+                agent_tun_cidr="10.60.0.3/32",
+                agent_tcp_endpoint="10.60.0.3:4001",
+                masque_proxy_endpoint=args.masque_url,
+            )
+        ),
+        apply_identity=AsyncMock(),
+        get_network_ability=AsyncMock(),
+        register_capabilities=AsyncMock(),
+        close=AsyncMock(),
+    )
+    stop_event = asyncio.Event()
+    stop_event.set()
+
+    result = await module.run_agent_b(args, sdk=sdk, stop_event=stop_event)
+
+    assert result["agent_id"] == profile.agent_id
+    sdk.apply_identity.assert_not_awaited()
+    sdk.get_network_ability.assert_not_awaited()
+    sdk.register_capabilities.assert_not_awaited()
     sdk.close.assert_awaited_once()
 
 
