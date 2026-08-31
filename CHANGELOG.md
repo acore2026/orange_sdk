@@ -2,6 +2,24 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-08-31 — 校正状态3的能力更新与整卡重发语义
+
+### 修改原因
+
+- 上一版错误地把状态3的 `update_capabilities/updateCapabilities` 实现成“注销身份→重新申请→完整注册”，同时拒绝状态3再次调用 `register_capabilities/registerCapabilities`，与最终确认的接口语义相反。
+- 能力增删不应改变 Agent 身份；只有用户明确再次发布整张 Agent Card 时，才需要替换身份并重新注册。
+
+### 修改方式
+
+- Python 与 Android 在状态3调用能力更新时直接请求 `POST /arf/v1/agent-cards-update`，成功后保持原 `AgentProfile` 和状态3，仅原子更新本地完整 Card 快照；失败时保留原状态和快照。
+- 状态3再次调用能力注册时，先在本地构造并校验待发布内容，再依次执行 `deregister_identity → apply_identity → register_capabilities`。本地校验或注销失败仍在状态3，重新申请失败落到状态1，最终注册失败落到状态2；全部成功后回到状态3并通过 `local_profile/localProfile` 暴露新身份。
+- 同步校正 Python/Android README、用户友好版设计文档和独立生命周期图；Python Wheel 版本升级为 `0.15.1`，Android example-app 升级为 `0.2.1`。A/B 自动联调仍按恢复状态补齐缺失步骤，状态3默认复用，只有业务显式再次调用注册接口时才触发整卡替换。
+
+### 验证内容
+
+- Python 单元测试覆盖状态3直接更新只产生一个更新请求，以及状态3再次注册严格产生“注销、申请、注册”三个请求。
+- Android 单元测试覆盖相同两条路径；执行完整 Python/Android 测试、静态检查、Wheel 和 APK 构建验证。
+
 ## 2026-08-31 — 重画状态与资源生命周期视图
 
 ### 修改原因

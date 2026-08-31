@@ -12,7 +12,7 @@ from agent_sdk.agent_state import (
 )
 
 
-async def test_agent_lifecycle_persists_transitions_and_prevents_duplicate_card(
+async def test_agent_lifecycle_persists_transitions_and_replaces_duplicate_card(
     sdk_without_profile_fixture,
 ):
     sdk = sdk_without_profile_fixture["sdk"]
@@ -53,14 +53,20 @@ async def test_agent_lifecycle_persists_transitions_and_prevents_duplicate_card(
     assert sdk.agent_lifecycle_state is AgentLifecycleState.CARD_PUBLISHED
 
     request_count = len(runtime.requests)
-    with pytest.raises(AgentSdkError) as duplicate:
-        await sdk.register_capabilities(
-            profile.agent_id,
-            priority=1,
-            credentials=[{"id": "vc-network-a"}],
-        )
-    assert duplicate.value.code is ErrorCode.AGENT_STATE_TRANSITION_INVALID
-    assert len(runtime.requests) == request_count
+    repeated = await sdk.register_capabilities(
+        profile.agent_id,
+        priority=2,
+        credentials=[{"id": "vc-network-b"}],
+    )
+    assert repeated.success is True
+    assert sdk.agent_lifecycle_state is AgentLifecycleState.CARD_PUBLISHED
+    assert [request[1] for request in runtime.requests[request_count:]] == [
+        "/acn-agent/v1/agent-deletions",
+        "/idm/v1/identity-applications",
+        "/arf/v1/agent-cards",
+    ]
+    profile = sdk.local_profile
+    assert profile is not None
 
     request_count = len(runtime.requests)
     updated = await sdk.update_capabilities(
@@ -75,14 +81,9 @@ async def test_agent_lifecycle_persists_transitions_and_prevents_duplicate_card(
     assert updated.success is True
     assert sdk.agent_lifecycle_state is AgentLifecycleState.CARD_PUBLISHED
     assert [request[1] for request in runtime.requests[request_count:]] == [
-        "/acn-agent/v1/agent-deletions",
-        "/idm/v1/identity-applications",
-        "/arf/v1/agent-cards",
+        "/arf/v1/agent-cards-update",
     ]
-    assert all(
-        request[1] != "/arf/v1/agent-cards-update"
-        for request in runtime.requests[request_count:]
-    )
+    assert sdk.local_profile == profile
 
     deregistered = await sdk.deregister_identity(profile.agent_id)
     assert deregistered.success is True
@@ -105,6 +106,38 @@ async def test_identity_ready_can_deregister_without_publishing_card(
 
     assert sdk.agent_lifecycle_state is AgentLifecycleState.NO_IDENTITY
     assert sdk.local_profile is None
+
+
+async def test_invalid_card_replacement_is_rejected_before_deregistration(sdk_fixture):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    profile = sdk.local_profile
+    assert profile is not None
+    await sdk.register_capabilities(
+        profile.agent_id,
+        priority=1,
+        credentials=[{"id": "vc-network-a"}],
+    )
+    runtime.requests.clear()
+
+    with pytest.raises(AgentSdkError) as invalid:
+        await sdk.register_capabilities(
+            profile.agent_id,
+            priority=2,
+            credentials=[{
+                "id": "vc-external-bound",
+                "issuer": "did:example:external-issuer",
+                "claims": {
+                    "agent_id": profile.agent_id,
+                    "skill_name": "camera",
+                },
+            }],
+        )
+
+    assert invalid.value.code is ErrorCode.CREDENTIAL_EXPIRED
+    assert runtime.requests == []
+    assert sdk.agent_lifecycle_state is AgentLifecycleState.CARD_PUBLISHED
+    assert sdk.local_profile == profile
 
 
 async def test_invalid_replacement_does_not_deregister_current_identity(sdk_fixture):

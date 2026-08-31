@@ -1030,7 +1030,10 @@ class AgentSdk:
     ) -> OperationResult:
         self._require_ready()
         self._require_agent_state(
-            AgentLifecycleState.IDENTITY_READY,
+            {
+                AgentLifecycleState.IDENTITY_READY,
+                AgentLifecycleState.CARD_PUBLISHED,
+            },
             operation="register_capabilities",
             agent_id=agent_id,
         )
@@ -1063,6 +1066,43 @@ class AgentSdk:
                 ErrorCode.INVALID_ARGUMENT,
                 "credentials or capabilities must contain at least one item",
                 field="credentials",
+            )
+        if self._agent_lifecycle_state is AgentLifecycleState.CARD_PUBLISHED:
+            identity_application = self._identity_application_context
+            if identity_application is None:
+                raise AgentSdkError(
+                    ErrorCode.AGENT_STATE_INVALID,
+                    "cannot replace Agent Card because identity application context is missing",
+                )
+            self._ensure_credentials_rebindable(vc_list, old_agent_id=agent_id)
+            deregistered = await self.deregister_identity(
+                agent_id,
+                reason="replaced",
+            )
+            if not deregistered.success:
+                raise AgentSdkError(
+                    ErrorCode.RUNTIME_REJECTED,
+                    "cannot replace Agent Card because identity deregistration failed",
+                    details={"agent_id": agent_id},
+                )
+            new_profile = await self.apply_identity(
+                identity_application.owner,
+                identity_application.name,
+                identity_application.description,
+                identity_application.metadata,
+            )
+            rebound_credentials = await self._refresh_rebound_credentials(
+                list(credentials or ()),
+                old_agent_id=agent_id,
+                new_profile=new_profile,
+            )
+            return await self.register_capabilities(
+                new_profile.agent_id,
+                priority,
+                credentials=rebound_credentials,
+                capabilities=capabilities,
+                agent_name=agent_name or new_profile.agent_name,
+                test_vc_private_key_path=test_vc_private_key_path,
             )
         assert self._config is not None
         service_endpoints = (
@@ -1110,64 +1150,43 @@ class AgentSdk:
             operation="update_capabilities",
             agent_id=agent_id,
         )
-        identity_application = self._identity_application_context
         card_context = self._agent_card_context
-        if identity_application is None or card_context is None:
+        if card_context is None:
             raise AgentSdkError(
                 ErrorCode.AGENT_STATE_INVALID,
-                "cannot rebuild Agent Card because persisted registration context is missing",
+                "cannot update Agent Card because persisted registration context is missing",
             )
         replacement_vcs = self._apply_capability_updates(
             card_context.vc_list,
             update_items,
             credentials,
         )
-        old_agent_id = agent_id
-        for credential in replacement_vcs:
-            claims = credential.get("claims")
-            claims_mapping = claims if isinstance(claims, Mapping) else {}
-            is_network_ability = any(
-                field in claims_mapping
-                for field in ("network_abilities", "abilities", "agent_attribute")
-            ) and "skill_name" not in claims_mapping
-            is_reissuable_test_capability = (
-                credential.get("issuer") == TEST_CAPABILITY_ISSUER_DID
-                and isinstance(claims_mapping.get("skill_name"), str)
+        path = "/arf/v1/agent-cards-update"
+        body = await self._authenticate_control_request(
+            path,
+            {
+                "request_id": str(uuid.uuid4()),
+                "agent_id": agent_id,
+                "update_items": list(update_items),
+                "credentials": list(credentials),
+            },
+        )
+        result = await self._operation(
+            "POST",
+            path,
+            body,
+        )
+        if result.success:
+            assert self._profile is not None
+            self._persist_agent_state(
+                AgentLifecycleState.CARD_PUBLISHED,
+                self._profile,
+                agent_card=AgentCardContext(
+                    card_context.priority,
+                    tuple(dict(item) for item in replacement_vcs),
+                ),
             )
-            if (
-                claims_mapping.get("agent_id") == old_agent_id
-                and not is_network_ability
-                and not is_reissuable_test_capability
-            ):
-                raise AgentSdkError(
-                    ErrorCode.CREDENTIAL_EXPIRED,
-                    "an existing capability credential is bound to the current Agent ID "
-                    "but cannot be reissued by the SDK",
-                    field="credentials",
-                )
-        deregistered = await self.deregister_identity(old_agent_id, reason="replaced")
-        if not deregistered.success:
-            raise AgentSdkError(
-                ErrorCode.RUNTIME_REJECTED,
-                "cannot rebuild Agent Card because identity deregistration failed",
-                details={"agent_id": old_agent_id},
-            )
-        profile = await self.apply_identity(
-            identity_application.owner,
-            identity_application.name,
-            identity_application.description,
-            identity_application.metadata,
-        )
-        replacement_vcs = await self._refresh_rebound_credentials(
-            replacement_vcs,
-            old_agent_id=old_agent_id,
-            new_profile=profile,
-        )
-        return await self.register_capabilities(
-            profile.agent_id,
-            priority=card_context.priority,
-            credentials=replacement_vcs,
-        )
+        return result
 
     @logged_async
     async def discover_agents(
@@ -1485,7 +1504,7 @@ class AgentSdk:
                     if self._profile is None:
                         raise AgentSdkError(
                             ErrorCode.AGENT_STATE_INVALID,
-                            "local profile is unavailable while rebuilding Agent Card",
+                            "local profile is unavailable while updating the Agent Card snapshot",
                         )
                     for generated in issue_test_capability_vcs(
                         agent_id=self._profile.agent_id,
@@ -1510,6 +1529,35 @@ class AgentSdk:
                 field="update_items",
             )
         return result
+
+    @staticmethod
+    def _ensure_credentials_rebindable(
+        credentials: Sequence[Mapping[str, Any]],
+        *,
+        old_agent_id: str,
+    ) -> None:
+        for credential in credentials:
+            claims = credential.get("claims")
+            claims_mapping = claims if isinstance(claims, Mapping) else {}
+            is_network_ability = any(
+                field in claims_mapping
+                for field in ("network_abilities", "abilities", "agent_attribute")
+            ) and "skill_name" not in claims_mapping
+            is_reissuable_test_capability = (
+                credential.get("issuer") == TEST_CAPABILITY_ISSUER_DID
+                and isinstance(claims_mapping.get("skill_name"), str)
+            )
+            if (
+                claims_mapping.get("agent_id") == old_agent_id
+                and not is_network_ability
+                and not is_reissuable_test_capability
+            ):
+                raise AgentSdkError(
+                    ErrorCode.CREDENTIAL_EXPIRED,
+                    "a requested capability credential is bound to the current Agent ID "
+                    "but cannot be reissued after identity replacement",
+                    field="credentials",
+                )
 
     async def _refresh_rebound_credentials(
         self,

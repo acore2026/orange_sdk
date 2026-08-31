@@ -151,7 +151,7 @@ async def run_agent_b(
                 metadata={
                     "region": args.region,
                     "os": "Linux",
-                    "version": "0.15.0",
+                    "version": "0.15.1",
                 },
             )
             lifecycle_state = AgentLifecycleState.IDENTITY_READY

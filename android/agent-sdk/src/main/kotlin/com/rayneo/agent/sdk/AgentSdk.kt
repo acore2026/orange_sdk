@@ -524,7 +524,11 @@ class AgentSdk internal constructor(
         agentName: String? = null,
     ): OperationResult {
         requireReady()
-        requireAgentState(AgentLifecycleState.IDENTITY_READY, "registerCapabilities", agentId)
+        requireAgentState(
+            setOf(AgentLifecycleState.IDENTITY_READY, AgentLifecycleState.CARD_PUBLISHED),
+            "registerCapabilities",
+            agentId,
+        )
         val vcList = credentials.toMutableList()
         if (capabilities.isNotEmpty()) {
             val resolvedAgentName = agentName
@@ -547,6 +551,38 @@ class AgentSdk internal constructor(
                 ErrorCode.INVALID_ARGUMENT,
                 "credentials or capabilities must contain at least one item",
                 "credentials",
+            )
+        }
+        if (agentLifecycleState == AgentLifecycleState.CARD_PUBLISHED) {
+            val identityApplication = identityApplicationContext ?: throw AgentSdkException(
+                ErrorCode.AGENT_STATE_INVALID,
+                "Cannot replace Agent Card because identity application context is missing",
+            )
+            ensureCredentialsRebindable(vcList, agentId)
+            val deregistered = deregisterIdentity(agentId, "replaced")
+            if (!deregistered.success) {
+                throw AgentSdkException(
+                    ErrorCode.RUNTIME_REJECTED,
+                    "Cannot replace Agent Card because identity deregistration failed",
+                )
+            }
+            val newProfile = applyIdentity(
+                identityApplication.owner,
+                identityApplication.name,
+                identityApplication.description,
+                identityApplication.metadata,
+            )
+            val reboundCredentials = refreshReboundCredentials(
+                credentials,
+                oldAgentId = agentId,
+                newProfile = newProfile,
+            )
+            return registerCapabilities(
+                newProfile.agentId,
+                priority,
+                credentials = reboundCredentials,
+                capabilities = capabilities,
+                agentName = agentName ?: newProfile.agentName,
             )
         }
         val serviceEndpoints = "http://$agentTunIp:$localTcpPort/A2A/message"
@@ -582,56 +618,23 @@ class AgentSdk internal constructor(
     ): OperationResult {
         requireReady()
         requireAgentState(AgentLifecycleState.CARD_PUBLISHED, "updateCapabilities", agentId)
-        val identityApplication = identityApplicationContext ?: throw AgentSdkException(
-            ErrorCode.AGENT_STATE_INVALID,
-            "Cannot rebuild Agent Card because identity application context is missing",
-        )
         val card = agentCardContext ?: throw AgentSdkException(
             ErrorCode.AGENT_STATE_INVALID,
-            "Cannot rebuild Agent Card because registration context is missing",
+            "Cannot update Agent Card because registration context is missing",
         )
         val replacementVcs = applyCapabilityUpdates(card.vcList, updateItems, credentials)
-        replacementVcs.forEach { credential ->
-            val claims = credential["claims"] as? JsonObject ?: return@forEach
-            val network = listOf("network_abilities", "abilities", "agent_attribute")
-                .any(claims::containsKey) && !claims.containsKey("skill_name")
-            val testCapability = credential["issuer"]?.jsonPrimitive?.contentOrNull ==
-                TEST_CAPABILITY_ISSUER_DID && claims["skill_name"] != null
-            if (
-                claims["agent_id"]?.jsonPrimitive?.contentOrNull == agentId &&
-                !network && !testCapability
-            ) {
-                throw AgentSdkException(
-                    ErrorCode.CREDENTIAL_EXPIRED,
-                    "An existing capability credential is bound to the current Agent ID " +
-                        "but cannot be reissued by the SDK",
-                    "credentials",
-                )
-            }
-        }
-        val deregistered = deregisterIdentity(agentId, "replaced")
-        if (!deregistered.success) {
-            throw AgentSdkException(
-                ErrorCode.RUNTIME_REJECTED,
-                "Cannot rebuild Agent Card because identity deregistration failed",
+        return operation("POST", "/arf/v1/agent-cards-update", buildJsonObject {
+            put("request_id", UUID.randomUUID().toString())
+            put("agent_id", agentId)
+            put("update_items", JsonArray(updateItems))
+            put("credentials", JsonArray(credentials))
+        }).also { result ->
+            if (result.success) persistAgentState(
+                AgentLifecycleState.CARD_PUBLISHED,
+                profile!!,
+                agentCard = AgentCardContext(card.priority, replacementVcs),
             )
         }
-        val newProfile = applyIdentity(
-            identityApplication.owner,
-            identityApplication.name,
-            identityApplication.description,
-            identityApplication.metadata,
-        )
-        val refreshed = refreshReboundCredentials(
-            replacementVcs,
-            oldAgentId = agentId,
-            newProfile = newProfile,
-        )
-        return registerCapabilities(
-            newProfile.agentId,
-            priority = card.priority,
-            credentials = refreshed,
-        )
     }
 
     suspend fun discoverAgents(
@@ -865,7 +868,7 @@ class AgentSdk internal constructor(
                 ) {
                     val currentProfile = profile ?: throw AgentSdkException(
                         ErrorCode.AGENT_STATE_INVALID,
-                        "Local profile is unavailable while rebuilding Agent Card",
+                        "Local profile is unavailable while updating the Agent Card snapshot",
                     )
                     val issuer = testCapabilityVcIssuer ?: throw AgentSdkException(
                         ErrorCode.SIGNATURE_ERROR,
@@ -889,6 +892,31 @@ class AgentSdk internal constructor(
             )
         }
         return result
+    }
+
+    private fun ensureCredentialsRebindable(
+        credentials: List<JsonObject>,
+        oldAgentId: String,
+    ) {
+        credentials.forEach { credential ->
+            val claims = credential["claims"] as? JsonObject ?: return@forEach
+            val network = listOf("network_abilities", "abilities", "agent_attribute")
+                .any(claims::containsKey) && !claims.containsKey("skill_name")
+            val testCapability = credential["issuer"]?.jsonPrimitive?.contentOrNull ==
+                TEST_CAPABILITY_ISSUER_DID &&
+                claims["skill_name"]?.jsonPrimitive?.contentOrNull != null
+            if (
+                claims["agent_id"]?.jsonPrimitive?.contentOrNull == oldAgentId &&
+                !network && !testCapability
+            ) {
+                throw AgentSdkException(
+                    ErrorCode.CREDENTIAL_EXPIRED,
+                    "A requested capability credential is bound to the current Agent ID " +
+                        "but cannot be reissued after identity replacement",
+                    "credentials",
+                )
+            }
+        }
     }
 
     private suspend fun refreshReboundCredentials(

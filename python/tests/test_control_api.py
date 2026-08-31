@@ -138,7 +138,7 @@ async def test_network_ability_uses_raw_vc1_response(sdk_fixture):
     assert ability.valid_until is not None
 
 
-async def test_update_capabilities_rebuilds_identity_and_registers_full_card(sdk_fixture):
+async def test_update_capabilities_calls_direct_update_endpoint(sdk_fixture):
     sdk = sdk_fixture["sdk"]
     runtime = sdk_fixture["runtime"]
     await sdk.register_capabilities(
@@ -163,20 +163,16 @@ async def test_update_capabilities_rebuilds_identity_and_registers_full_card(sdk
     )
 
     assert [request[1] for request in runtime.requests] == [
-        "/acn-agent/v1/agent-deletions",
-        "/idm/v1/identity-applications",
-        "/arf/v1/agent-cards",
+        "/arf/v1/agent-cards-update",
     ]
     method, path, body = runtime.requests[-1]
     assert method == "POST"
-    assert path == "/arf/v1/agent-cards"
+    assert path == "/arf/v1/agent-cards-update"
     uuid.UUID(body["request_id"])
     assert "request_type" not in body
     assert body["agent_id"] == "did:example:agent-a"
-    assert body["vc_list"] == [
-        {"id": "vc-network-a"},
-        {"id": "vc-camera-002", "claims": {"skill_name": "camera"}},
-    ]
+    assert body["update_items"] == update_items
+    assert body["credentials"] == credentials
     assert body["timestamp"] == "2026-08-19T00:00:00Z"
     assert body["proof"] == {"jws": "test-proof"}
 

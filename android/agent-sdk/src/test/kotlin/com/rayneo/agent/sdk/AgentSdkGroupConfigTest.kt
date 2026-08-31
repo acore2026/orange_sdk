@@ -332,7 +332,7 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
-    fun `capability update rebuilds identity and registers full card`() = runTest {
+    fun `capability update calls direct update endpoint`() = runTest {
         initializeSdk(restoreProfile = false)
         val profile = sdk.applyIdentity(
             owner = "Alice",
@@ -363,11 +363,45 @@ class AgentSdkGroupConfigTest {
         sdk.updateCapabilities(LOCAL_ID, updates, credentials)
 
         assertEquals("POST", runtime.lastMethod)
-        assertEquals("/arf/v1/agent-cards", runtime.lastPath)
+        assertEquals("/arf/v1/agent-cards-update", runtime.lastPath)
         assertEquals(LOCAL_ID, runtime.lastBody!!["agent_id"].toString().trim('"'))
         UUID.fromString(runtime.lastBody!!["request_id"].toString().trim('"'))
         assertFalse(runtime.lastBody!!.containsKey("request_type"))
+        assertEquals(updates, runtime.lastBody!!["update_items"]!!.jsonArray)
+        assertEquals(credentials, runtime.lastBody!!["credentials"]!!.jsonArray)
         assertEquals(AgentLifecycleState.CARD_PUBLISHED, sdk.agentLifecycleState)
+        assertEquals(
+            listOf("/arf/v1/agent-cards-update"),
+            runtime.paths,
+        )
+    }
+
+    @Test
+    fun `registering again replaces identity before publishing the new card`() = runTest {
+        initializeSdk(restoreProfile = false)
+        val profile = sdk.applyIdentity(
+            owner = "Alice",
+            name = "AliceAgent",
+            description = "AgentModel-X",
+            metadata = buildJsonObject {
+                put("region", "CN")
+                put("os", "Android")
+                put("version", "0.15.0")
+            },
+        )
+        sdk.registerCapabilities(
+            profile.agentId,
+            priority = 1,
+            credentials = listOf(buildJsonObject { put("id", "vc-network-a") }),
+        )
+        runtime.paths.clear()
+
+        sdk.registerCapabilities(
+            profile.agentId,
+            priority = 2,
+            credentials = listOf(buildJsonObject { put("id", "vc-network-b") }),
+        )
+
         assertEquals(
             listOf(
                 "/acn-agent/v1/agent-deletions",
@@ -376,6 +410,49 @@ class AgentSdkGroupConfigTest {
             ),
             runtime.paths,
         )
+        assertEquals(AgentLifecycleState.CARD_PUBLISHED, sdk.agentLifecycleState)
+        assertEquals(2, runtime.lastBody!!["priority"]!!.jsonPrimitive.content.toInt())
+    }
+
+    @Test
+    fun `invalid card replacement is rejected before deregistration`() = runTest {
+        initializeSdk(restoreProfile = false)
+        val profile = sdk.applyIdentity(
+            owner = "Alice",
+            name = "AliceAgent",
+            description = "AgentModel-X",
+            metadata = buildJsonObject {
+                put("region", "CN")
+                put("os", "Android")
+                put("version", "0.15.1")
+            },
+        )
+        sdk.registerCapabilities(
+            profile.agentId,
+            priority = 1,
+            credentials = listOf(buildJsonObject { put("id", "vc-network-a") }),
+        )
+        runtime.paths.clear()
+
+        val failure = runCatching {
+            sdk.registerCapabilities(
+                profile.agentId,
+                priority = 2,
+                credentials = listOf(buildJsonObject {
+                    put("id", "vc-external-bound")
+                    put("issuer", "did:example:external-issuer")
+                    put("claims", buildJsonObject {
+                        put("agent_id", profile.agentId)
+                        put("skill_name", "camera")
+                    })
+                }),
+            )
+        }.exceptionOrNull() as AgentSdkException
+
+        assertEquals(ErrorCode.CREDENTIAL_EXPIRED, failure.code)
+        assertTrue(runtime.paths.isEmpty())
+        assertEquals(AgentLifecycleState.CARD_PUBLISHED, sdk.agentLifecycleState)
+        assertEquals(profile, sdk.localProfile)
     }
 
     @Test

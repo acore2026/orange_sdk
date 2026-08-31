@@ -171,7 +171,7 @@ async def run_full_flow(
         metadata={
             "region": args.region,
             "os": "Linux",
-            "version": "0.15.0",
+            "version": "0.15.1",
         },
     )
     print("[2 apply_identity]", profile.agent_id)
@@ -236,7 +236,6 @@ async def run_full_flow(
         credentials=[ability.ability_vc],
     )
     print("[6 update_capabilities]", updated.success)
-    profile = sdk.local_profile or profile
 
     await _before_step(
         before_step,
