@@ -7,6 +7,7 @@ import com.rayneo.agent.sdk.model.GroupConfigSnapshot
 import com.rayneo.agent.sdk.model.MessageReceipt
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import com.rayneo.agent.sdk.model.NetworkMessageType
+import com.rayneo.agent.sdk.model.OperationResult
 import com.rayneo.agent.sdk.transport.GroupMessageListener
 import com.rayneo.agent.sdk.transport.NetworkMessageListener
 import kotlinx.coroutines.CancellationException
@@ -63,15 +64,19 @@ class AgentTestRunner(
     private val onLog: (LabLogLevel, String, String) -> Unit,
     private val onStatus: (RunnerStatus) -> Unit,
     private val onManualMessageSession: (ManualMessageSession?) -> Unit,
+    private val onResetAvailability: (Boolean) -> Unit = {},
 ) {
     private val retrySignal = Channel<Unit>(Channel.CONFLATED)
     private val sendMutex = Mutex()
+    private val operationMutex = Mutex()
     private var networkListener: AutoCloseable? = null
     private var groupListener: AutoCloseable? = null
     @Volatile
     private var localAgentId: String? = null
     @Volatile
     private var manualMessageSession: ManualMessageSession? = null
+    @Volatile
+    private var resetRequested = false
 
     fun retryCurrentStep() {
         retrySignal.trySend(Unit)
@@ -102,6 +107,7 @@ class AgentTestRunner(
             "系统选择MASQUE出口=${initResult.masqueOuterSourceIp}，" +
                 "Agent TUN=${initResult.agentTunCidr}，A2A=${initResult.agentTcpEndpoint}",
         )
+        onResetAvailability(true)
 
         var lifecycleState = sdk.agentLifecycleState
         var profile = sdk.localProfile
@@ -119,7 +125,7 @@ class AgentTestRunner(
                     metadata = buildJsonObject {
                         put("region", "CN")
                         put("os", "Android")
-                        put("version", "0.2.0")
+                        put("version", "0.2.4")
                     },
                 )
             }
@@ -182,6 +188,7 @@ class AgentTestRunner(
     }
 
     fun close() {
+        onResetAvailability(false)
         runCatching { networkListener?.close() }
         runCatching { groupListener?.close() }
         manualMessageSession = null
@@ -189,44 +196,53 @@ class AgentTestRunner(
         retrySignal.close()
     }
 
+    suspend fun resetAgent(): OperationResult {
+        resetRequested = true
+        retrySignal.trySend(Unit)
+        return operationMutex.withLock { sdk.resetAgent() }
+    }
+
     suspend fun sendManualMessage(content: String): MessageReceipt = sendMutex.withLock {
-        val normalized = content.trim()
-        require(normalized.isNotEmpty()) { "消息内容不能为空" }
-        val session = checkNotNull(manualMessageSession) { "群组尚未就绪，不能发送消息" }
-        onLog(
-            LabLogLevel.INFO,
-            "A2A SEND",
-            "to=${session.targetAgentName}(${session.targetAgentId})，group_id=${session.groupId}，" +
-                "content=${normalized.take(300)}",
-        )
-        try {
-            sdk.sendMessage(
-                groupId = session.groupId,
-                targetAgentId = session.targetAgentId,
-                jsonMessage = buildJsonObject {
-                    put("type", "text")
-                    put("content", normalized)
-                },
-                messageType = "text",
-                taskId = "android-ab-manual-message",
-                timeoutSeconds = 10.0,
-            ).also { receipt ->
-                check(receipt.delivered) { "对端未返回 status=OK" }
-                onLog(
-                    LabLogLevel.SUCCESS,
-                    "A2A SEND",
-                    "message_id=${receipt.messageId}，投递成功",
-                )
-            }
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Exception) {
+        operationMutex.withLock {
+            ensureResetNotRequested()
+            val normalized = content.trim()
+            require(normalized.isNotEmpty()) { "消息内容不能为空" }
+            val session = checkNotNull(manualMessageSession) { "群组尚未就绪，不能发送消息" }
             onLog(
-                LabLogLevel.ERROR,
+                LabLogLevel.INFO,
                 "A2A SEND",
-                "发送失败：${error.message ?: error::class.java.simpleName}；SDK 保持运行",
+                "to=${session.targetAgentName}(${session.targetAgentId})，" +
+                    "group_id=${session.groupId}，content=${normalized.take(300)}",
             )
-            throw error
+            try {
+                sdk.sendMessage(
+                    groupId = session.groupId,
+                    targetAgentId = session.targetAgentId,
+                    jsonMessage = buildJsonObject {
+                        put("type", "text")
+                        put("content", normalized)
+                    },
+                    messageType = "text",
+                    taskId = "android-ab-manual-message",
+                    timeoutSeconds = 10.0,
+                ).also { receipt ->
+                    check(receipt.delivered) { "对端未返回 status=OK" }
+                    onLog(
+                        LabLogLevel.SUCCESS,
+                        "A2A SEND",
+                        "message_id=${receipt.messageId}，投递成功",
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                onLog(
+                    LabLogLevel.ERROR,
+                    "A2A SEND",
+                    "发送失败：${error.message ?: error::class.java.simpleName}；SDK 保持运行",
+                )
+                throw error
+            }
         }
     }
 
@@ -301,7 +317,7 @@ class AgentTestRunner(
         }
         onLog(LabLogLevel.SUCCESS, "H-GROUP", "group_id=${group.groupId}")
 
-        retryableStep("GROUP CONFIG", "等待双方群组配置") {
+        retryableStep("GROUP CONFIG", "等待双方群组配置", serialized = false) {
             withTimeout(120_000) {
                 while (sdk.getGroupSnapshot(group.groupId) == null) {
                     delay(500)
@@ -360,15 +376,26 @@ class AgentTestRunner(
     private suspend fun <T> retryableStep(
         stage: String,
         title: String,
+        serialized: Boolean = true,
         call: suspend () -> T,
     ): T {
         var attempt = 1
         while (true) {
             currentCoroutineContext().ensureActive()
+            ensureResetNotRequested()
             onStatus(RunnerStatus(title, "第 $attempt 次调用中"))
             onLog(LabLogLevel.INFO, stage, "调用开始（attempt=$attempt）")
             try {
-                return call().also {
+                val result = if (serialized) {
+                    operationMutex.withLock {
+                        ensureResetNotRequested()
+                        call()
+                    }
+                } else {
+                    call()
+                }
+                ensureResetNotRequested()
+                return result.also {
                     onLog(LabLogLevel.SUCCESS, stage, "调用完成")
                 }
             } catch (error: CancellationException) {
@@ -387,6 +414,10 @@ class AgentTestRunner(
                 attempt += 1
             }
         }
+    }
+
+    private fun ensureResetNotRequested() {
+        if (resetRequested) throw CancellationException("Agent reset requested")
     }
 
     private fun compact(value: JsonObject): String = value.toString().take(800)

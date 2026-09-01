@@ -29,6 +29,7 @@ import android.widget.Space
 import android.widget.TextView
 import android.widget.Toast
 import com.rayneo.agent.sdk.AgentSdk
+import com.rayneo.agent.sdk.model.AgentLifecycleState
 import com.rayneo.agent.sdk.vpn.AgentVpnService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -36,6 +37,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -63,6 +65,7 @@ class MainActivity : Activity() {
     private var logStatusTitle: TextView? = null
     private var logStatusDetail: TextView? = null
     private var retryButton: TextView? = null
+    private var resetButton: TextView? = null
     private var stopButton: TextView? = null
     private var logOutput: TextView? = null
     private var logScroll: ScrollView? = null
@@ -72,6 +75,9 @@ class MainActivity : Activity() {
     private var manualSendButton: TextView? = null
     private var manualMessageSession: ManualMessageSession? = null
     private var manualMessageSending = false
+    private var resetAvailable = false
+    private var resetArmed = false
+    private var resetInProgress = false
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -100,6 +106,10 @@ class MainActivity : Activity() {
         manualMessageInput = null
         manualSendButton = null
         manualMessageSession = null
+        resetButton = null
+        resetAvailable = false
+        resetArmed = false
+        resetInProgress = false
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Palette.CANVAS)
@@ -296,6 +306,7 @@ class MainActivity : Activity() {
             ::appendLog,
             ::setRunnerStatus,
             ::setManualMessageSession,
+            ::setResetAvailable,
         )
         sdk = value
         runner = flow
@@ -398,8 +409,19 @@ class MainActivity : Activity() {
         root.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             retryButton = actionButton("重试当前接口", filled = true) {
+                disarmReset()
                 if (runner != null) runner?.retryCurrentStep() else requestVpnOrStart()
             }.apply { visibility = View.GONE }.also {
+                addView(it, LinearLayout.LayoutParams(0, dp(50), 1f))
+            }
+            addView(Space(this@MainActivity), LinearLayout.LayoutParams(dp(10), 1))
+            resetButton = actionButton("重置到状态1", filled = false) {
+                requestAgentReset()
+            }.apply {
+                setTextColor(Palette.WARNING)
+                isEnabled = false
+                alpha = .45f
+            }.also {
                 addView(it, LinearLayout.LayoutParams(0, dp(50), 1f))
             }
             addView(Space(this@MainActivity), LinearLayout.LayoutParams(dp(10), 1))
@@ -488,6 +510,116 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun setResetAvailable(available: Boolean) {
+        runOnUiThread {
+            resetAvailable = available
+            if (!available) resetArmed = false
+            resetButton?.apply {
+                isEnabled = available && !resetInProgress
+                alpha = if (isEnabled) 1f else .45f
+                text = when {
+                    resetInProgress -> "正在重置…"
+                    resetArmed -> "再次点击确认"
+                    else -> "重置到状态1"
+                }
+            }
+        }
+    }
+
+    private fun disarmReset() {
+        if (!resetArmed || resetInProgress) return
+        resetArmed = false
+        setResetAvailable(resetAvailable)
+    }
+
+    private fun requestAgentReset() {
+        if (!resetAvailable || resetInProgress) return
+        if (!resetArmed) {
+            resetArmed = true
+            setResetAvailable(true)
+            setRunnerStatus(
+                RunnerStatus(
+                    "确认重置 Agent 身份",
+                    "再次点击 Reset 将仅清除本地 Profile 与 Agent Card，不修改网侧身份",
+                ),
+            )
+            appendLog(LabLogLevel.WARNING, "RESET", "等待二次确认；当前身份尚未改变")
+            return
+        }
+        performAgentReset()
+    }
+
+    private fun performAgentReset() {
+        val activeSdk = sdk ?: return
+        val activeRunner = runner
+        val activeJob = runnerJob
+        resetInProgress = true
+        resetArmed = false
+        setResetAvailable(false)
+        setRunnerStatus(RunnerStatus("正在重置到状态1", "停止自动流程并清除本地身份状态"))
+        scope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    activeRunner?.resetAgent() ?: activeSdk.resetAgent()
+                }
+                runnerJob = null
+                activeJob?.cancelAndJoin()
+                activeRunner?.close()
+                runner = null
+                setManualMessageSession(null)
+                check(result.success) { result.message.ifBlank { "本地状态重置失败" } }
+                check(activeSdk.agentLifecycleState == AgentLifecycleState.NO_IDENTITY) {
+                    "Reset 成功后 SDK 未进入 NO_IDENTITY"
+                }
+                appendLog(
+                    LabLogLevel.SUCCESS,
+                    "RESET",
+                    "本地身份状态已清除；Agent 已回到状态1；网侧身份未修改",
+                )
+                withContext(Dispatchers.IO) { activeSdk.close() }
+                if (sdk === activeSdk) sdk = null
+                if (serviceBound) {
+                    runCatching { unbindService(connection) }
+                    serviceBound = false
+                    vpnService = null
+                }
+                resetInProgress = false
+                resetAvailable = false
+                resetButton?.apply {
+                    text = "已重置为状态1"
+                    isEnabled = false
+                    alpha = .55f
+                }
+                setRunnerStatus(RunnerStatus("已回到状态1", "未申请数字身份；返回配置后可重新启动"))
+                stopButton?.apply {
+                    text = "返回配置"
+                    isEnabled = true
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                runnerJob = null
+                activeJob?.cancelAndJoin()
+                activeRunner?.close()
+                runner = null
+                setManualMessageSession(null)
+                resetInProgress = false
+                appendLog(
+                    LabLogLevel.ERROR,
+                    "RESET",
+                    "重置失败：${error.message ?: error::class.java.simpleName}；原身份状态未清除",
+                )
+                setRunnerStatus(
+                    RunnerStatus(
+                        "重置失败",
+                        "${error.message ?: error::class.java.simpleName}；可再次尝试 Reset 或停止",
+                    ),
+                )
+                setResetAvailable(true)
+            }
+        }
+    }
+
     private fun sendManualMessage() {
         val flow = runner ?: return
         val session = manualMessageSession ?: run {
@@ -565,6 +697,7 @@ class MainActivity : Activity() {
     }
 
     private fun stopOrReturn() {
+        disarmReset()
         if (runnerJob == null && sdk == null) {
             showConfigScreen()
             return

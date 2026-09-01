@@ -20,6 +20,7 @@ import com.ffalcon.mercury.android.sdk.ui.util.FocusHolder
 import com.ffalcon.mercury.android.sdk.ui.util.FocusInfo
 import com.rayneo.agent.example.databinding.ActivityRayneoMainBinding
 import com.rayneo.agent.sdk.AgentSdk
+import com.rayneo.agent.sdk.model.AgentLifecycleState
 import com.rayneo.agent.sdk.vpn.AgentVpnService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -63,6 +64,9 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     private var primaryMode = PrimaryMode.BUSY
     private var sendSequence = 0
     private var focusTracker: FixPosFocusTracker? = null
+    private var resetAvailable = false
+    private var resetArmed = false
+    private var resetInProgress = false
 
     private val vpnPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -128,6 +132,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         val focusHolder = FocusHolder(true)
         mBindingPair.setLeft {
             primaryAction.setOnClickListener { handlePrimaryAction() }
+            resetAction.setOnClickListener { requestAgentReset() }
             stopAction.setOnClickListener { stopAndFinish() }
             focusHolder.addFocusTarget(
                 FocusInfo(
@@ -135,14 +140,21 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                     eventHandler = { action ->
                         if (action is TempleAction.Click) handlePrimaryAction()
                     },
-                    focusChangeHandler = { focused -> updateFocus(primary = true, focused) },
+                    focusChangeHandler = { focused -> updateFocus(ActionTarget.PRIMARY, focused) },
+                ),
+                FocusInfo(
+                    resetAction,
+                    eventHandler = { action ->
+                        if (action is TempleAction.Click) requestAgentReset()
+                    },
+                    focusChangeHandler = { focused -> updateFocus(ActionTarget.RESET, focused) },
                 ),
                 FocusInfo(
                     stopAction,
                     eventHandler = { action ->
                         if (action is TempleAction.Click) stopAndFinish()
                     },
-                    focusChangeHandler = { focused -> updateFocus(primary = false, focused) },
+                    focusChangeHandler = { focused -> updateFocus(ActionTarget.STOP, focused) },
                 ),
             )
             focusHolder.currentFocus(primaryAction)
@@ -164,13 +176,18 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         }
     }
 
-    private fun updateFocus(primary: Boolean, focused: Boolean) {
+    private fun updateFocus(action: ActionTarget, focused: Boolean) {
         mBindingPair.updateView {
-            val target = if (primary) primaryAction else stopAction
+            val target = when (action) {
+                ActionTarget.PRIMARY -> primaryAction
+                ActionTarget.RESET -> resetAction
+                ActionTarget.STOP -> stopAction
+            }
             target.setBackgroundResource(
                 when {
                     focused -> R.drawable.rayneo_action_focused
-                    primary -> R.drawable.rayneo_action_primary
+                    action == ActionTarget.PRIMARY -> R.drawable.rayneo_action_primary
+                    action == ActionTarget.RESET && resetArmed -> R.drawable.rayneo_action_warning
                     else -> R.drawable.rayneo_action_secondary
                 },
             )
@@ -232,6 +249,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                     onLog = ::appendLog,
                     onStatus = ::setRunnerStatus,
                     onManualMessageSession = ::setManualMessageSession,
+                    onResetAvailability = ::setResetAvailable,
                 )
                 sdk = sdkValue
                 runner = flow
@@ -268,6 +286,102 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             } else {
                 setStatus("群组已就绪 · 可发送", "目标 ${session.targetAgentName} · 单击发送预置测试消息")
                 setPrimaryAction(PrimaryMode.SEND, "发送测试消息")
+            }
+        }
+    }
+
+    private fun setResetAvailable(available: Boolean) {
+        runOnUiThread {
+            resetAvailable = available
+            if (!available) resetArmed = false
+            mBindingPair.updateView {
+                resetAction.isEnabled = available && !resetInProgress
+                resetAction.alpha = if (resetAction.isEnabled) 1f else 0.45f
+                resetAction.text = when {
+                    resetInProgress -> "正在重置…"
+                    resetArmed -> "再次单击确认"
+                    else -> "重置到状态1"
+                }
+                resetAction.setBackgroundResource(
+                    if (resetArmed) {
+                        R.drawable.rayneo_action_warning
+                    } else {
+                        R.drawable.rayneo_action_secondary
+                    },
+                )
+            }
+        }
+    }
+
+    private fun requestAgentReset() {
+        if (!resetAvailable || resetInProgress) return
+        if (!resetArmed) {
+            resetArmed = true
+            setResetAvailable(true)
+            setStatus(
+                "确认重置 Agent 身份",
+                "再次单击 Reset：仅清除本地 Profile / Agent Card，不修改网侧身份",
+            )
+            appendLog(LabLogLevel.WARNING, "RESET", "等待二次确认；当前身份尚未改变")
+            return
+        }
+        performAgentReset()
+    }
+
+    private fun performAgentReset() {
+        val activeSdk = sdk ?: return
+        val activeRunner = runner
+        val activeJob = runnerJob
+        resetInProgress = true
+        resetArmed = false
+        setResetAvailable(false)
+        setPrimaryAction(PrimaryMode.BUSY, "身份重置中…")
+        setStatus("正在重置到状态1", "停止自动流程并清除本地身份状态")
+        lifecycleScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    activeRunner?.resetAgent() ?: activeSdk.resetAgent()
+                }
+                runnerJob = null
+                activeJob?.cancelAndJoin()
+                activeRunner?.close()
+                runner = null
+                messageSession = null
+                setManualMessageSession(null)
+                check(result.success) { result.message.ifBlank { "本地状态重置失败" } }
+                check(activeSdk.agentLifecycleState == AgentLifecycleState.NO_IDENTITY) {
+                    "Reset 成功后 SDK 未进入 NO_IDENTITY"
+                }
+                appendLog(
+                    LabLogLevel.SUCCESS,
+                    "RESET",
+                    "本地身份状态已清除；Agent 已回到状态1；网侧身份未修改",
+                )
+                closeResources()
+                resetInProgress = false
+                mBindingPair.updateView {
+                    resetAction.text = "已重置为状态1"
+                    resetAction.isEnabled = false
+                    resetAction.alpha = 0.55f
+                }
+                setStatus("已回到状态1", "当前未申请数字身份；可重新启用 Agent 网络")
+                setPrimaryAction(PrimaryMode.RETRY, "重新启用 Agent 网络")
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                runnerJob = null
+                activeJob?.cancelAndJoin()
+                activeRunner?.close()
+                runner = null
+                messageSession = null
+                setManualMessageSession(null)
+                resetInProgress = false
+                flowStarted = true
+                val detail = error.message ?: error::class.java.simpleName
+                appendLog(LabLogLevel.ERROR, "RESET", "重置失败：$detail；原身份状态未清除")
+                setStatus("重置失败", "$detail；可再次尝试 Reset，或停止退出")
+                setPrimaryAction(PrimaryMode.BUSY, "重置失败")
+                setResetAvailable(true)
             }
         }
     }
@@ -363,6 +477,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             vpnService = null
         }
         flowStarted = false
+        resetAvailable = false
+        resetArmed = false
     }
 
     override fun onDestroy() {
@@ -383,6 +499,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private enum class PrimaryMode { BUSY, RETRY, SEND }
+    private enum class ActionTarget { PRIMARY, RESET, STOP }
 
     private companion object {
         const val MAX_VISIBLE_LOG_LINES = 7

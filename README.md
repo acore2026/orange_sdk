@@ -57,6 +57,11 @@ AgentRuntime 同步本机信息。
 创建群组时必须向 `create_group/createGroup` 传入非空 `dnn`。SDK 会将其写入
 `group_config.dnn` 并纳入控制面 proof，应用不需要自行拼装 HTTP 请求体。
 
+Python `reset_agent()` 与 Android `resetAgent()` 提供参数less 状态重置控制：状态2/3
+仅清除本地持久化的 Profile/Card 并回到状态1 `NO_IDENTITY`，不发送去注册消息、
+不修改网侧身份；状态1调用幂等成功且同样不发送 HTTP。Generic 与雷鸟示例 App 均提供
+二次确认的“重置到状态1”操作，成功后停止当前自动流程，不会立即重新申请身份。
+
 控制面写请求由 SDK 自动生成普通 UUID 格式的 `request_id`。身份申请严格按
 `ACN-H-ID-v1` 编码 owner/name/publicKey/description/timestamp，并将完整紧凑
 `metadata` JSON Container 作为一个 LP16 字段签名；其他控制请求使用 `proof`。

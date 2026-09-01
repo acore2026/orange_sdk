@@ -8,7 +8,7 @@ SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.15.1-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
+- `agent_connect_sdk-0.16.0-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/interactive_linux_agent.py`：复用真实 Linux 全流程参数，每按一次回车只调用下一个 SDK 接口。
@@ -46,7 +46,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.15.1-py3-none-any.whl
+dist/agent_connect_sdk-0.16.0-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -58,7 +58,7 @@ dist/agent_connect_sdk-0.15.1-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.15.1-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.16.0-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -92,14 +92,14 @@ python -m pip install -e '.[test]'
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.15.1-py3-none-any.whl
+  ./agent_connect_sdk-0.16.0-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.15.1-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.16.0-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -390,9 +390,9 @@ SDK 会按 AgentRuntime 的 `IP:端口` 持久化 Agent 业务状态：
 
 | `sdk.agent_lifecycle_state` | 含义 | 下一步 |
 |---|---|---|
-| `NO_IDENTITY` | 未获取数字身份 | 调用 `apply_identity()` |
-| `IDENTITY_READY` | 已保存 `AgentProfile`，未发布 Agent Card | 调用 `register_capabilities()`，或注销回到状态1 |
-| `CARD_PUBLISHED` | 身份和 Agent Card 均已就绪 | 直接调用 `update_capabilities()`；再次调用 `register_capabilities()` 会替换身份和整张 Card；也可注销回到状态1 |
+| `NO_IDENTITY` | 未获取数字身份 | 调用 `apply_identity()`；`reset_agent()` 幂等成功 |
+| `IDENTITY_READY` | 已保存 `AgentProfile`，未发布 Agent Card | 调用 `register_capabilities()`，或 `reset_agent()` 回到状态1 |
+| `CARD_PUBLISHED` | 身份和 Agent Card 均已就绪 | 直接调用 `update_capabilities()`；再次调用 `register_capabilities()` 会替换身份和整张 Card；也可 `reset_agent()` 回到状态1 |
 
 状态文件默认位于 `$XDG_STATE_HOME/agent-sdk/agents` 或
 `~/.local/state/agent-sdk/agents`，目录/文件权限为 `0700/0600`。应用只读取
@@ -403,14 +403,16 @@ SDK 会按 AgentRuntime 的 `IP:端口` 持久化 Agent 业务状态：
 Card 快照。状态3再次调用 `register_capabilities()` 表示替换整张 Agent Card：SDK 先
 完整校验输入，再依次调用 `deregister_identity()`、`apply_identity()`、
 `register_capabilities()`。替换成功后 `agent_id` 可能变化，应重新读取
-`sdk.local_profile`。
+`sdk.local_profile`。参数less `reset_agent()` 是应用控制状态机回到状态1的便捷接口：
+所有状态都不发 HTTP；状态2/3直接删除本地 Profile、身份申请上下文和完整 Agent Card
+快照并进入 `NO_IDENTITY`，不修改网侧身份；状态1调用幂等成功。
 
 ```python
 profile = await sdk.apply_identity(
     owner="customer-a",
     name="Agent A",
     description="RayNeo edge agent",
-    metadata={"region": "CN", "os": "Linux", "version": "0.15.1"},
+    metadata={"region": "CN", "os": "Linux", "version": "0.16.0"},
 )
 
 ability = await sdk.get_network_ability(profile.agent_id)
@@ -573,11 +575,16 @@ finally:
     await sdk.close()
 ```
 
-仅在确实要废弃身份时调用：
+仅在确实要废弃身份时调用。应用只需回到状态1时优先使用参数less Reset：
 
 ```python
-await sdk.deregister_identity(profile.agent_id, reason="retired")
+result = await sdk.reset_agent()
+assert result.success
+assert sdk.agent_lifecycle_state is AgentLifecycleState.NO_IDENTITY
 ```
+
+需要显式指定 Agent DID 或注销原因时，仍可调用
+`await sdk.deregister_identity(profile.agent_id, reason="retired")`。
 
 普通进程退出不要注销身份；下次启动可从安全存储恢复已验证的 `AgentProfile`，再调用 `set_local_profile_for_restore(profile)`。
 
@@ -964,6 +971,7 @@ ss -lunp | grep <MASQUE端口>
 | `apply_identity(...)` | 申请身份，直接解析网元原始 `vc0` | `AgentProfile` |
 | `set_local_profile_for_restore(profile)` | 恢复安全存储中的既有身份 | 无 |
 | `deregister_identity(...)` | 注销身份 | `OperationResult` |
+| `reset_agent()` | 参数less 本地控制接口；清除本地身份/Card 状态并回到状态1，不发送 HTTP；状态1幂等成功 | `OperationResult` |
 | `get_network_ability(...)` | 获取网络能力，直接解析原始 `vc1` | `NetworkAbility` |
 | `register_capabilities(...)` | 状态2发布已有 VC；状态3再次调用时先替换身份，再发布整张新 Card | `OperationResult`；替换后 Profile 从 `local_profile` 读取 |
 | `update_capabilities(...)` | 状态3通过 `POST /arf/v1/agent-cards-update` 直接增删能力，不替换身份 | `OperationResult` |

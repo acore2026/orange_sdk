@@ -108,6 +108,58 @@ async def test_identity_ready_can_deregister_without_publishing_card(
     assert sdk.local_profile is None
 
 
+async def test_reset_agent_is_idempotent_in_state_one(sdk_without_profile_fixture):
+    sdk = sdk_without_profile_fixture["sdk"]
+    runtime = sdk_without_profile_fixture["runtime"]
+    request_count = len(runtime.requests)
+
+    result = await sdk.reset_agent()
+
+    assert result.success is True
+    assert result.message == "Agent is already in NO_IDENTITY state"
+    assert len(runtime.requests) == request_count
+    assert sdk.agent_lifecycle_state is AgentLifecycleState.NO_IDENTITY
+    assert sdk.local_profile is None
+
+
+async def test_reset_agent_clears_published_identity_locally_without_http(
+    sdk_fixture,
+):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    profile = sdk.local_profile
+    assert profile is not None
+    await sdk.register_capabilities(
+        profile.agent_id,
+        priority=1,
+        credentials=[{"id": "vc-network-a"}],
+    )
+    runtime.requests.clear()
+
+    result = await sdk.reset_agent()
+
+    assert result.success is True
+    assert result.message == (
+        "Local Agent state reset to NO_IDENTITY; network identity was not changed"
+    )
+    assert runtime.requests == []
+    assert sdk.agent_lifecycle_state is AgentLifecycleState.NO_IDENTITY
+    assert sdk.local_profile is None
+
+
+async def test_reset_agent_clears_identity_ready_state_locally_without_http(sdk_fixture):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    runtime.requests.clear()
+
+    result = await sdk.reset_agent()
+
+    assert result.success is True
+    assert runtime.requests == []
+    assert sdk.agent_lifecycle_state is AgentLifecycleState.NO_IDENTITY
+    assert sdk.local_profile is None
+
+
 async def test_invalid_card_replacement_is_rejected_before_deregistration(sdk_fixture):
     sdk = sdk_fixture["sdk"]
     runtime = sdk_fixture["runtime"]

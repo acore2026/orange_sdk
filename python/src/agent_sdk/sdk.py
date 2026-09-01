@@ -974,6 +974,28 @@ class AgentSdk:
         return result
 
     @logged_async
+    async def reset_agent(self) -> OperationResult:
+        """Return the local Agent lifecycle to state 1 (``NO_IDENTITY``).
+
+        Reset is a local-only operation: it clears the persisted Profile/Card
+        state without deregistering the identity from the network. It is
+        idempotent in state 1.
+        """
+        self._require_ready()
+        if self._agent_lifecycle_state is AgentLifecycleState.NO_IDENTITY:
+            return OperationResult(
+                True,
+                "",
+                "Agent is already in NO_IDENTITY state",
+            )
+        self._clear_agent_state()
+        return OperationResult(
+            True,
+            "",
+            "Local Agent state reset to NO_IDENTITY; network identity was not changed",
+        )
+
+    @logged_async
     async def get_network_ability(
         self,
         agent_id: str,

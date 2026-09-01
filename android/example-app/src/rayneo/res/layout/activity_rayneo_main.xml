@@ -89,12 +89,31 @@
             android:textStyle="bold" />
 
         <Space
-            android:layout_width="14dp"
+            android:layout_width="10dp"
+            android:layout_height="1dp" />
+
+        <TextView
+            android:id="@+id/reset_action"
+            android:layout_width="170dp"
+            android:layout_height="match_parent"
+            android:alpha="0.45"
+            android:background="@drawable/rayneo_action_secondary"
+            android:enabled="false"
+            android:focusable="true"
+            android:fontFamily="sans"
+            android:gravity="center"
+            android:text="重置到状态1"
+            android:textColor="#F6B850"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <Space
+            android:layout_width="10dp"
             android:layout_height="1dp" />
 
         <TextView
             android:id="@+id/stop_action"
-            android:layout_width="170dp"
+            android:layout_width="140dp"
             android:layout_height="match_parent"
             android:background="@drawable/rayneo_action_secondary"
             android:focusable="true"
@@ -113,7 +132,7 @@
         android:layout_marginTop="8dp"
         android:fontFamily="sans"
         android:gravity="center"
-        android:text="前后 / 上下滑动切换焦点  ·  单击确认  ·  双击退出"
+        android:text="前后 / 上下滑动切换焦点  ·  Reset 需单击两次确认  ·  双击退出"
         android:textColor="#8FA9B4"
         android:textSize="16sp" />
 

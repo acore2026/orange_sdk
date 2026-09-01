@@ -483,6 +483,30 @@ class AgentSdk internal constructor(
         }).also { if (it.success) clearAgentState() }
     }
 
+    /**
+     * Returns the local Agent lifecycle to state 1 ([AgentLifecycleState.NO_IDENTITY]).
+     *
+     * This is a local-only operation: it clears the persisted Profile/Card state
+     * without deregistering the identity from the network. State 1 is an
+     * idempotent success.
+     */
+    suspend fun resetAgent(): OperationResult {
+        requireReady()
+        if (agentLifecycleState == AgentLifecycleState.NO_IDENTITY) {
+            return OperationResult(
+                success = true,
+                operationId = "",
+                message = "Agent is already in NO_IDENTITY state",
+            )
+        }
+        clearAgentState()
+        return OperationResult(
+            success = true,
+            operationId = "",
+            message = "Local Agent state reset to NO_IDENTITY; network identity was not changed",
+        )
+    }
+
     suspend fun getNetworkAbility(
         agentId: String,
         intent: String = "Issue Network Ability Credential",

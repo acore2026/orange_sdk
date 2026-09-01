@@ -508,6 +508,55 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
+    fun `reset is idempotent in state one without an HTTP request`() = runTest {
+        initializeSdk(restoreProfile = false)
+        runtime.paths.clear()
+
+        val result = sdk.resetAgent()
+
+        assertTrue(result.success)
+        assertEquals("Agent is already in NO_IDENTITY state", result.message)
+        assertTrue(runtime.paths.isEmpty())
+        assertEquals(AgentLifecycleState.NO_IDENTITY, sdk.agentLifecycleState)
+        assertEquals(null, sdk.localProfile)
+    }
+
+    @Test
+    fun `reset clears a published identity locally without an HTTP request`() = runTest {
+        initializeSdk()
+        sdk.registerCapabilities(
+            LOCAL_ID,
+            priority = 1,
+            credentials = listOf(buildJsonObject { put("id", "vc-network-a") }),
+        )
+        runtime.paths.clear()
+
+        val result = sdk.resetAgent()
+
+        assertTrue(result.success)
+        assertEquals(
+            "Local Agent state reset to NO_IDENTITY; network identity was not changed",
+            result.message,
+        )
+        assertTrue(runtime.paths.isEmpty())
+        assertEquals(AgentLifecycleState.NO_IDENTITY, sdk.agentLifecycleState)
+        assertEquals(null, sdk.localProfile)
+    }
+
+    @Test
+    fun `reset clears identity-ready state locally without an HTTP request`() = runTest {
+        initializeSdk()
+        runtime.paths.clear()
+
+        val result = sdk.resetAgent()
+
+        assertTrue(result.success)
+        assertTrue(runtime.paths.isEmpty())
+        assertEquals(AgentLifecycleState.NO_IDENTITY, sdk.agentLifecycleState)
+        assertEquals(null, sdk.localProfile)
+    }
+
+    @Test
     fun `identity application accepts string metadata and normalizes order`() = runTest {
         initializeSdk(restoreProfile = false)
 

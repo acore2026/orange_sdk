@@ -135,8 +135,9 @@ SDK 将 Agent 业务状态按 Runtime `IP:端口` 保存在应用私有
 `noBackupFilesDir/agent-sdk/agents`：`NO_IDENTITY`、`IDENTITY_READY`、
 `CARD_PUBLISHED`。App 启动后读取 `sdk.agentLifecycleState` 和 `sdk.localProfile`；状态1
 才申请身份，状态2才发布 Agent Card，状态3直接复用，不重复调用
-`registerCapabilities()`。状态2再次申请身份时会先注销旧身份；状态2/3显式注销成功后
-都会删除本地记录并回到状态1。状态3调用 `updateCapabilities()` 时直接请求
+`registerCapabilities()`。状态2再次申请身份时会先注销旧身份；状态2/3调用参数less
+`resetAgent()` 时，SDK 只删除本地 Profile/Card 记录并回到状态1，不发送去注册消息、
+不修改网侧身份；状态1调用同样不发 HTTP 并幂等成功。状态3调用 `updateCapabilities()` 时直接请求
 `POST /arf/v1/agent-cards-update`，成功后身份不变并保持状态3。状态3再次调用
 `registerCapabilities()` 表示替换整张 Card：SDK 在本地校验后先注销旧身份、重新申请，
 再发布新的完整 Card；成功后从 `sdk.localProfile` 读取可能变化的 `agentId`。
@@ -290,6 +291,19 @@ sdk.initialize(
 SDK 的 A2A TCP/UDP 服务仅绑定 Agent TUN IP，不监听自动选择的物理源地址。
 自动选择结果可从 `SdkInitResult.masqueOuterSourceIp` 读取。只有需要固定特定
 网卡出口的多网卡测试才显式传入 `localVlanIp = "..."`。
+
+应用需要把 Agent 控制回“未申请数字身份”的状态1时调用：
+
+```kotlin
+val result = sdk.resetAgent()
+check(result.success)
+check(sdk.agentLifecycleState == AgentLifecycleState.NO_IDENTITY)
+```
+
+Generic 与 RayNeo 示例 App 的运行页均提供“重置到状态1”。为防止触控或镜腿误触，
+Reset 需要连续确认两次；执行期间会等待当前 SDK 调用明确结束，再清除本地状态，避免
+尚未结束的调用在 Reset 后重新写入身份。成功后停止自动流程并关闭当前链路，不会向
+AgentRuntime 发送去注册请求，也不会自动重新申请身份；本地持久化删除失败时保留原状态。
 
 Core-network downlink frames use `kind + request_id + message_type +
 transaction_id + payload`. Each frame is handled in its own coroutine, so
