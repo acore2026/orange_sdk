@@ -2,6 +2,23 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-01 — 测试能力 VC 生效时间提前一年
+
+### 修改原因
+
+- SDK 根据能力字符串现场签发的测试能力 VC 原来以实际签发时间作为 `valid_from`，联调环境要求该 VC 在签发前一年已经生效。
+- 调用方通过 `credentials` 提供的现有 VC 已包含第三方签名，SDK 不能修改其时间字段。
+
+### 修改方式
+
+- Python 与 Android 测试能力 VC 签发器将 `valid_from` 设置为实际签发时间前一个日历年；遇到 2 月 29 日而目标年份不是闰年时取 2 月 28 日。
+- `proof.created` 仍记录实际签发时间，`valid_until` 仍按实际签发时间加 `validity_days/validityDays` 计算；预签发 `credentials` 继续原样发送。
+- Python Wheel 升级为 `0.16.1`，Generic/RayNeo 示例 App 升级为 `0.2.5`。
+
+### 验证内容
+
+- Python 与 Android 单元测试覆盖普通日期、闰日回退、失效时间不变和修改后 VC 的签名验证。
+
 ## 2026-09-01 — 新增参数less Agent Reset 与 App 状态1控制
 
 ### 修改原因

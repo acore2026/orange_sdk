@@ -62,6 +62,10 @@ Python `reset_agent()` 与 Android `resetAgent()` 提供参数less 状态重置�
 不修改网侧身份；状态1调用幂等成功且同样不发送 HTTP。Generic 与雷鸟示例 App 均提供
 二次确认的“重置到状态1”操作，成功后停止当前自动流程，不会立即重新申请身份。
 
+能力注册通过 `capabilities` 现场生成的测试 VC，其 `valid_from` 固定为实际签发时间前
+一个日历年；`proof.created` 仍是实际签发时间，`valid_until` 仍从实际签发时间计算。
+通过 `credentials` 传入的预签发 VC 保持原样，SDK 不修改其签名字段。
+
 控制面写请求由 SDK 自动生成普通 UUID 格式的 `request_id`。身份申请严格按
 `ACN-H-ID-v1` 编码 owner/name/publicKey/description/timestamp，并将完整紧凑
 `metadata` JSON Container 作为一个 LP16 字段签名；其他控制请求使用 `proof`。

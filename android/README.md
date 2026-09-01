@@ -79,7 +79,10 @@ traffic for this internal deployment.
 or both. Existing VCs remain the production path. With raw capabilities, the
 SDK creates one `AgentCapabilityCredential` per string, stores the value as
 `claims.skill_name`, and signs it with the ACN JsonWebSignature2020 detached
-ES256 JWS profile. The SDK also derives the top-level `service_endpoints` from
+ES256 JWS profile. Its `valid_from` is one calendar year before the actual
+issuance time; `proof.created` remains the issuance time and `valid_until`
+continues to be calculated from that issuance time. Pre-issued VCs supplied via
+`credentials` are never modified. The SDK also derives the top-level `service_endpoints` from
 the Agent TUN IP, local TCP port, and `/A2A/message`; applications do not pass
 an address or URL.
 

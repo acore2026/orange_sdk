@@ -136,6 +136,7 @@ def issue_test_capability_vcs(
     if issued_at.tzinfo is None:
         issued_at = issued_at.replace(tzinfo=timezone.utc)
     issued_at = issued_at.astimezone(timezone.utc).replace(microsecond=0)
+    effective_from = _previous_calendar_year(issued_at)
     expires_at = issued_at + timedelta(days=validity_days)
 
     credentials: list[dict[str, Any]] = []
@@ -145,7 +146,7 @@ def issue_test_capability_vcs(
             "id": f"urn:uuid:{uuid.uuid4()}",
             "type": ["VerifiableCredential", "AgentCapabilityCredential"],
             "issuer": TEST_CAPABILITY_ISSUER_DID,
-            "valid_from": _format_utc(issued_at),
+            "valid_from": _format_utc(effective_from),
             "valid_until": _format_utc(expires_at),
             "claims": {
                 "agent_id": normalized_agent_id,
@@ -199,6 +200,14 @@ def _base64url(value: bytes) -> str:
 
 def _format_utc(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _previous_calendar_year(value: datetime) -> datetime:
+    try:
+        return value.replace(year=value.year - 1)
+    except ValueError:
+        # February 29 becomes February 28 in a non-leap target year.
+        return value.replace(year=value.year - 1, day=28)
 
 
 def _format_utc_millis(value: datetime) -> str:

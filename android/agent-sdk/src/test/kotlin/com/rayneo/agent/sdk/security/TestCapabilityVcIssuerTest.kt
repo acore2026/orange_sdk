@@ -56,15 +56,40 @@ class TestCapabilityVcIssuerTest {
                 credential.getValue("issuer").jsonPrimitive.content,
             )
             assertEquals(
-                "2026-08-20T00:00:00Z",
+                "2025-08-20T00:00:00Z",
                 credential.getValue("valid_from").jsonPrimitive.content,
             )
             assertEquals(
                 "2027-08-20T00:00:00Z",
                 credential.getValue("valid_until").jsonPrimitive.content,
             )
+            assertEquals(
+                "2026-08-20T00:00:00.000Z",
+                credential.getValue("proof").jsonObject
+                    .getValue("created").jsonPrimitive.content,
+            )
             verifyCredential(credential, keyPair.public as ECPublicKey)
         }
+    }
+
+    @Test
+    fun `valid from clamps leap day one calendar year back`() {
+        val credential = issuerWithKey(p256KeyPair()).issue(
+            agentId = "did:example:agent-a",
+            agentName = "Agent Alpha",
+            capabilities = listOf("robot-control"),
+            now = Instant.parse("2028-02-29T12:30:00Z"),
+        ).single()
+
+        assertEquals(
+            "2027-02-28T12:30:00Z",
+            credential.getValue("valid_from").jsonPrimitive.content,
+        )
+        assertEquals(
+            "2028-02-29T12:30:00.000Z",
+            credential.getValue("proof").jsonObject
+                .getValue("created").jsonPrimitive.content,
+        )
     }
 
     @Test

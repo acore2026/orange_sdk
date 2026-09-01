@@ -53,7 +53,7 @@ def test_issue_test_capability_vcs_matches_idm_signature_format(tmp_path):
             "AgentCapabilityCredential",
         ]
         assert credential["issuer"] == TEST_CAPABILITY_ISSUER_DID
-        assert credential["valid_from"] == "2026-08-20T00:00:00Z"
+        assert credential["valid_from"] == "2025-08-20T00:00:00Z"
         assert credential["valid_until"] == "2027-08-20T00:00:00Z"
         assert credential["claims"]["agent_id"] == "did:example:agent-a"
         assert credential["claims"]["agent_name"] == "Agent Alpha"
@@ -62,6 +62,7 @@ def test_issue_test_capability_vcs_matches_idm_signature_format(tmp_path):
             TEST_CAPABILITY_ISSUER_KEY_ID
         )
         assert credential["proof"]["proof_purpose"] == "assertionMethod"
+        assert credential["proof"]["created"] == "2026-08-20T00:00:00.000Z"
         verify_proof(
             credential,
             private_key.public_key(),
@@ -75,6 +76,18 @@ def test_issue_test_capability_vcs_matches_idm_signature_format(tmp_path):
             private_key.public_key(),
             expected_purpose="assertionMethod",
         )
+
+
+def test_issue_test_capability_vcs_clamps_leap_day_one_calendar_year_back():
+    credential = issue_test_capability_vcs(
+        agent_id="did:example:agent-a",
+        agent_name="Agent Alpha",
+        capabilities=["robot-control"],
+        now=datetime(2028, 2, 29, 12, 30, tzinfo=timezone.utc),
+    )[0]
+
+    assert credential["valid_from"] == "2027-02-28T12:30:00Z"
+    assert credential["proof"]["created"] == "2028-02-29T12:30:00.000Z"
 
 
 def test_embedded_third_party_public_and_private_keys_match():

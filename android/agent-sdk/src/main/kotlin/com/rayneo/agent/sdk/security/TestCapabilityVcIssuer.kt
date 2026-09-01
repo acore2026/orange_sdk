@@ -14,8 +14,9 @@ import java.security.Signature
 import java.security.interfaces.ECPrivateKey
 import java.security.spec.PKCS8EncodedKeySpec
 import java.time.Instant
-import java.time.temporal.ChronoUnit
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatterBuilder
+import java.time.temporal.ChronoUnit
 import java.util.Base64
 import java.util.Locale
 import java.util.UUID
@@ -108,6 +109,7 @@ internal class TestCapabilityVcIssuer(
         }
         val privateKey = loadPrivateKey()
         val issuedAt = now.truncatedTo(ChronoUnit.SECONDS)
+        val effectiveFrom = issuedAt.atZone(ZoneOffset.UTC).minusYears(1).toInstant()
         val expiresAt = issuedAt.plus(validityDays, ChronoUnit.DAYS)
 
         return normalizedCapabilities.map { capability ->
@@ -121,7 +123,7 @@ internal class TestCapabilityVcIssuer(
                     add(JsonPrimitive("AgentCapabilityCredential"))
                 })
                 put("issuer", TEST_CAPABILITY_ISSUER_DID)
-                put("valid_from", issuedAt.toString())
+                put("valid_from", effectiveFrom.toString())
                 put("valid_until", expiresAt.toString())
                 put("claims", buildJsonObject {
                     put("agent_id", normalizedAgentId)
