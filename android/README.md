@@ -173,9 +173,11 @@ adb install -r example-app/build/outputs/apk/generic/debug/example-app-generic-d
 
 `rayneo` 构建面向眼镜端低操作场景，固定为发起方 A，并预置服务器
 `101.245.78.174`、Runtime HTTP `8088`、MASQUE QUIC/UDP `8443` 和
-`/.well-known/masque/ip`。页面不显示角色切换、服务器表单或消息输入框；应用启动后
-自动执行连接和 Agent A 全流程，首次运行只需在系统弹窗中确认 VPN 授权。MASQUE
-外层本机地址仍由 Android 路由自动选择。
+`/.well-known/masque/ip`。页面不显示角色切换、服务器表单或消息输入框；应用先进入
+可操作的双目页面，用户单击“启用 Agent 网络”后才开始连接和 Agent A 全流程。首次
+运行会进入 Android 系统“网络连接请求”，确认一次后系统会保留本 App 的 VPN/TUN
+授权。MASQUE 外层本机地址仍由 Android 路由自动选择；密钥初始化、HTTP、TUN 和
+同步 JNI CONNECT-IP 握手均在后台线程执行，不阻塞眼镜 UI。
 
 雷鸟 X 系列把左右两块物理屏组合成一块逻辑屏，普通单份 Android UI 会被左右眼各
 显示一半。专用包按[雷鸟官方 Android 开发手册](https://rayneo.gitbook.io/rayneo-devdoc/x-xi-lie/android-kai-fa)
@@ -196,6 +198,23 @@ adb install -r example-app/build/outputs/apk/rayneo/debug/example-app-rayneo-deb
 ```
 
 专用包应用 ID 为 `com.rayneo.agent.example.rayneo`，可与通用 A/B 联调包并存。
+真实用户首次使用时应在眼镜中主动单击“启用 Agent 网络”并确认系统 VPN 授权，正式
+部署不能依赖 ADB 绕过 Android 的首次同意。内部联调或受管设备可使用 Windows 脚本
+一次完成安装、可选 VPN 预授权和启动：
+
+```powershell
+# 正常用户授权流程：启动后在眼镜中单击并确认系统请求
+powershell -ExecutionPolicy Bypass -File .\install-rayneo-windows.ps1
+
+# 仅内部联调/受管设备：ADB 预授权，启动后单击即直接连接
+powershell -ExecutionPolicy Bypass -File .\install-rayneo-windows.ps1 -PreAuthorizeVpn
+```
+
+脚本默认使用 `C:\Android\platform-tools\adb.exe` 和本仓库构建出的 RayNeo Debug APK；
+其他位置可通过 `-AdbPath`、`-ApkPath` 指定。VPN 授权通常在关闭 App、设备重启和
+同包名 `install -r` 更新后继续保留；卸载、清除数据、用户撤销授权或授权另一 VPN
+应用后，需要再次确认。
+
 如服务器临时要求 MASQUE Token，可通过 ADB 启动参数传入；其他部署参数在该专用包中
 保持锁定：
 

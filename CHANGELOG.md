@@ -2,6 +2,26 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-01 — 修复雷鸟 App 首次授权与主线程假死
+
+### 修改原因
+
+- 雷鸟专用 App 在 Launcher 创建后立即拉起 Android 系统 VPN 授权页；该系统页会覆盖眼镜 App 和 Launcher，在用户尚未准备操作时表现为整机被弹窗锁住。
+- VPN 授权后，`AgentSdk.initialize` 又从 Activity 主线程进入同步 JNI CONNECT-IP 握手；MASQUE 服务不可达或协商较慢时最多占用主线程 10 秒，使双目 UI 和镜腿事件无响应。
+- 旧雷鸟 App 的联调流程会在启动前预授予测试权限，并把业务生命周期与 UI 事件分离；当前专用 App 需要采用相同的前台安全原则，但正式使用仍必须保留 Android 首次 VPN 用户同意。
+
+### 修改方式
+
+- 雷鸟入口不再在 `onCreate` 自动连接；先展示可操作页面，用户单击“启用 Agent 网络”后才调用 `VpnService.prepare`，并使用 Activity Result API 处理同意、拒绝和返回。
+- 将 `AgentSdk.create`、密钥初始化、TUN/MASQUE 和 Agent A 全流程放入 `Dispatchers.IO`；SDK 的 Native MASQUE Transport 自身也把 JNI 启动、换 TUN 和关闭放入 IO 调度器，并在连接完成与协程取消竞态下回收刚创建的 Native handle。移除 Activity `onDestroy` 的主线程 `runBlocking`，改由独立清理作用域等待连接任务并释放 SDK。
+- 新增 Windows 安装脚本，默认走真实用户首次授权；`-PreAuthorizeVpn` 仅供内部联调或受管设备使用，通过 ADB 设置 `ACTIVATE_VPN` 后再启动。Android 手册说明授权保留与重新授权边界。
+- 雷鸟 App 版本升级为 `0.2.3`；增加源码接线测试，防止恢复自动弹窗、主线程 CONNECT-IP 或阻塞式销毁。
+
+### 验证内容
+
+- Android 单元测试验证雷鸟入口必须由用户显式触发、使用 Activity Result 回调、连接和 Native MASQUE 生命周期运行在 IO 调度器、取消竞态会回收 Native handle、销毁路径不含 `runBlocking`，且 ADB VPN 预授权保持为脚本可选项。
+- 执行 RayNeo/Generic 单元测试、Lint 与 RayNeo Debug APK 构建，确认四 ABI Native Core、Mercury AAR 和专用 Manifest 正常打包。
+
 ## 2026-09-01 — 新增雷鸟 X3 Pro 发起方一键联调构建
 
 ### 修改原因

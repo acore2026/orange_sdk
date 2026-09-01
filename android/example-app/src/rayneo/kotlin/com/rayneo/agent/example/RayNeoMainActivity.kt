@@ -8,6 +8,7 @@ import android.net.VpnService
 import android.os.Bundle
 import android.os.IBinder
 import android.view.View
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -21,10 +22,13 @@ import com.rayneo.agent.example.databinding.ActivityRayneoMainBinding
 import com.rayneo.agent.sdk.AgentSdk
 import com.rayneo.agent.sdk.vpn.AgentVpnService
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -44,9 +48,13 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         )
     }
     private val logLines = ArrayDeque<String>()
+    private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    @Volatile
     private var vpnService: AgentVpnService? = null
+    @Volatile
     private var sdk: AgentSdk? = null
+    @Volatile
     private var runner: AgentTestRunner? = null
     private var runnerJob: Job? = null
     private var serviceBound = false
@@ -55,6 +63,19 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     private var primaryMode = PrimaryMode.BUSY
     private var sendSequence = 0
     private var focusTracker: FixPosFocusTracker? = null
+
+    private val vpnPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == RESULT_OK) {
+                appendLog(LabLogLevel.SUCCESS, "VPN", "系统 VPN 权限已授予")
+                startSdkFlow()
+            } else {
+                flowStarted = false
+                appendLog(LabLogLevel.ERROR, "VPN", "VPN 权限被拒绝或授权页已关闭")
+                setStatus("需要 VPN 权限", "单击“启用 Agent 网络”后，在系统页面确认网络连接请求")
+                setPrimaryAction(PrimaryMode.RETRY, "启用 Agent 网络")
+            }
+        }
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -81,9 +102,16 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             "固定角色=A，Runtime=${config.serverIp}:${config.runtimePort}，MASQUE/UDP=${config.masquePort}",
         )
 
-        // The glasses build has no configuration page. Launch the fixed Agent-A flow immediately;
-        // the user only needs to approve the Android VPN dialog on first use.
-        mBindingPair.left.root.post(::beginConnection)
+        // Do not open Android's system VPN activity during launcher creation. On glasses, a
+        // system activity can cover both the app and launcher while waiting for input. The first
+        // connection is therefore an explicit temple click; subsequent launches continue without
+        // a dialog after Android has retained the user's consent.
+        setStatus(
+            "Agent 网络尚未启用",
+            "单击“启用 Agent 网络”；首次使用需确认系统网络连接请求",
+        )
+        setPrimaryAction(PrimaryMode.RETRY, "启用 Agent 网络")
+        appendLog(LabLogLevel.INFO, "APP", "等待用户显式启用 Agent 网络")
     }
 
     private fun renderDeployment() {
@@ -178,23 +206,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         if (permissionIntent == null) {
             startSdkFlow()
         } else {
-            appendLog(LabLogLevel.INFO, "VPN", "等待系统 VPN 授权")
-            startActivityForResult(permissionIntent, VPN_PERMISSION_REQUEST)
-        }
-    }
-
-    @Deprecated("Uses the Android VPN permission callback")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != VPN_PERMISSION_REQUEST) return
-        if (resultCode == RESULT_OK) {
-            appendLog(LabLogLevel.SUCCESS, "VPN", "系统 VPN 权限已授予")
-            startSdkFlow()
-        } else {
-            flowStarted = false
-            appendLog(LabLogLevel.ERROR, "VPN", "VPN 权限被拒绝")
-            setStatus("需要 VPN 权限", "单击“重新授权”再次打开系统授权页")
-            setPrimaryAction(PrimaryMode.RETRY, "重新授权")
+            appendLog(LabLogLevel.INFO, "VPN", "用户已触发；等待系统 VPN 授权")
+            vpnPermissionLauncher.launch(permissionIntent)
         }
     }
 
@@ -206,18 +219,22 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             setPrimaryAction(PrimaryMode.RETRY, "重新连接")
             return
         }
-        val sdkValue = AgentSdk.create(service)
-        val flow = AgentTestRunner(
-            sdk = sdkValue,
-            config = config,
-            onLog = ::appendLog,
-            onStatus = ::setRunnerStatus,
-            onManualMessageSession = ::setManualMessageSession,
-        )
-        sdk = sdkValue
-        runner = flow
-        runnerJob = lifecycleScope.launch {
+        // AgentSdk.create may touch the Android keystore and initialize the native library;
+        // initialize then performs a synchronous JNI CONNECT-IP handshake. Keep the complete
+        // sequence off the main thread so a slow or unreachable MASQUE endpoint cannot freeze
+        // the glasses UI.
+        runnerJob = lifecycleScope.launch(Dispatchers.IO) {
             try {
+                val sdkValue = AgentSdk.create(service)
+                val flow = AgentTestRunner(
+                    sdk = sdkValue,
+                    config = config,
+                    onLog = ::appendLog,
+                    onStatus = ::setRunnerStatus,
+                    onManualMessageSession = ::setManualMessageSession,
+                )
+                sdk = sdkValue
+                runner = flow
                 flow.run()
             } catch (_: CancellationException) {
                 appendLog(LabLogLevel.INFO, "APP", "Agent A 流程已停止")
@@ -225,8 +242,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 flowStarted = false
                 val detail = error.message ?: error::class.java.simpleName
                 appendLog(LabLogLevel.ERROR, "APP", "流程异常：$detail；SDK 未自动关闭")
-                setStatus("流程异常", detail)
-                setPrimaryAction(PrimaryMode.RETRY, "重试流程")
+                setRunnerStatus(RunnerStatus("流程异常", detail, canRetry = true))
             }
         }
     }
@@ -333,8 +349,9 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private suspend fun closeResources() {
-        runnerJob?.cancel()
+        val activeJob = runnerJob
         runnerJob = null
+        activeJob?.cancelAndJoin()
         runner?.close()
         runner = null
         messageSession = null
@@ -349,9 +366,18 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     override fun onDestroy() {
-        runnerJob?.cancel()
+        val activeJob = runnerJob
+        val activeSdk = sdk
+        runnerJob = null
+        sdk = null
+        activeJob?.cancel()
         runner?.close()
-        runBlocking(Dispatchers.IO) { runCatching { sdk?.close() } }
+        runner = null
+        cleanupScope.launch {
+            activeJob?.cancelAndJoin()
+            runCatching { activeSdk?.close() }
+            cleanupScope.cancel()
+        }
         if (serviceBound) runCatching { unbindService(connection) }
         super.onDestroy()
     }
@@ -359,7 +385,6 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     private enum class PrimaryMode { BUSY, RETRY, SEND }
 
     private companion object {
-        const val VPN_PERMISSION_REQUEST = 1201
         const val MAX_VISIBLE_LOG_LINES = 7
     }
 }
