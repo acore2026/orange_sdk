@@ -51,3 +51,27 @@ data class TestConfig(
     private fun normalizedMasquePath(): String =
         masquePath.trim().let { if (it.startsWith('/')) it else "/$it" }
 }
+
+object RayNeoX3ProDeployment {
+    const val SERVER_IP = "101.245.78.174"
+    const val RUNTIME_PORT = 8088
+    const val MASQUE_PORT = 8443
+    const val MASQUE_PATH = "/.well-known/masque/ip"
+
+    fun agentAConfig(masqueToken: String? = null): TestConfig = TestConfig(
+        role = TestRole.A,
+        serverIp = SERVER_IP,
+        runtimePort = RUNTIME_PORT,
+        masquePort = MASQUE_PORT,
+        masquePath = MASQUE_PATH,
+        localTcpPort = 4001,
+        localUdpPort = 28443,
+        masqueToken = masqueToken?.takeIf(String::isNotBlank),
+        owner = "rayneo-x3-pro-owner-a",
+        agentName = "RayNeo-X3-Pro-A",
+        capability = "text",
+        dnn = "internet",
+        groupName = "rayneo-x3-pro-ab-group",
+        message = "hello Agent B from RayNeo X3 Pro",
+    )
+}

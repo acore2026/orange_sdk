@@ -11,8 +11,26 @@ android {
         applicationId = "com.rayneo.agent.example"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 4
+        versionName = "0.2.2"
+    }
+
+    flavorDimensions += "deployment"
+    productFlavors {
+        create("generic") {
+            dimension = "deployment"
+            resValue("string", "app_name", "Agent Link Lab")
+        }
+        create("rayneo") {
+            dimension = "deployment"
+            applicationIdSuffix = ".rayneo"
+            versionNameSuffix = "-rayneo"
+            resValue("string", "app_name", "雷鸟 Agent A")
+        }
+    }
+
+    buildFeatures {
+        viewBinding = true
     }
 
     compileOptions {
@@ -25,5 +43,9 @@ android {
 dependencies {
     implementation(project(":agent-sdk"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    "rayneoImplementation"(files("libs/MercuryAndroidSDK-v0.2.6.aar"))
+    "rayneoImplementation"("androidx.appcompat:appcompat:1.7.0")
+    "rayneoImplementation"("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
+    "rayneoImplementation"("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.4")
     testImplementation("junit:junit:4.13.2")
 }

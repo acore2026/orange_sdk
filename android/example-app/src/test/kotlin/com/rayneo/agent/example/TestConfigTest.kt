@@ -16,6 +16,21 @@ class TestConfigTest {
     }
 
     @Test
+    fun rayNeoX3ProDeploymentIsFixedAsAgentA() {
+        val config = RayNeoX3ProDeployment.agentAConfig()
+
+        assertEquals(TestRole.A, config.role)
+        assertEquals("101.245.78.174", config.serverIp)
+        assertEquals(8088, config.runtimePort)
+        assertEquals(8443, config.masquePort)
+        assertEquals(
+            "https://101.245.78.174:8443/.well-known/masque/ip",
+            config.masqueServerUrl,
+        )
+        assertTrue(config.validate().isEmpty())
+    }
+
+    @Test
     fun masqueUrlIsComposedFromUserSuppliedFields() {
         val config = validConfig(masquePath = "custom/connect-ip")
 

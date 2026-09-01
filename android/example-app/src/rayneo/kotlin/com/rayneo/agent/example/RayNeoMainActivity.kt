@@ -1,0 +1,365 @@
+package com.rayneo.agent.example
+
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.net.VpnService
+import android.os.Bundle
+import android.os.IBinder
+import android.view.View
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import com.ffalcon.mercury.android.sdk.focus.reqFocus
+import com.ffalcon.mercury.android.sdk.touch.TempleAction
+import com.ffalcon.mercury.android.sdk.ui.activity.BaseMirrorActivity
+import com.ffalcon.mercury.android.sdk.ui.util.FixPosFocusTracker
+import com.ffalcon.mercury.android.sdk.ui.util.FocusHolder
+import com.ffalcon.mercury.android.sdk.ui.util.FocusInfo
+import com.rayneo.agent.example.databinding.ActivityRayneoMainBinding
+import com.rayneo.agent.sdk.AgentSdk
+import com.rayneo.agent.sdk.vpn.AgentVpnService
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+/**
+ * RayNeo X3 Pro launcher for the fixed Agent-A deployment.
+ *
+ * BaseMirrorActivity inflates [ActivityRayneoMainBinding] twice and places both copies on the
+ * logical display. Every visual mutation is therefore applied with mBindingPair.updateView.
+ * Business callbacks and touch handlers are bound only once to the left copy.
+ */
+class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
+    private val config by lazy {
+        RayNeoX3ProDeployment.agentAConfig(
+            masqueToken = intent.getStringExtra("masque_token"),
+        )
+    }
+    private val logLines = ArrayDeque<String>()
+
+    private var vpnService: AgentVpnService? = null
+    private var sdk: AgentSdk? = null
+    private var runner: AgentTestRunner? = null
+    private var runnerJob: Job? = null
+    private var serviceBound = false
+    private var flowStarted = false
+    private var messageSession: ManualMessageSession? = null
+    private var primaryMode = PrimaryMode.BUSY
+    private var sendSequence = 0
+    private var focusTracker: FixPosFocusTracker? = null
+
+    private val connection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            vpnService = (binder as AgentVpnService.LocalBinder).service
+            appendLog(LabLogLevel.SUCCESS, "VPN", "AgentVpnService 已绑定")
+            requestVpnOrStart()
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            vpnService = null
+            appendLog(LabLogLevel.WARNING, "VPN", "AgentVpnService 连接断开")
+            setStatus("VPN 服务已断开", "单击“重新连接”恢复端侧链路")
+            setPrimaryAction(PrimaryMode.RETRY, "重新连接")
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        renderDeployment()
+        installFocusAndTempleActions()
+        appendLog(
+            LabLogLevel.INFO,
+            "BOOT",
+            "固定角色=A，Runtime=${config.serverIp}:${config.runtimePort}，MASQUE/UDP=${config.masquePort}",
+        )
+
+        // The glasses build has no configuration page. Launch the fixed Agent-A flow immediately;
+        // the user only needs to approve the Android VPN dialog on first use.
+        mBindingPair.left.root.post(::beginConnection)
+    }
+
+    private fun renderDeployment() {
+        mBindingPair.updateView {
+            deploymentLabel.text = "RAYNEO X3 PRO  ·  AGENT A"
+            statusTitle.text = "正在准备端侧链路"
+            statusDetail.text =
+                "Runtime ${config.serverIp}:${config.runtimePort}  ·  MASQUE/UDP ${config.masquePort}"
+            primaryAction.text = "自动启动中…"
+        }
+    }
+
+    private fun installFocusAndTempleActions() {
+        val focusHolder = FocusHolder(true)
+        mBindingPair.setLeft {
+            primaryAction.setOnClickListener { handlePrimaryAction() }
+            stopAction.setOnClickListener { stopAndFinish() }
+            focusHolder.addFocusTarget(
+                FocusInfo(
+                    primaryAction,
+                    eventHandler = { action ->
+                        if (action is TempleAction.Click) handlePrimaryAction()
+                    },
+                    focusChangeHandler = { focused -> updateFocus(primary = true, focused) },
+                ),
+                FocusInfo(
+                    stopAction,
+                    eventHandler = { action ->
+                        if (action is TempleAction.Click) stopAndFinish()
+                    },
+                    focusChangeHandler = { focused -> updateFocus(primary = false, focused) },
+                ),
+            )
+            focusHolder.currentFocus(primaryAction)
+        }
+        focusTracker = FixPosFocusTracker(focusHolder).apply {
+            focusObj.reqFocus()
+        }
+
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                templeActionViewModel.state.collect { action ->
+                    if (action is TempleAction.DoubleClick) {
+                        stopAndFinish()
+                    } else {
+                        focusTracker?.handleFocusTargetEvent(action)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun updateFocus(primary: Boolean, focused: Boolean) {
+        mBindingPair.updateView {
+            val target = if (primary) primaryAction else stopAction
+            target.setBackgroundResource(
+                when {
+                    focused -> R.drawable.rayneo_action_focused
+                    primary -> R.drawable.rayneo_action_primary
+                    else -> R.drawable.rayneo_action_secondary
+                },
+            )
+        }
+    }
+
+    private fun beginConnection() {
+        if (flowStarted || runnerJob?.isActive == true) return
+        flowStarted = true
+        setPrimaryAction(PrimaryMode.BUSY, "连接中…")
+        setStatus("正在连接 AgentRuntime", "随后自动建立 TUN、MASQUE、身份、发现与建组流程")
+        appendLog(LabLogLevel.INFO, "APP", "自动流程启动；准备申请 Android VPN 权限")
+
+        if (serviceBound) {
+            requestVpnOrStart()
+            return
+        }
+        serviceBound = bindService(
+            Intent(this, AgentVpnService::class.java),
+            connection,
+            Context.BIND_AUTO_CREATE,
+        )
+        if (!serviceBound) {
+            flowStarted = false
+            appendLog(LabLogLevel.ERROR, "VPN", "无法绑定 AgentVpnService")
+            setStatus("VPN 服务启动失败", "单击“重新连接”重试")
+            setPrimaryAction(PrimaryMode.RETRY, "重新连接")
+        }
+    }
+
+    private fun requestVpnOrStart() {
+        val permissionIntent = VpnService.prepare(this)
+        if (permissionIntent == null) {
+            startSdkFlow()
+        } else {
+            appendLog(LabLogLevel.INFO, "VPN", "等待系统 VPN 授权")
+            startActivityForResult(permissionIntent, VPN_PERMISSION_REQUEST)
+        }
+    }
+
+    @Deprecated("Uses the Android VPN permission callback")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != VPN_PERMISSION_REQUEST) return
+        if (resultCode == RESULT_OK) {
+            appendLog(LabLogLevel.SUCCESS, "VPN", "系统 VPN 权限已授予")
+            startSdkFlow()
+        } else {
+            flowStarted = false
+            appendLog(LabLogLevel.ERROR, "VPN", "VPN 权限被拒绝")
+            setStatus("需要 VPN 权限", "单击“重新授权”再次打开系统授权页")
+            setPrimaryAction(PrimaryMode.RETRY, "重新授权")
+        }
+    }
+
+    private fun startSdkFlow() {
+        if (runnerJob?.isActive == true) return
+        val service = vpnService ?: run {
+            flowStarted = false
+            setStatus("VPN 服务尚未连接", "单击“重新连接”重试")
+            setPrimaryAction(PrimaryMode.RETRY, "重新连接")
+            return
+        }
+        val sdkValue = AgentSdk.create(service)
+        val flow = AgentTestRunner(
+            sdk = sdkValue,
+            config = config,
+            onLog = ::appendLog,
+            onStatus = ::setRunnerStatus,
+            onManualMessageSession = ::setManualMessageSession,
+        )
+        sdk = sdkValue
+        runner = flow
+        runnerJob = lifecycleScope.launch {
+            try {
+                flow.run()
+            } catch (_: CancellationException) {
+                appendLog(LabLogLevel.INFO, "APP", "Agent A 流程已停止")
+            } catch (error: Exception) {
+                flowStarted = false
+                val detail = error.message ?: error::class.java.simpleName
+                appendLog(LabLogLevel.ERROR, "APP", "流程异常：$detail；SDK 未自动关闭")
+                setStatus("流程异常", detail)
+                setPrimaryAction(PrimaryMode.RETRY, "重试流程")
+            }
+        }
+    }
+
+    private fun setRunnerStatus(status: RunnerStatus) {
+        runOnUiThread {
+            setStatus(status.title, status.detail)
+            when {
+                messageSession != null -> setPrimaryAction(PrimaryMode.SEND, "发送测试消息")
+                status.canRetry -> setPrimaryAction(PrimaryMode.RETRY, "重试当前步骤")
+                else -> setPrimaryAction(PrimaryMode.BUSY, "流程执行中…")
+            }
+        }
+    }
+
+    private fun setManualMessageSession(session: ManualMessageSession?) {
+        runOnUiThread {
+            messageSession = session
+            if (session == null) {
+                if (primaryMode == PrimaryMode.SEND) {
+                    setPrimaryAction(PrimaryMode.BUSY, "等待群组配置…")
+                }
+            } else {
+                setStatus("群组已就绪 · 可发送", "目标 ${session.targetAgentName} · 单击发送预置测试消息")
+                setPrimaryAction(PrimaryMode.SEND, "发送测试消息")
+            }
+        }
+    }
+
+    private fun handlePrimaryAction() {
+        when (primaryMode) {
+            PrimaryMode.BUSY -> Unit
+            PrimaryMode.RETRY -> {
+                if (runner != null) {
+                    setPrimaryAction(PrimaryMode.BUSY, "重试中…")
+                    runner?.retryCurrentStep()
+                } else {
+                    flowStarted = false
+                    beginConnection()
+                }
+            }
+            PrimaryMode.SEND -> sendTestMessage()
+        }
+    }
+
+    private fun sendTestMessage() {
+        val activeRunner = runner ?: return
+        val session = messageSession ?: return
+        if (primaryMode == PrimaryMode.BUSY) return
+        sendSequence += 1
+        val content = "${config.message} #$sendSequence"
+        setPrimaryAction(PrimaryMode.BUSY, "发送中…")
+        lifecycleScope.launch {
+            try {
+                val receipt = activeRunner.sendManualMessage(content)
+                setStatus("消息发送成功", "→ ${session.targetAgentName} · ${receipt.messageId.take(8)}")
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                setStatus("消息发送失败", "${error.message ?: error::class.java.simpleName}；可再次发送")
+            } finally {
+                if (messageSession != null) {
+                    setPrimaryAction(PrimaryMode.SEND, "再次发送测试消息")
+                }
+            }
+        }
+    }
+
+    private fun setStatus(title: String, detail: String) {
+        mBindingPair.updateView {
+            statusTitle.text = title
+            statusDetail.text = detail
+        }
+    }
+
+    private fun setPrimaryAction(mode: PrimaryMode, label: String) {
+        primaryMode = mode
+        mBindingPair.updateView {
+            primaryAction.text = label
+            primaryAction.alpha = if (mode == PrimaryMode.BUSY) 0.55f else 1f
+        }
+    }
+
+    private fun appendLog(level: LabLogLevel, stage: String, message: String) {
+        runOnUiThread {
+            val time = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+            logLines.addLast("$time  ${level.name.first()}  $stage  $message")
+            while (logLines.size > MAX_VISIBLE_LOG_LINES) logLines.removeFirst()
+            val rendered = logLines.joinToString("\n")
+            mBindingPair.updateView {
+                logOutput.text = rendered
+                logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
+            }
+        }
+    }
+
+    private fun stopAndFinish() {
+        if (isFinishing) return
+        setPrimaryAction(PrimaryMode.BUSY, "正在关闭…")
+        lifecycleScope.launch {
+            closeResources()
+            finish()
+        }
+    }
+
+    private suspend fun closeResources() {
+        runnerJob?.cancel()
+        runnerJob = null
+        runner?.close()
+        runner = null
+        messageSession = null
+        withContext(Dispatchers.IO) { runCatching { sdk?.close() } }
+        sdk = null
+        if (serviceBound) {
+            runCatching { unbindService(connection) }
+            serviceBound = false
+            vpnService = null
+        }
+        flowStarted = false
+    }
+
+    override fun onDestroy() {
+        runnerJob?.cancel()
+        runner?.close()
+        runBlocking(Dispatchers.IO) { runCatching { sdk?.close() } }
+        if (serviceBound) runCatching { unbindService(connection) }
+        super.onDestroy()
+    }
+
+    private enum class PrimaryMode { BUSY, RETRY, SEND }
+
+    private companion object {
+        const val VPN_PERMISSION_REQUEST = 1201
+        const val MAX_VISIBLE_LOG_LINES = 7
+    }
+}

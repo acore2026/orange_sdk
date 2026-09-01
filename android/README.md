@@ -165,8 +165,43 @@ Android 应用：
 
 ```bash
 cd android
-ANDROID_HOME=/opt/android-sdk ./gradlew :example-app:assembleDebug
-adb install -r example-app/build/outputs/apk/debug/example-app-debug.apk
+ANDROID_HOME=/opt/android-sdk ./gradlew :example-app:assembleGenericDebug
+adb install -r example-app/build/outputs/apk/generic/debug/example-app-generic-debug.apk
+```
+
+### 雷鸟 X3 Pro 发起方专用包
+
+`rayneo` 构建面向眼镜端低操作场景，固定为发起方 A，并预置服务器
+`101.245.78.174`、Runtime HTTP `8088`、MASQUE QUIC/UDP `8443` 和
+`/.well-known/masque/ip`。页面不显示角色切换、服务器表单或消息输入框；应用启动后
+自动执行连接和 Agent A 全流程，首次运行只需在系统弹窗中确认 VPN 授权。MASQUE
+外层本机地址仍由 Android 路由自动选择。
+
+雷鸟 X 系列把左右两块物理屏组合成一块逻辑屏，普通单份 Android UI 会被左右眼各
+显示一半。专用包按[雷鸟官方 Android 开发手册](https://rayneo.gitbook.io/rayneo-devdoc/x-xi-lie/android-kai-fa)
+接入 Mercury ARDK v0.2.6：`RayNeoApplication` 初始化 `MercurySDK`，入口继承
+`BaseMirrorActivity`，同一 ViewBinding 自动生成左右两份并同步更新。Manifest 带有
+`com.rayneo.mercury.app=true`，因此应用可以出现在眼镜 Launcher。官方 AAR 已放入
+`example-app/libs`，SHA-256 为
+`5d408e2c5d80e8ae746c42abbda50012b50617005adfeb397661bec9c9be2676`。
+
+眼镜操作遵循系统约定：前后滑或上下滑切换“主要操作/停止”焦点，单击确认，双击停止
+并退出。建组和群组配置完成后，主要操作自动变成“发送测试消息”；每次单击向 Agent B
+发送一条带序号的预置消息，不需要在眼镜上调用软键盘。
+
+```bash
+cd android
+ANDROID_HOME=/opt/android-sdk ./gradlew :example-app:assembleRayneoDebug
+adb install -r example-app/build/outputs/apk/rayneo/debug/example-app-rayneo-debug.apk
+```
+
+专用包应用 ID 为 `com.rayneo.agent.example.rayneo`，可与通用 A/B 联调包并存。
+如服务器临时要求 MASQUE Token，可通过 ADB 启动参数传入；其他部署参数在该专用包中
+保持锁定：
+
+```bash
+adb shell am start -n com.rayneo.agent.example.rayneo/.RayNeoMainActivity \
+  --es masque_token '<TOKEN>'
 ```
 
 安装后可以直接在第 1 页填写参数，也可用 intent extras 预填。角色 A 示例：

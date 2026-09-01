@@ -2,6 +2,27 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-01 — 新增雷鸟 X3 Pro 发起方一键联调构建
+
+### 修改原因
+
+- 雷鸟 X3 Pro 眼镜端输入、滚动和精细点击不便，原通用 A/B App 的角色选择和长配置表单不适合现场佩戴联调。
+- 本次部署已确定眼镜固定作为发起方 A，服务器地址为 `101.245.78.174`，AgentRuntime 和 MASQUE 端口分别为 `8088` 与 `8443/UDP`，没有必要每次手工填写。
+- 雷鸟官方文档明确 X 系列使用左右两块物理屏和一块横向逻辑屏，普通单份 Android UI 会在左右眼显示不同半屏；仅简化普通 Activity 不能在真机上正确合目，也不能完整支持镜腿焦点交互。
+
+### 修改方式
+
+- Android example-app 新增 `rayneo` 产品构建，与原 `generic` A/B 构建隔离；专用包应用 ID 为 `com.rayneo.agent.example.rayneo`，可与通用包并存。
+- 雷鸟构建固定角色 A 和上述服务器端点，保留 CONNECT-IP 标准路径、A2A 4001/28443、DNN `internet` 等既有联调默认值；应用启动即自动连接，首次使用只需确认系统 VPN 授权。
+- 按官方 X 系列接入说明打包 Mercury ARDK v0.2.6：新增 `RayNeoApplication` 初始化 `MercurySDK`，Manifest 增加 `com.rayneo.mercury.app=true`，雷鸟入口继承 `BaseMirrorActivity`，通过 ViewBinding 同时生成并更新左右眼布局。
+- 雷鸟入口启动后自动执行 Agent A 流程；镜腿前后/上下滑切换两个焦点、单击重试或在群组就绪后发送带序号的预置消息、双击停止退出。页面使用至少 16sp 字号、30dp/20dp 安全边距和高对比焦点框，无需眼镜软键盘。
+- 通用 A/B 构建不改变行为；Android 手册新增雷鸟专用包的构建、安装及可选 Token 启动命令，example-app 版本升级为 `0.2.2`。
+
+### 验证内容
+
+- 单元测试校验雷鸟配置固定为角色 A、`101.245.78.174:8088` 和 MASQUE `8443`，并验证完整 URL。
+- 执行通用/雷鸟两个构建的单元测试和 Lint，验证 ARDK/ViewBinding 源码编译与双 flavor Manifest 合并；生成同时包含 ARM64、ARMv7、x86 与 x86_64 Native Core 的雷鸟 Debug APK。
+
 ## 2026-08-31 — 校正状态3的能力更新与整卡重发语义
 
 ### 修改原因
