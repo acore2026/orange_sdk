@@ -158,6 +158,10 @@ async def test_linux_agent_full_flow_executes_every_business_api():
         sdk.create_offloading_session.await_args.kwargs["workload_type"]
         == "video_rendering"
     )
+    assert sdk.create_offloading_session.await_args.kwargs["group_id"] == "g1"
+    assert sdk.start_video_upload.await_args.kwargs["target_agent_ids"] == [
+        target.agent_id
+    ]
     for method_name in (
         "init",
         "apply_identity",
@@ -170,14 +174,12 @@ async def test_linux_agent_full_flow_executes_every_business_api():
         "send_message",
         "create_offloading_session",
         "start_video_upload",
-        "get_processed_video_stream",
         "deregister_identity",
     ):
         getattr(sdk, method_name).assert_awaited()
     upload.pause.assert_awaited_once()
     upload.resume.assert_awaited_once()
     upload.stop.assert_awaited_once()
-    stream.recv.assert_awaited_once()
     assert [name for name, _ in steps] == [
         "sdk.init",
         "sdk.apply_identity",
@@ -193,8 +195,6 @@ async def test_linux_agent_full_flow_executes_every_business_api():
         "sdk.start_video_upload",
         "upload.pause",
         "upload.resume",
-        "sdk.get_processed_video_stream",
-        "stream.recv",
         "upload.stop",
         "sdk.deregister_identity",
     ]

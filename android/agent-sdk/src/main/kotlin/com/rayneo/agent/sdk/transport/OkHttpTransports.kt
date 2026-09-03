@@ -227,6 +227,7 @@ class OkHttpRuntimeTransport(
         handler: suspend (String, Int, JsonObject) -> NetworkMessageAction,
     ) {
         var requestId: String? = null
+        var groupId: String? = null
         val action = try {
             val message = json.parseToJsonElement(text) as? JsonObject
                 ?: throw IllegalArgumentException("WebSocket message must be a JSON object")
@@ -243,6 +244,8 @@ class OkHttpRuntimeTransport(
                 ?: throw IllegalArgumentException("transaction_id must be an integer")
             val payload = message["payload"] as? JsonObject
                 ?: throw IllegalArgumentException("payload must be a JSON object")
+            groupId = payload["group_id"]?.jsonPrimitive?.contentOrNull
+                ?.takeIf { it.isNotEmpty() }
             handler(messageType, transactionId, payload)
         } catch (error: Exception) {
             Log.e(TAG, "Runtime downlink WebSocket request rejected", error)
@@ -252,7 +255,10 @@ class OkHttpRuntimeTransport(
         val response = buildJsonObject {
             put("kind", "response")
             put("request_id", correlatedRequestId)
-            put("payload", buildJsonObject { put("result", action.name) })
+            put("payload", buildJsonObject {
+                groupId?.let { put("group_id", it) }
+                put("result", action.name)
+            })
         }
         if (!socket.send(response.toString())) {
             Log.w(TAG, "Runtime downlink WebSocket response queue is closed")

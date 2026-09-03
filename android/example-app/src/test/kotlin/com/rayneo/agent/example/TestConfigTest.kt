@@ -23,6 +23,8 @@ class TestConfigTest {
         assertEquals("101.245.78.174", config.serverIp)
         assertEquals(8088, config.runtimePort)
         assertEquals(8443, config.masquePort)
+        assertEquals("172.30.0.10", config.computeControlIp)
+        assertEquals(28500, config.computeControlPort)
         assertEquals(
             "https://101.245.78.174:8443/.well-known/masque/ip",
             config.masqueServerUrl,

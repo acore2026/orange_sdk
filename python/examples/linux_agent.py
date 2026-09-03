@@ -31,8 +31,21 @@ class NetworkListener:
 
 
 class GroupListener:
+    def __init__(self, sdk=None, processed_stream_timeout: float = 10.0):
+        self.sdk = sdk
+        self.processed_stream_timeout = processed_stream_timeout
+
     async def on_group_message(self, group_id, sender_agent_id, payload):
         print(f"[callback] A2A {group_id=} {sender_agent_id=}: {payload}")
+        if payload.get("type") == "processed_video_invitation" and self.sdk is not None:
+            session = await self.sdk.accept_offloading_session(
+                sender_agent_id, group_id, payload
+            )
+            stream = await self.sdk.get_processed_video_stream(
+                session.session_id,
+                timeout_seconds=self.processed_stream_timeout,
+            )
+            print("[callback] processed video stream:", session.session_id, stream)
 
 
 class ExampleVideoUploadHandle:
@@ -71,10 +84,6 @@ class ExampleRemoteVideoStream(AsyncIterator[Any]):
 
 class ExampleMediaOffloadAdapter:
     """Exercises every media SDK call without claiming to upload camera data."""
-
-    async def connect(self, session, signaling, timeout_seconds) -> None:
-        del signaling, timeout_seconds
-        print(f"[media] example adapter attached to {session.session_id}")
 
     async def start_video_upload(
         self,
@@ -171,7 +180,7 @@ async def run_full_flow(
         metadata={
             "region": args.region,
             "os": "Linux",
-            "version": "0.16.1",
+            "version": "0.17.0",
         },
     )
     print("[2 apply_identity]", profile.agent_id)
@@ -316,6 +325,7 @@ async def run_full_flow(
     session = await sdk.create_offloading_session(
         profile.agent_id,
         workload_type=args.offloading_workload_type,
+        group_id=group.group_id,
         sandbox_id=args.sandbox_id,
         timeout_seconds=args.offloading_timeout,
     )
@@ -330,6 +340,7 @@ async def run_full_flow(
     )
     upload = await sdk.start_video_upload(
         session.session_id,
+        target_agent_ids=[target_agent_id],
         camera_id=args.camera_id,
         width=args.video_width,
         height=args.video_height,
@@ -351,22 +362,6 @@ async def run_full_flow(
     await upload.resume()
     print("[12b upload.resume]", upload.track_id, upload.state)
 
-    await _before_step(
-        before_step,
-        "sdk.get_processed_video_stream",
-        "获取算力侧处理后的视频流；"
-        f"session_id={session.session_id}，timeout={args.processed_stream_timeout}s",
-    )
-    stream = await sdk.get_processed_video_stream(
-        session.session_id, timeout_seconds=args.processed_stream_timeout
-    )
-    await _before_step(
-        before_step,
-        "stream.recv",
-        "从处理后视频流读取一帧",
-    )
-    frame = await stream.recv()
-    print("[13a stream.recv]", frame)
     await _before_step(
         before_step,
         "upload.stop",
@@ -403,7 +398,9 @@ async def main(args) -> None:
         media_offload_adapter=ExampleMediaOffloadAdapter(),
     )
     unregister_network = sdk.register_network_message_listener(NetworkListener())
-    unregister_group = sdk.register_group_message_listener(GroupListener())
+    unregister_group = sdk.register_group_message_listener(
+        GroupListener(sdk, args.processed_stream_timeout)
+    )
     try:
         await run_full_flow(sdk, args)
     finally:

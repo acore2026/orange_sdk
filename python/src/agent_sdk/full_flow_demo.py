@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Mapping
 
 from agent_sdk import (
@@ -165,11 +166,33 @@ class DemoRuntime:
             return {
                 "session_id": "session-demo",
                 "sandbox_id": "sandbox-demo",
-                "state": "CONNECTING",
-                "sdp_answer": "demo-sdp-answer",
+                "state": "ALLOCATED",
+                "group_id": "g-demo",
+                "source_agent_id": LOCAL_AGENT_ID,
+                "producer": {
+                    "video_server_ip": "8.8.8.9",
+                    "source_start_url": "https://8.8.8.9:28500/v1/source-pulls",
+                    "source_stop_url": (
+                        "https://8.8.8.9:28500/v1/source-pulls/session-demo"
+                    ),
+                    "access_token": "demo-producer-token",
+                },
                 "expires_at": (
                     datetime.now(timezone.utc) + timedelta(minutes=30)
                 ).isoformat().replace("+00:00", "Z"),
+            }
+        if path == "/compute/v1/offloading-sessions/session-demo/consumers":
+            return {
+                "consumers": {
+                    target: {
+                        "video_server_ip": "8.8.8.9",
+                        "offer_url": "https://8.8.8.9:28500/v1/processed/offer",
+                        "access_ticket": f"demo-consumer-ticket-{index}",
+                        "protocol": "webrtc",
+                        "signaling": "non-trickle",
+                    }
+                    for index, target in enumerate(body["target_agent_ids"], 1)
+                }
             }
         return {"success": True, "operation_id": "operation-demo"}
 
@@ -259,9 +282,6 @@ class DemoMediaAdapter:
         self.upload = DemoVideoUpload()
         self.stream = DemoVideoStream()
 
-    async def connect(self, session, signaling, timeout_seconds) -> None:
-        del session, signaling, timeout_seconds
-
     async def start_video_upload(self, session, **kwargs):
         del session, kwargs
         return self.upload
@@ -310,6 +330,10 @@ async def run_demo(
         server_factory=lambda: local_server,
         route_backend_factory=lambda config, device: route_backend,
         media_offload_adapter=media,
+        agent_state_directory=(
+            Path(log_file_path).resolve().parent
+            / f"{Path(log_file_path).stem}-agent-state"
+        ),
     )
     sdk.register_network_message_listener(DemoNetworkListener())
     sdk.register_group_message_listener(group_listener)
@@ -335,7 +359,7 @@ async def run_demo(
             owner="demo-owner",
             name="Agent A",
             description="wheel installation self-check",
-            metadata={"region": "CN", "os": "Linux", "version": "0.16.1"},
+            metadata={"region": "CN", "os": "Linux", "version": "0.17.0"},
         )
         show("2 apply_identity", profile.agent_id)
 
@@ -400,10 +424,12 @@ async def run_demo(
         session = await sdk.create_offloading_session(
             profile.agent_id,
             workload_type="video_rendering",
+            group_id=group.group_id,
             sandbox_id="sandbox-demo",
         )
         upload = await sdk.start_video_upload(
             session.session_id,
+            target_agent_ids=[discovered[0].agent_id],
             width=1280,
             height=720,
             fps=30,
@@ -411,7 +437,31 @@ async def run_demo(
         )
         await upload.pause()
         await upload.resume()
-        stream = await sdk.get_processed_video_stream(session.session_id)
+        consumer_session = await sdk.accept_offloading_session(
+            discovered[0].agent_id,
+            group.group_id,
+            {
+                "type": "processed_video_invitation",
+                "version": "1.0",
+                "session_id": "session-consumer-demo",
+                "group_id": group.group_id,
+                "source_agent_id": discovered[0].agent_id,
+                "consumer_agent_id": profile.agent_id,
+                "sandbox_id": "sandbox-demo",
+                "state": "SOURCE_CONNECTED",
+                "expires_at": (
+                    datetime.now(timezone.utc) + timedelta(minutes=30)
+                ).isoformat().replace("+00:00", "Z"),
+                "processed_stream": {
+                    "video_server_ip": "8.8.8.9",
+                    "offer_url": "https://8.8.8.9:28500/v1/processed/offer",
+                    "access_ticket": "demo-consumer-ticket-local",
+                    "protocol": "webrtc",
+                    "signaling": "non-trickle",
+                },
+            },
+        )
+        stream = await sdk.get_processed_video_stream(consumer_session.session_id)
         frame = await stream.recv()
         await upload.stop()
         show("11 media offload", f"{session.state}, frame={frame!r}")
@@ -430,7 +480,7 @@ async def run_demo(
             "media_state": upload.state,
         }
         assert summary == {
-            "runtime_request_count": 8,
+            "runtime_request_count": 9,
             "group_id": "g-demo",
             "peer_endpoint": "http://agent-b:4001/A2A/message",
             "installed_route": True,

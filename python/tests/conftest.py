@@ -130,9 +130,31 @@ class FakeRuntime:
             return {
                 "session_id": "session-1",
                 "sandbox_id": "sandbox-edge-1",
-                "state": "CONNECTING",
-                "sdp_answer": "test-answer",
-                "expires_at": "2026-08-18T12:00:00Z",
+                "state": "ALLOCATED",
+                "group_id": "g1",
+                "source_agent_id": LOCAL_ID,
+                "expires_at": "2027-08-18T12:00:00Z",
+                "producer": {
+                    "video_server_ip": "8.8.8.9",
+                    "source_start_url": "https://8.8.8.9:28500/v1/source-pulls",
+                    "source_stop_url": (
+                        "https://8.8.8.9:28500/v1/source-pulls/session-1"
+                    ),
+                    "access_token": "producer-token",
+                },
+            }
+        if path == "/compute/v1/offloading-sessions/session-1/consumers":
+            return {
+                "consumers": {
+                    target: {
+                        "video_server_ip": "8.8.8.9",
+                        "offer_url": "https://8.8.8.9:28500/v1/processed/offer",
+                        "access_ticket": f"consumer-ticket-{index}",
+                        "protocol": "webrtc",
+                        "signaling": "non-trickle",
+                    }
+                    for index, target in enumerate(body["target_agent_ids"], 1)
+                }
             }
         return {"success": True, "operation_id": "op-1"}
 
@@ -242,15 +264,10 @@ class FakeRemoteVideoStream:
 
 class FakeMediaAdapter:
     def __init__(self):
-        self.connected_session = None
         self.upload_args = None
         self.closed = False
         self.upload = FakeVideoUpload()
         self.stream = FakeRemoteVideoStream()
-
-    async def connect(self, session, signaling, timeout_seconds):
-        assert signaling["sdp_answer"] == "test-answer"
-        self.connected_session = session.session_id
 
     async def start_video_upload(self, session, **kwargs):
         self.upload_args = (session.session_id, kwargs)
@@ -297,10 +314,16 @@ def group_payload(
     }
 
 
-async def _create_sdk_fixture(tmp_path, *, restore_profile: bool):
+async def _create_sdk_fixture(
+    tmp_path,
+    *,
+    restore_profile: bool,
+    compute_override: bool = False,
+):
     tun = FakeTun()
     masque = FakeMasque()
     runtime = FakeRuntime()
+    compute_runtime = FakeRuntime()
     server = FakeServer()
     backend = MemoryRouteBackend()
     proof = FakeProofVerifier()
@@ -322,7 +345,9 @@ async def _create_sdk_fixture(tmp_path, *, restore_profile: bool):
         _message_signer=FakeMessageSigner(),
         tun_factory=tun_factory,
         masque_factory=lambda config: masque,
-        runtime_factory=lambda host, port: runtime,
+        runtime_factory=lambda host, port: (
+            compute_runtime if compute_override and port == 28500 else runtime
+        ),
         server_factory=lambda: server,
         route_backend_factory=lambda config, tun_device: backend,
         media_offload_adapter=media,
@@ -336,6 +361,8 @@ async def _create_sdk_fixture(tmp_path, *, restore_profile: bool):
         28443,
         masque_server_url="https://192.168.3.10:4433",
         log_file_path=str(tmp_path / "agent-sdk.log"),
+        compute_control_ip="172.30.0.10" if compute_override else None,
+        compute_control_port=28500 if compute_override else None,
     )
     if restore_profile:
         sdk.set_local_profile_for_restore(
@@ -347,6 +374,7 @@ async def _create_sdk_fixture(tmp_path, *, restore_profile: bool):
         "tun": tun,
         "masque": masque,
         "runtime": runtime,
+        "compute_runtime": compute_runtime,
         "server": server,
         "backend": backend,
         "proof": proof,

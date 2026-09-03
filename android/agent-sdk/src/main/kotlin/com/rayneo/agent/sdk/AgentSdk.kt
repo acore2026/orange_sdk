@@ -13,8 +13,11 @@ import com.rayneo.agent.sdk.model.NetworkAbility
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import com.rayneo.agent.sdk.model.NetworkMessageType
 import com.rayneo.agent.sdk.model.OffloadingSession
+import com.rayneo.agent.sdk.model.OffloadingSessionRole
 import com.rayneo.agent.sdk.model.OperationResult
+import com.rayneo.agent.sdk.model.ProcessedVideoEndpoint
 import com.rayneo.agent.sdk.model.SdkInitResult
+import com.rayneo.agent.sdk.model.VideoUploadEndpoint
 import com.rayneo.agent.sdk.security.AndroidDeviceSecurity
 import com.rayneo.agent.sdk.security.DisabledMessageSignatureVerifier
 import com.rayneo.agent.sdk.security.DisabledProofVerifier
@@ -68,6 +71,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.URI
+import java.net.InetAddress
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.UUID
 
@@ -93,6 +99,7 @@ class AgentSdk internal constructor(
 
     private var state = State.NEW
     private var runtime: RuntimeTransport? = null
+    private var computeRuntime: RuntimeTransport? = null
     private var localServer: LocalServer? = null
     private var groupCache: GroupMemberCache? = null
     private var networkListener: NetworkMessageListener? = null
@@ -122,6 +129,8 @@ class AgentSdk internal constructor(
         masqueServerUrl: String,
         masqueAuthorization: String? = null,
         tunMtu: Int = 1280,
+        computeControlIp: String? = null,
+        computeControlPort: Int? = null,
     ): SdkInitResult {
         if (state != State.NEW && state != State.CLOSED) {
             throw AgentSdkException(ErrorCode.INVALID_ARGUMENT, "SDK is already initialized")
@@ -129,6 +138,17 @@ class AgentSdk internal constructor(
         validatePort(agentRuntimePort, "agentRuntimePort")
         validatePort(localTcpPort, "localTcpPort")
         validatePort(localUdpPort, "localUdpPort")
+        if ((computeControlIp == null) != (computeControlPort == null)) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "computeControlIp and computeControlPort must be configured together",
+                "computeControlIp",
+            )
+        }
+        val normalizedComputeControlIp = computeControlIp?.trim()?.let {
+            requireIpAddress(it, "computeControlIp", ErrorCode.INVALID_ARGUMENT)
+        }
+        computeControlPort?.let { validatePort(it, "computeControlPort") }
         val uri = try {
             URI(masqueServerUrl)
         } catch (error: Exception) {
@@ -190,6 +210,15 @@ class AgentSdk internal constructor(
                 ),
             )
             tunnelController.setTunFdSwapper(masqueTransport::replaceTunFd)
+            computeRuntime = if (normalizedComputeControlIp != null) {
+                tunnelController.replaceGroupPeers(
+                    COMPUTE_CONTROL_ROUTE_KEY,
+                    setOf(normalizedComputeControlIp),
+                )
+                runtimeFactory(normalizedComputeControlIp, checkNotNull(computeControlPort))
+            } else {
+                runtime
+            }
             state = State.READY
             runtime!!.startDownlink(::handleRuntimeDownlink)
             return SdkInitResult(
@@ -733,6 +762,7 @@ class AgentSdk internal constructor(
     suspend fun createOffloadingSession(
         agentId: String,
         workloadType: String,
+        groupId: String,
         sandboxId: String? = null,
         timeoutSeconds: Double = 30.0,
     ): OffloadingSession {
@@ -744,39 +774,101 @@ class AgentSdk internal constructor(
                 "timeoutSeconds",
             )
         }
-        val path = "/compute/v1/offloading-sessions"
-        val response = runtime!!.request("POST", path, authenticateControl(path, buildJsonObject {
-            put("request_id", UUID.randomUUID().toString())
-            put("agent_id", agentId)
-            put("workload_type", workloadType)
-            sandboxId?.let { put("preferred_sandbox_id", it) }
-        }))
-        var session = OffloadingSession(
-            response.requireString("session_id"),
-            response["sandbox_id"]?.jsonPrimitive?.contentOrNull ?: "",
-            response["state"]?.jsonPrimitive?.contentOrNull ?: "CONNECTING",
-            response["expires_at"]?.jsonPrimitive?.contentOrNull?.let(Instant::parse),
-            response,
-        )
-        mediaOffloadAdapter?.let { adapter ->
-            withTimeout((timeoutSeconds * 1000).toLong()) {
-                adapter.connect(session, response, timeoutSeconds)
-            }
-            session = session.copy(state = "CONNECTED")
+        if (groupId.isBlank()) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "groupId must be a non-empty string",
+                "groupId",
+            )
         }
+        if (profile?.agentId != agentId) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "agentId must match the local Agent identity",
+                "agentId",
+            )
+        }
+        groupCache!!.resolve(groupId, agentId)
+        val path = "/compute/v1/offloading-sessions"
+        val response = withTimeout((timeoutSeconds * 1000).toLong()) {
+            requireComputeRuntime().request("POST", path, authenticateControl(path, buildJsonObject {
+                put("request_id", UUID.randomUUID().toString())
+                put("agent_id", agentId)
+                put("workload_type", workloadType)
+                put("group_id", groupId)
+                sandboxId?.let { put("preferred_sandbox_id", it) }
+            }))
+        }
+        val sessionId = response.requireRuntimeString("session_id")
+        val responseGroupId = response["group_id"]?.jsonPrimitive?.contentOrNull ?: groupId
+        if (responseGroupId != groupId) {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime offloading response group_id does not match the request",
+                "group_id",
+            )
+        }
+        val sourceAgentId = response["source_agent_id"]?.jsonPrimitive?.contentOrNull ?: agentId
+        if (sourceAgentId != agentId) {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime offloading response source_agent_id does not match the creator",
+                "source_agent_id",
+            )
+        }
+        val producer = parseVideoUploadEndpoint(
+            response["producer"]?.jsonObjectOrNull(),
+            ErrorCode.RUNTIME_REJECTED,
+            "producer",
+        )
+        val session = OffloadingSession(
+            sessionId,
+            response["sandbox_id"]?.jsonPrimitive?.contentOrNull ?: "",
+            response["state"]?.jsonPrimitive?.contentOrNull ?: "ALLOCATED",
+            response["expires_at"]?.jsonPrimitive?.contentOrNull?.let {
+                try {
+                    Instant.parse(it)
+                } catch (error: Exception) {
+                    throw AgentSdkException(
+                        ErrorCode.RUNTIME_REJECTED,
+                        "Runtime expires_at must be RFC3339",
+                        "expires_at",
+                        cause = error,
+                    )
+                }
+            },
+            buildJsonObject {
+                response.filterKeys { it != "producer" }.forEach(::put)
+            },
+            role = OffloadingSessionRole.PRODUCER,
+            groupId = groupId,
+            sourceAgentId = agentId,
+            producer = producer,
+        )
+        tunnelController.replaceGroupPeers(
+            offloadingRouteKey(sessionId),
+            setOf(producer.videoServerIp),
+        )
         offloadingSessions[session.sessionId] = session
         return session
     }
 
     suspend fun startVideoUpload(
         sessionId: String,
+        targetAgentIds: List<String>,
         cameraId: String = "0",
         width: Int = 1920,
         height: Int = 1080,
         fps: Int = 30,
         bitrateKbps: Int = 4000,
     ): VideoUploadHandle {
-        val session = requireOffloadingSession(sessionId)
+        var session = requireOffloadingSession(sessionId, OffloadingSessionRole.PRODUCER)
+        if (session.producer == null) {
+            throw AgentSdkException(
+                ErrorCode.OFFLOADING_SESSION_INVALID,
+                "Producer endpoint is missing for offloading session $sessionId",
+            )
+        }
         listOf(
             "width" to width,
             "height" to height,
@@ -789,14 +881,146 @@ class AgentSdk internal constructor(
                 field,
             )
         }
-        return requireMediaAdapter().startVideoUpload(
-            session,
-            cameraId,
-            width,
-            height,
-            fps,
-            bitrateKbps,
+        val targets = validateOffloadingTargets(session, targetAgentIds)
+        var upload: VideoUploadHandle? = null
+        try {
+            upload = requireMediaAdapter().startVideoUpload(
+                session,
+                cameraId,
+                width,
+                height,
+                fps,
+                bitrateKbps,
+            )
+            session = session.copy(state = "SOURCE_CONNECTED")
+            offloadingSessions[sessionId] = session
+            val consumers = requestOffloadingConsumers(session, targets)
+            val failed = mutableListOf<String>()
+            targets.forEach { targetAgentId ->
+                val receipt = sendMessage(
+                    session.groupId,
+                    targetAgentId,
+                    buildOffloadingInvitation(
+                        session,
+                        targetAgentId,
+                        consumers.getValue(targetAgentId),
+                    ),
+                    messageType = "processed_video_invitation",
+                    taskId = "offloading:${session.sessionId}",
+                    timeoutSeconds = 10.0,
+                )
+                if (!receipt.delivered) failed += targetAgentId
+            }
+            if (failed.isNotEmpty()) {
+                throw AgentSdkException(
+                    ErrorCode.MESSAGE_DELIVERY_FAILED,
+                    "Video Server is pulling, but consumer invitation delivery failed: " +
+                        failed.joinToString(),
+                )
+            }
+            return upload
+        } catch (error: Throwable) {
+            try {
+                upload?.stop()
+            } catch (_: Throwable) {
+                // Preserve the control/P2P failure that triggered rollback.
+            }
+            offloadingSessions[sessionId] = session.copy(state = "ALLOCATED")
+            throw error
+        }
+    }
+
+    suspend fun acceptOffloadingSession(
+        senderAgentId: String,
+        groupId: String,
+        invitation: JsonObject,
+    ): OffloadingSession {
+        requireReady()
+        val localProfile = profile ?: throw AgentSdkException(
+            ErrorCode.GROUP_NOT_ACTIVE,
+            "Local identity is unavailable",
         )
+        groupCache!!.resolve(groupId, senderAgentId)
+        groupCache!!.resolve(groupId, localProfile.agentId)
+        if (invitation["type"]?.jsonPrimitive?.contentOrNull != "processed_video_invitation") {
+            throw AgentSdkException(
+                ErrorCode.OFFLOADING_SESSION_INVALID,
+                "Invitation type must be processed_video_invitation",
+                "type",
+            )
+        }
+        if (invitation["version"]?.jsonPrimitive?.contentOrNull != "1.0") {
+            throw AgentSdkException(
+                ErrorCode.OFFLOADING_SESSION_INVALID,
+                "Unsupported offloading invitation version",
+                "version",
+            )
+        }
+        mapOf(
+            "group_id" to groupId,
+            "source_agent_id" to senderAgentId,
+            "consumer_agent_id" to localProfile.agentId,
+        ).forEach { (field, expected) ->
+            if (invitation[field]?.jsonPrimitive?.contentOrNull != expected) {
+                throw AgentSdkException(
+                    ErrorCode.OFFLOADING_SESSION_INVALID,
+                    "Invitation $field does not match the authenticated context",
+                    field,
+                )
+            }
+        }
+        val sessionId = invitation.requireInvitationString("session_id")
+        val expiresAt = invitation["expires_at"]?.jsonPrimitive?.contentOrNull?.let {
+            try {
+                Instant.parse(it)
+            } catch (error: Exception) {
+                throw AgentSdkException(
+                    ErrorCode.OFFLOADING_SESSION_INVALID,
+                    "Invitation expires_at must be RFC3339",
+                    "expires_at",
+                    cause = error,
+                )
+            }
+        }
+        if (expiresAt != null && !expiresAt.isAfter(Instant.now())) {
+            throw AgentSdkException(
+                ErrorCode.CREDENTIAL_EXPIRED,
+                "Offloading invitation has expired",
+                "expires_at",
+            )
+        }
+        val processedStream = parseProcessedVideoEndpoint(
+            invitation["processed_stream"]?.jsonObjectOrNull(),
+            ErrorCode.OFFLOADING_SESSION_INVALID,
+            "processed_stream",
+        )
+        val session = OffloadingSession(
+            sessionId = sessionId,
+            sandboxId = invitation["sandbox_id"]?.jsonPrimitive?.contentOrNull ?: "",
+            state = invitation["state"]?.jsonPrimitive?.contentOrNull ?: "SOURCE_CONNECTED",
+            expiresAt = expiresAt,
+            metadata = buildJsonObject {
+                invitation.filterKeys { it != "processed_stream" }.forEach(::put)
+            },
+            role = OffloadingSessionRole.CONSUMER,
+            groupId = groupId,
+            sourceAgentId = senderAgentId,
+            processedStream = processedStream,
+        )
+        offloadingSessions[sessionId]?.let { existing ->
+            if (existing != session) {
+                throw AgentSdkException(
+                    ErrorCode.OFFLOADING_SESSION_INVALID,
+                    "Offloading session $sessionId is already bound to different metadata",
+                )
+            }
+        }
+        tunnelController.replaceGroupPeers(
+            offloadingRouteKey(sessionId),
+            setOf(processedStream.videoServerIp),
+        )
+        offloadingSessions[sessionId] = session
+        return session
     }
 
     suspend fun getProcessedVideoStream(
@@ -810,7 +1034,13 @@ class AgentSdk internal constructor(
                 "timeoutSeconds",
             )
         }
-        val session = requireOffloadingSession(sessionId)
+        val session = requireOffloadingSession(sessionId, OffloadingSessionRole.CONSUMER)
+        if (session.processedStream == null) {
+            throw AgentSdkException(
+                ErrorCode.OFFLOADING_SESSION_INVALID,
+                "Processed stream endpoint is missing for offloading session $sessionId",
+            )
+        }
         return withTimeout((timeoutSeconds * 1000).toLong()) {
             requireMediaAdapter().getProcessedVideoTrack(session, timeoutSeconds)
         }
@@ -825,6 +1055,8 @@ class AgentSdk internal constructor(
         runCatching { groupCache?.close() }
         runCatching { masqueTransport.close() }
         runCatching { localServer?.close() }
+        if (computeRuntime !== runtime) runCatching { computeRuntime?.close() }
+        computeRuntime = null
         runCatching { runtime?.close() }
         runCatching { tunnelController.close() }
         runCatching { mediaOffloadAdapter?.close() }
@@ -1137,19 +1369,268 @@ class AgentSdk internal constructor(
         agentCardContext = null
     }
 
-    private fun requireOffloadingSession(sessionId: String): OffloadingSession {
+    private fun requireOffloadingSession(
+        sessionId: String,
+        role: OffloadingSessionRole,
+    ): OffloadingSession {
         requireReady()
-        return offloadingSessions[sessionId]?.takeIf { it.state == "CONNECTED" }
+        val session = offloadingSessions[sessionId]
+            ?.takeUnless { it.state in setOf("CLOSED", "FAILED", "STOPPED") }
             ?: throw AgentSdkException(
                 ErrorCode.OFFLOADING_SESSION_NOT_FOUND,
-                "Connected offloading session $sessionId was not found",
+                "Active offloading session $sessionId was not found",
             )
+        if (session.role != role) {
+            throw AgentSdkException(
+                ErrorCode.OFFLOADING_ROLE_INVALID,
+                "Offloading session $sessionId has role ${session.role}; $role is required",
+            )
+        }
+        return session
     }
+
+    private suspend fun validateOffloadingTargets(
+        session: OffloadingSession,
+        targetAgentIds: List<String>,
+    ): List<String> {
+        if (targetAgentIds.isEmpty() || targetAgentIds.any { it.isBlank() }) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "targetAgentIds must contain non-empty Agent IDs",
+                "targetAgentIds",
+            )
+        }
+        if (targetAgentIds.distinct().size != targetAgentIds.size) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "targetAgentIds must not contain duplicates",
+                "targetAgentIds",
+            )
+        }
+        if (session.sourceAgentId in targetAgentIds) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "The source Agent cannot be a video consumer",
+                "targetAgentIds",
+            )
+        }
+        targetAgentIds.forEach { groupCache!!.resolve(session.groupId, it) }
+        return targetAgentIds.toList()
+    }
+
+    private suspend fun requestOffloadingConsumers(
+        session: OffloadingSession,
+        targetAgentIds: List<String>,
+    ): Map<String, ProcessedVideoEndpoint> {
+        val encodedSessionId = URLEncoder.encode(
+            session.sessionId,
+            StandardCharsets.UTF_8.toString(),
+        ).replace("+", "%20")
+        val path = "/compute/v1/offloading-sessions/$encodedSessionId/consumers"
+        val response = requireComputeRuntime().request("POST", path, authenticateControl(path, buildJsonObject {
+            put("request_id", UUID.randomUUID().toString())
+            put("agent_id", session.sourceAgentId)
+            put("group_id", session.groupId)
+            put("target_agent_ids", buildJsonArray {
+                targetAgentIds.forEach { add(JsonPrimitive(it)) }
+            })
+        }))
+        val consumers = response["consumers"]?.jsonObjectOrNull()
+            ?: throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime response field consumers must be an object",
+                "consumers",
+            )
+        val endpoints = targetAgentIds.associateWith { targetAgentId ->
+            parseProcessedVideoEndpoint(
+                consumers[targetAgentId]?.jsonObjectOrNull(),
+                ErrorCode.RUNTIME_REJECTED,
+                "consumers.$targetAgentId",
+            )
+        }
+        if (endpoints.values.map { it.accessTicket }.distinct().size != endpoints.size) {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime returned a consumer ticket shared by multiple Agents",
+                "consumers",
+            )
+        }
+        return endpoints
+    }
+
+    private fun buildOffloadingInvitation(
+        session: OffloadingSession,
+        consumerAgentId: String,
+        endpoint: ProcessedVideoEndpoint,
+    ): JsonObject = buildJsonObject {
+        put("type", "processed_video_invitation")
+        put("version", "1.0")
+        put("session_id", session.sessionId)
+        put("group_id", session.groupId)
+        put("source_agent_id", session.sourceAgentId)
+        put("consumer_agent_id", consumerAgentId)
+        put("sandbox_id", session.sandboxId)
+        put("state", "SOURCE_CONNECTED")
+        session.expiresAt?.let { put("expires_at", it.toString()) }
+        put("processed_stream", buildJsonObject {
+            put("video_server_ip", endpoint.videoServerIp)
+            put("offer_url", endpoint.offerUrl)
+            put("access_ticket", endpoint.accessTicket)
+            put("protocol", endpoint.protocol)
+            put("signaling", endpoint.signaling)
+        })
+    }
+
+    private fun parseVideoUploadEndpoint(
+        value: JsonObject?,
+        errorCode: ErrorCode,
+        fieldPrefix: String,
+    ): VideoUploadEndpoint {
+        val endpoint = value ?: throw AgentSdkException(
+            errorCode,
+            "$fieldPrefix must be an object",
+            fieldPrefix,
+        )
+        return VideoUploadEndpoint(
+            videoServerIp = requireIpAddress(
+                endpoint.stringOrNull("video_server_ip"),
+                "$fieldPrefix.video_server_ip",
+                errorCode,
+            ),
+            sourceStartUrl = requireHttpUrl(
+                endpoint.stringOrNull("source_start_url"),
+                "$fieldPrefix.source_start_url",
+                errorCode,
+            ),
+            sourceStopUrl = requireHttpUrl(
+                endpoint.stringOrNull("source_stop_url"),
+                "$fieldPrefix.source_stop_url",
+                errorCode,
+            ),
+            accessToken = requireEndpointString(
+                endpoint.stringOrNull("access_token"),
+                "$fieldPrefix.access_token",
+                errorCode,
+            ),
+        )
+    }
+
+    private fun parseProcessedVideoEndpoint(
+        value: JsonObject?,
+        errorCode: ErrorCode,
+        fieldPrefix: String,
+    ): ProcessedVideoEndpoint {
+        val endpoint = value ?: throw AgentSdkException(
+            errorCode,
+            "$fieldPrefix must be an object",
+            fieldPrefix,
+        )
+        val protocol = endpoint.stringOrNull("protocol") ?: "webrtc"
+        val signaling = endpoint.stringOrNull("signaling") ?: "non-trickle"
+        if (protocol != "webrtc" || signaling !in setOf("non-trickle", "trickle")) {
+            throw AgentSdkException(
+                errorCode,
+                "$fieldPrefix contains an unsupported WebRTC profile",
+                fieldPrefix,
+            )
+        }
+        return ProcessedVideoEndpoint(
+            videoServerIp = requireIpAddress(
+                endpoint.stringOrNull("video_server_ip"),
+                "$fieldPrefix.video_server_ip",
+                errorCode,
+            ),
+            offerUrl = requireHttpUrl(
+                endpoint.stringOrNull("offer_url"),
+                "$fieldPrefix.offer_url",
+                errorCode,
+            ),
+            accessTicket = requireEndpointString(
+                endpoint.stringOrNull("access_ticket"),
+                "$fieldPrefix.access_ticket",
+                errorCode,
+            ),
+            protocol = protocol,
+            signaling = signaling,
+        )
+    }
+
+    private fun requireIpAddress(value: String?, field: String, errorCode: ErrorCode): String {
+        val text = requireEndpointString(value, field, errorCode)
+        val parsed = try {
+            InetAddress.getByName(text)
+        } catch (error: Exception) {
+            throw AgentSdkException(errorCode, "$field must be an IP address", field, cause = error)
+        }
+        if (text.any { it.isLetter() } && !text.contains(':')) {
+            throw AgentSdkException(errorCode, "$field must be an IP address", field)
+        }
+        return parsed.hostAddress ?: text
+    }
+
+    private fun requireHttpUrl(value: String?, field: String, errorCode: ErrorCode): String {
+        val text = requireEndpointString(value, field, errorCode)
+        val uri = try {
+            URI(text)
+        } catch (error: Exception) {
+            throw AgentSdkException(errorCode, "$field is not a valid URL", field, cause = error)
+        }
+        if (
+            uri.scheme !in setOf("http", "https") || uri.host.isNullOrBlank() ||
+            uri.userInfo != null || uri.fragment != null ||
+            (uri.port != -1 && uri.port !in 1..65535)
+        ) {
+            throw AgentSdkException(
+                errorCode,
+                "$field must be an HTTP/HTTPS URL without credentials or fragment",
+                field,
+            )
+        }
+        return text
+    }
+
+    private fun requireEndpointString(
+        value: String?,
+        field: String,
+        errorCode: ErrorCode,
+    ): String = value?.takeIf { it.isNotBlank() } ?: throw AgentSdkException(
+        errorCode,
+        "$field must be a non-empty string",
+        field,
+    )
+
+    private fun JsonObject.stringOrNull(field: String): String? =
+        this[field]?.jsonPrimitive?.contentOrNull
+
+    private fun kotlinx.serialization.json.JsonElement.jsonObjectOrNull(): JsonObject? =
+        runCatching { jsonObject }.getOrNull()
+
+    private fun JsonObject.requireRuntimeString(field: String): String =
+        stringOrNull(field)?.takeIf { it.isNotBlank() } ?: throw AgentSdkException(
+            ErrorCode.RUNTIME_REJECTED,
+            "Runtime response field $field must be a non-empty string",
+            field,
+        )
+
+    private fun JsonObject.requireInvitationString(field: String): String =
+        stringOrNull(field)?.takeIf { it.isNotBlank() } ?: throw AgentSdkException(
+            ErrorCode.OFFLOADING_SESSION_INVALID,
+            "Invitation field $field must be a non-empty string",
+            field,
+        )
+
+    private fun offloadingRouteKey(sessionId: String): String = "offloading:$sessionId"
 
     private fun requireMediaAdapter(): MediaOffloadAdapter =
         mediaOffloadAdapter ?: throw AgentSdkException(
             ErrorCode.OFFLOADING_SESSION_NOT_FOUND,
             "No WebRTC media adapter is configured",
+        )
+
+    private fun requireComputeRuntime(): RuntimeTransport =
+        computeRuntime ?: throw AgentSdkException(
+            ErrorCode.SDK_NOT_INITIALIZED,
+            "Compute control transport is unavailable",
         )
 
     private fun validatePort(port: Int, field: String) {
@@ -1171,6 +1652,8 @@ class AgentSdk internal constructor(
             )
 
     companion object {
+        private const val COMPUTE_CONTROL_ROUTE_KEY = "compute-control"
+
         fun create(
             vpnService: AgentVpnService,
             mediaOffloadAdapter: MediaOffloadAdapter? = null,

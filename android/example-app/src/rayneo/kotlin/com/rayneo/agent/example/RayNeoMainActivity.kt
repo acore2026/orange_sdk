@@ -242,7 +242,10 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         // the glasses UI.
         runnerJob = lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val sdkValue = AgentSdk.create(service)
+                val mediaAdapter = AndroidWebRtcMediaOffloadAdapter(service) { event ->
+                    appendLog(LabLogLevel.INFO, "WEBRTC", event)
+                }
+                val sdkValue = AgentSdk.create(service, mediaOffloadAdapter = mediaAdapter)
                 val flow = AgentTestRunner(
                     sdk = sdkValue,
                     config = config,

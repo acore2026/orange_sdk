@@ -117,12 +117,7 @@ interface VideoTrack {
 }
 
 interface MediaOffloadAdapter {
-    suspend fun connect(
-        session: OffloadingSession,
-        signaling: JsonObject,
-        timeoutSeconds: Double,
-    )
-
+    /** Return only after the Video Server has started pulling the source track. */
     suspend fun startVideoUpload(
         session: OffloadingSession,
         cameraId: String,

@@ -8,7 +8,7 @@ SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.16.1-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
+- `agent_connect_sdk-0.17.0-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/interactive_linux_agent.py`：复用真实 Linux 全流程参数，每按一次回车只调用下一个 SDK 接口。
@@ -46,7 +46,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.16.1-py3-none-any.whl
+dist/agent_connect_sdk-0.17.0-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -58,7 +58,7 @@ dist/agent_connect_sdk-0.16.1-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.16.1-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.17.0-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -92,14 +92,14 @@ python -m pip install -e '.[test]'
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.16.1-py3-none-any.whl
+  ./agent_connect_sdk-0.17.0-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.16.1-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.17.0-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -412,7 +412,7 @@ profile = await sdk.apply_identity(
     owner="customer-a",
     name="Agent A",
     description="RayNeo edge agent",
-    metadata={"region": "CN", "os": "Linux", "version": "0.16.1"},
+    metadata={"region": "CN", "os": "Linux", "version": "0.17.0"},
 )
 
 ability = await sdk.get_network_ability(profile.agent_id)
@@ -497,14 +497,17 @@ AgentRuntime 随后通过已建立的 WebSocket 下发核心网请求：
   "message_type": "ACN_AGENT_GROUPING_INVITATION",
   "transaction_id": 49,
   "payload": {
+    "group_id": "g1",
     "group_config": {"group_name": "task-patrol"},
     "group_administrator": {"agent_id": "a1"}
   }
 }
 ```
 
-SDK 按 `request_id` 并发处理并允许乱序返回。用户 listener 的结果会被封装为
-`{"kind":"response","request_id":"delivery-123","payload":{"result":"ACCEPT"}}`。
+SDK 按 `request_id` 并发处理并允许乱序返回。邀请接受和配置确认会把下发 payload
+中的 `group_id` 原样带回，例如
+`{"kind":"response","request_id":"delivery-123","payload":{"group_id":"g1","result":"ACCEPT"}}`；
+配置确认的 `result` 为 `ACK`。
 `transaction_id` 只用于保留原始 NAS 事务语义，不作为 SDK 缓存或路由键。
 
 通知中的 `members` 键名只是标签。SDK 使用成员对象内的 `agent_id` 建立索引，并自动安装对端路由。应用可以等待群组激活：
@@ -542,30 +545,69 @@ service_endpoints = http://agent-b:4001/A2A/message
 
 ### 4.4 计算和视频卸载
 
-应用需要在构造 `AgentSdk` 时提供平台对应的 `MediaOffloadAdapter`，然后调用：
+应用需要在构造 `AgentSdk` 时提供平台对应的 `MediaOffloadAdapter`。视频源 Agent B
+先在已提交的群组中创建会话；`start_video_upload` 接收一个或多个目标 Agent ID。
+媒体适配器只有在 Video Server 已开始从 B 拉流后才返回，随后 SDK 向控制面申请每个
+目标独立的消费者 Ticket，并自动通过 A2A P2P 消息发送
+`processed_video_invitation`：
 
 ```python
 session = await sdk.create_offloading_session(
     profile.agent_id,
     workload_type="video_rendering",
+    group_id=group.group_id,
     sandbox_id="sandbox-edge-1",
 )
 
 upload = await sdk.start_video_upload(
     session.session_id,
+    target_agent_ids=[agent_a_id, agent_c_id],
     camera_id=0,
     width=1280,
     height=720,
     fps=30,
     bitrate_kbps=2500,
 )
-
-stream = await sdk.get_processed_video_stream(session.session_id)
-frame = await stream.recv()
-await upload.stop()
 ```
 
-SDK 只定义媒体适配接口，不替应用选择 `aiortc`、GStreamer 或硬件媒体栈。
+目标 Agent 的群组消息监听器收到邀请后导入消费者会话，再从 Video Server 拉取处理流：
+
+```python
+consumer_session = await sdk.accept_offloading_session(
+    sender_agent_id,
+    group_id,
+    payload,
+)
+
+stream = await sdk.get_processed_video_stream(consumer_session.session_id)
+frame = await stream.recv()
+```
+
+创建响应必须包含 producer 端点。Video Server 开始拉流后，SDK 调用
+`POST /compute/v1/offloading-sessions/{session_id}/consumers`，请求体包含
+`group_id + target_agent_ids`；返回的 `consumers` 必须按 Agent ID 提供独立的
+`video_server_ip/offer_url/access_ticket`。producer Token 不进入 P2P 消息，消费者
+Ticket 只发送给对应目标。SDK 仍由 `MediaOffloadAdapter` 隔离具体的 `aiortc`、
+GStreamer 或硬件媒体栈。
+
+当前核心网没有实际算力沙箱时，可以部署仓库根目录的
+[`mock-video-server`](../mock-video-server/README.md)，并在初始化时只覆写算力控制端点：
+
+```python
+await sdk.init(
+    agent_runtime_ip=runtime_ip,
+    agent_runtime_port=runtime_port,
+    local_vlan_ip=local_vlan_ip,
+    local_tcp_port=4001,
+    local_udp_port=28443,
+    masque_server_url=masque_url,
+    compute_control_ip="172.30.0.10",
+    compute_control_port=28500,
+)
+```
+
+SDK 会为该 IP 安装 TUN 主机路由；只有 `/compute` 请求使用覆写端点，身份、能力、
+发现、建组和下行 WebSocket 仍使用原 AgentRuntime。不传这两个参数时行为完全不变。
 
 ### 4.5 关闭
 
@@ -982,7 +1024,8 @@ ss -lunp | grep <MASQUE端口>
 | `get_group_snapshot(group_id)` | 查询 SDK 已提交的只读群组快照 | `GroupConfigSnapshot | None` |
 | `send_message(...)` | 按群组缓存直接调用完整 `service_endpoints` | `MessageReceipt` |
 | `create_offloading_session(...)` | 创建计算卸载会话 | `OffloadingSession` |
-| `start_video_upload(...)` | 启动视频上传 | `VideoUploadHandle` |
+| `start_video_upload(..., target_agent_ids)` | 启动视频上传；Server 拉流成功后自动通知多个目标 | `VideoUploadHandle` |
+| `accept_offloading_session(...)` | 目标 Agent 验证并导入 P2P 消费者邀请 | `OffloadingSession` |
 | `get_processed_video_stream(...)` | 获取处理后视频流 | `RemoteVideoStream` |
 | `close()` | 释放路由、TUN、HTTP/3 和监听服务 | 无 |
 

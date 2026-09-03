@@ -30,7 +30,11 @@ async def test_public_function_entry_exit_error_and_redaction(
     try:
         await sdk.send_message(
             "missing-group", "missing-agent",
-            {"text": "hello", "access_token": "nested-secret-token"},
+            {
+                "text": "hello",
+                "access_token": "nested-secret-token",
+                "access_ticket": "nested-secret-ticket",
+            },
             message_type="text", task_id="task-missing",
         )
     except AgentSdkError as exc:
@@ -45,7 +49,9 @@ async def test_public_function_entry_exit_error_and_redaction(
     # boundary and is never accepted from or logged as an application argument.
     assert '"public_key"' not in text
     assert '"access_token":"[REDACTED]"' in text
+    assert '"access_ticket":"[REDACTED]"' in text
     assert "nested-secret-token" not in text
+    assert "nested-secret-ticket" not in text
     assert "vc-a" not in text
 
 

@@ -1,5 +1,8 @@
 # Android / RayNeoOS Agent SDK
 
+雷鸟 X3 Pro 专用包的 Windows USB 驱动、ADB、脚本安装、VPN 授权和现场排障步骤见
+[《雷鸟 X3 Pro Agent App 安装说明》](../雷鸟眼镜App安装说明.md)。
+
 The Android library mirrors the Python SDK's group-cache and endpoint rules:
 
 - `AgentVpnService` creates the Agent TUN without root.
@@ -311,6 +314,9 @@ AgentRuntime 发送去注册请求，也不会自动重新申请身份；本地�
 Core-network downlink frames use `kind + request_id + message_type +
 transaction_id + payload`. Each frame is handled in its own coroutine, so
 responses may be returned out of order and are correlated only by `request_id`.
+Invitation acceptance and group-configuration acknowledgement copy the
+downlink payload's `group_id` into the response payload alongside `result`,
+using `ACCEPT` and `ACK` respectively.
 The local HTTP/1.1 listener now exposes only `/A2A/message` inside the CONNECT-IP
 path; the former Runtime callback paths are not available.
 
@@ -337,6 +343,75 @@ sdk.sendMessage(
 The wire body contains `src_agent_id`, `dst_agent_id`, `type`, `task_id`, and
 `payload`; the receiver returns `{"status":"OK"}` after validation.
 
-Camera/WebRTC calls use the `MediaOffloadAdapter` SPI. The application supplies
-an adapter backed by its chosen Android WebRTC distribution; this repository's
-unit tests use a deterministic fake so no camera or emulator is required.
+Camera/WebRTC calls use the `MediaOffloadAdapter` SPI. Source Agent B creates an
+offloading session with its committed `groupId`, then calls `startVideoUpload`
+with every Agent that should receive the processed stream:
+
+```kotlin
+val session = sdk.createOffloadingSession(
+    agentId = localAgentId,
+    workloadType = "video_rendering",
+    groupId = groupId,
+)
+val upload = sdk.startVideoUpload(
+    sessionId = session.sessionId,
+    targetAgentIds = listOf(agentAId, agentCId),
+    cameraId = "0",
+    width = 1280,
+    height = 720,
+    fps = 30,
+    bitrateKbps = 2500,
+)
+```
+
+The media adapter must return from `startVideoUpload` only after the Video
+Server is pulling B's source track. The SDK then requests a separate processed
+stream ticket for each target from
+`POST /compute/v1/offloading-sessions/{session_id}/consumers` and sends a
+`processed_video_invitation` over the existing A2A group route. The request
+contains `group_id` and `target_agent_ids`; the response `consumers` object is
+keyed by Agent ID. A receiver imports the invitation before asking its adapter
+for the processed WebRTC track:
+
+```kotlin
+val consumer = sdk.acceptOffloadingSession(senderAgentId, groupId, payload)
+val track = sdk.getProcessedVideoStream(consumer.sessionId)
+```
+
+Producer tokens are never copied into P2P messages. Consumer tickets are scoped
+to one target Agent. The application supplies an adapter backed by its chosen
+Android WebRTC distribution; unit tests use a deterministic fake so no camera
+or emulator is required.
+
+### N6 / DN Mock 算力视频联调
+
+仓库的 [`mock-video-server`](../mock-video-server/README.md) 已部署到 free6GC 的
+`compose_n6`，默认地址 `172.30.0.10:28500`。Generic App 配置页预填该地址；SDK
+初始化时为它安装 Agent VPN 主机路由，因此控制请求、WebRTC 信令和媒体包均走
+`Agent TUN → MASQUE → UPF → N6`，而不是手机 Wi-Fi 直接访问 Docker 网段。
+
+联调顺序：
+
+1. 启动 A（手机或 RayNeo）和 Generic App 角色 B，等双方日志显示群组已就绪。
+2. 在 B 点击“开始视频算力测试”，首次使用允许摄像头权限。
+3. B 日志依次出现 `COMPUTE CREATE`、`SOURCE_CONNECTED`、`VIDEO UPLOAD`；Mock
+   确认第一帧后才分发消费者 Ticket。
+4. A 无需点击按钮，会自动处理 `processed_video_invitation`。出现
+   `VIDEO STREAM` 和 `VIDEO FRAME frames=1` 表示处理后 WebRTC 下行成功。
+5. 在 DN 查看 `curl http://172.30.0.10:28500/debug/v1/sessions`，可以核对源帧数、
+   目标 Agent 和消费者连接数。
+
+App 使用可选初始化参数指向 Mock；不传时生产默认行为不变，算力请求仍发往
+AgentRuntime：
+
+```kotlin
+sdk.initialize(
+    agentRuntimeIp = runtimeIp,
+    agentRuntimePort = runtimePort,
+    localTcpPort = 4001,
+    localUdpPort = 28443,
+    masqueServerUrl = masqueUrl,
+    computeControlIp = "172.30.0.10",
+    computeControlPort = 28500,
+)
+```

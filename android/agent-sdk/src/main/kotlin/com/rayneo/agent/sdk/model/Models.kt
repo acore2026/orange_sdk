@@ -105,4 +105,35 @@ data class OffloadingSession(
     val state: String,
     val expiresAt: Instant?,
     val metadata: JsonObject,
+    val role: OffloadingSessionRole = OffloadingSessionRole.PRODUCER,
+    val groupId: String = "",
+    val sourceAgentId: String = "",
+    val producer: VideoUploadEndpoint? = null,
+    val processedStream: ProcessedVideoEndpoint? = null,
 )
+
+enum class OffloadingSessionRole { PRODUCER, CONSUMER }
+
+data class VideoUploadEndpoint(
+    val videoServerIp: String,
+    val sourceStartUrl: String,
+    val sourceStopUrl: String,
+    val accessToken: String,
+) {
+    override fun toString(): String =
+        "VideoUploadEndpoint(videoServerIp=$videoServerIp, " +
+            "sourceStartUrl=$sourceStartUrl, sourceStopUrl=$sourceStopUrl, " +
+            "accessToken=[REDACTED])"
+}
+
+data class ProcessedVideoEndpoint(
+    val videoServerIp: String,
+    val offerUrl: String,
+    val accessTicket: String,
+    val protocol: String = "webrtc",
+    val signaling: String = "non-trickle",
+) {
+    override fun toString(): String =
+        "ProcessedVideoEndpoint(videoServerIp=$videoServerIp, offerUrl=$offerUrl, " +
+            "accessTicket=[REDACTED], protocol=$protocol, signaling=$signaling)"
+}

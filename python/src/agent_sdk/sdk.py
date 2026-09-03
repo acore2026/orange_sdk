@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlsplit
 
 from .agent_state import (
     AgentCardContext,
@@ -58,8 +59,11 @@ from .models import (
     NetworkMessageAction,
     NetworkMessageType,
     OffloadingSession,
+    OffloadingSessionRole,
     OperationResult,
+    ProcessedVideoEndpoint,
     SdkInitResult,
+    VideoUploadEndpoint,
 )
 from .rest_server import AiohttpLocalServer
 from .routes import GroupRouteManager, Pyroute2RouteBackend, RouteBackend
@@ -247,6 +251,7 @@ class AgentSdk:
         self._state = "NEW"
         self._config: SdkConfig | None = None
         self._runtime: RuntimeTransport | None = None
+        self._compute_runtime: RuntimeTransport | None = None
         self._server: LocalServer | None = None
         self._tun: TunDevice | None = None
         self._masque: ConnectIpTransport | None = None
@@ -334,6 +339,8 @@ class AgentSdk:
         log_level: str = DEFAULT_LOG_LEVEL,
         log_max_bytes: int = DEFAULT_LOG_MAX_BYTES,
         log_backup_count: int = DEFAULT_LOG_BACKUP_COUNT,
+        compute_control_ip: str | None = None,
+        compute_control_port: int | None = None,
     ) -> SdkInitResult:
         self._configure_logging(
             file_path=log_file_path,
@@ -360,6 +367,8 @@ class AgentSdk:
                 "log_level": log_level,
                 "log_max_bytes": log_max_bytes,
                 "log_backup_count": log_backup_count,
+                "compute_control_ip": compute_control_ip,
+                "compute_control_port": compute_control_port,
             },
         )
         if not self._group_config_verification_enabled:
@@ -377,6 +386,28 @@ class AgentSdk:
                     ErrorCode.INVALID_ARGUMENT,
                     f"cannot init SDK in state {self._state}",
                 )
+            if (compute_control_ip is None) != (compute_control_port is None):
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "compute_control_ip and compute_control_port must be configured together",
+                    field="compute_control_ip",
+                )
+            normalized_compute_ip: str | None = None
+            if compute_control_ip is not None:
+                try:
+                    normalized_compute_ip = str(ipaddress.ip_address(compute_control_ip.strip()))
+                except ValueError as exc:
+                    raise AgentSdkError(
+                        ErrorCode.INVALID_ARGUMENT,
+                        "compute_control_ip must be an IP literal",
+                        field="compute_control_ip",
+                    ) from exc
+                if not isinstance(compute_control_port, int) or not 1 <= compute_control_port <= 65535:
+                    raise AgentSdkError(
+                        ErrorCode.INVALID_ARGUMENT,
+                        "compute_control_port must be in 1..65535",
+                        field="compute_control_port",
+                    )
             SdkConfig.validate_client_parameters(
                 agent_runtime_ip=agent_runtime_ip,
                 agent_runtime_port=agent_runtime_port,
@@ -460,6 +491,15 @@ class AgentSdk:
             self._pump_task = asyncio.create_task(
                 self._pump_uplink(), name="agent-tun-uplink"
             )
+            if normalized_compute_ip is not None:
+                await self._routes.replace_group_peers(
+                    "compute-control", {normalized_compute_ip}
+                )
+                self._compute_runtime = self._runtime_factory(
+                    normalized_compute_ip, compute_control_port
+                )
+            else:
+                self._compute_runtime = self._runtime
             self._state = "READY"
             await self._runtime.start_downlink(self._handle_runtime_downlink)
             result = SdkInitResult(
@@ -1308,6 +1348,7 @@ class AgentSdk:
         self,
         agent_id: str,
         workload_type: str,
+        group_id: str,
         sandbox_id: str | None = None,
         timeout_seconds: float = 30.0,
     ) -> OffloadingSession:
@@ -1318,42 +1359,76 @@ class AgentSdk:
                 "timeout_seconds must be greater than zero",
                 field="timeout_seconds",
             )
-        assert self._runtime is not None
+        if not isinstance(group_id, str) or not group_id.strip():
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "group_id must be a non-empty string",
+                field="group_id",
+            )
+        if self._profile is None or self._profile.agent_id != agent_id:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "agent_id must match the local Agent identity",
+                field="agent_id",
+            )
+        assert self._groups is not None
+        await self._groups.resolve(group_id, agent_id)
+        assert self._compute_runtime is not None
         path = "/compute/v1/offloading-sessions"
         request: dict[str, Any] = {
             "request_id": str(uuid.uuid4()),
             "agent_id": agent_id,
             "workload_type": workload_type,
+            "group_id": group_id,
         }
         if sandbox_id is not None:
             request["preferred_sandbox_id"] = sandbox_id
         body = await self._authenticate_control_request(path, request)
-        response = await self._runtime.request(
-            "POST",
-            path,
-            body,
+        response = await asyncio.wait_for(
+            self._compute_runtime.request(
+                "POST",
+                path,
+                body,
+            ),
+            timeout=timeout_seconds,
         )
-        expires_at = response.get("expires_at")
-        parsed_expires_at = None
-        if isinstance(expires_at, str) and expires_at:
-            parsed_expires_at = datetime.fromisoformat(
-                expires_at.replace("Z", "+00:00")
+        session_id = self._require_nonempty_string(
+            response.get("session_id"), "session_id", ErrorCode.RUNTIME_REJECTED
+        )
+        response_group_id = str(response.get("group_id", group_id))
+        if response_group_id != group_id:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime offloading response group_id does not match the request",
+                field="group_id",
             )
+        source_agent_id = str(response.get("source_agent_id", agent_id))
+        if source_agent_id != agent_id:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime offloading response source_agent_id does not match the creator",
+                field="source_agent_id",
+            )
+        producer = self._parse_video_upload_endpoint(
+            self._require_response_object(response, "producer"),
+            error_code=ErrorCode.RUNTIME_REJECTED,
+            field_prefix="producer",
+        )
         session = OffloadingSession(
-            session_id=str(response["session_id"]),
+            session_id=session_id,
             sandbox_id=str(response.get("sandbox_id", "")),
-            state=str(response.get("state", "CONNECTING")),
-            expires_at=parsed_expires_at,
-            metadata=dict(response),
+            state=str(response.get("state", "ALLOCATED")),
+            expires_at=self._parse_optional_datetime(response.get("expires_at")),
+            metadata={key: value for key, value in response.items() if key != "producer"},
+            role=OffloadingSessionRole.PRODUCER,
+            group_id=group_id,
+            source_agent_id=agent_id,
+            producer=producer,
         )
-        if self._media_offload_adapter is not None:
-            await asyncio.wait_for(
-                self._media_offload_adapter.connect(
-                    session, response, timeout_seconds
-                ),
-                timeout=timeout_seconds,
-            )
-            session.state = "CONNECTED"
+        assert self._routes is not None
+        await self._routes.replace_group_peers(
+            self._offloading_route_key(session_id), {producer.video_server_ip}
+        )
         self._offloading_sessions[session.session_id] = session
         return session
 
@@ -1361,13 +1436,21 @@ class AgentSdk:
     async def start_video_upload(
         self,
         session_id: str,
+        target_agent_ids: Sequence[str],
         camera_id: int = 0,
         width: int = 1920,
         height: int = 1080,
         fps: int = 30,
         bitrate_kbps: int = 4000,
     ) -> VideoUploadHandle:
-        session = self._require_offloading_session(session_id)
+        session = self._require_offloading_session(
+            session_id, role=OffloadingSessionRole.PRODUCER
+        )
+        if session.producer is None:
+            raise AgentSdkError(
+                ErrorCode.OFFLOADING_SESSION_INVALID,
+                f"producer endpoint is missing for offloading session {session_id}",
+            )
         adapter = self._require_media_adapter()
         for field, value in (
             ("width", width),
@@ -1381,14 +1464,139 @@ class AgentSdk:
                     f"{field} must be greater than zero",
                     field=field,
                 )
-        return await adapter.start_video_upload(
-            session,
-            camera_id=camera_id,
-            width=width,
-            height=height,
-            fps=fps,
-            bitrate_kbps=bitrate_kbps,
+        targets = await self._validate_offloading_targets(session, target_agent_ids)
+        upload: VideoUploadHandle | None = None
+        try:
+            upload = await adapter.start_video_upload(
+                session,
+                camera_id=camera_id,
+                width=width,
+                height=height,
+                fps=fps,
+                bitrate_kbps=bitrate_kbps,
+            )
+            session.state = "SOURCE_CONNECTED"
+            consumers = await self._request_offloading_consumers(session, targets)
+            failed: list[str] = []
+            for target_agent_id in targets:
+                invitation = self._build_offloading_invitation(
+                    session, target_agent_id, consumers[target_agent_id]
+                )
+                receipt = await self.send_message(
+                    session.group_id,
+                    target_agent_id,
+                    invitation,
+                    message_type="processed_video_invitation",
+                    task_id=f"offloading:{session.session_id}",
+                    timeout_seconds=10.0,
+                )
+                if not receipt.delivered:
+                    failed.append(target_agent_id)
+            if failed:
+                raise AgentSdkError(
+                    ErrorCode.MESSAGE_DELIVERY_FAILED,
+                    "Video Server is pulling, but consumer invitation delivery failed",
+                    details={"failed_agent_ids": failed},
+                )
+            return upload
+        except BaseException:
+            if upload is not None:
+                try:
+                    await upload.stop()
+                except BaseException:
+                    pass
+                finally:
+                    session.state = "ALLOCATED"
+            raise
+
+    @logged_async
+    async def accept_offloading_session(
+        self,
+        sender_agent_id: str,
+        group_id: str,
+        invitation: Mapping[str, Any],
+    ) -> OffloadingSession:
+        """Import B's role-scoped processed-stream invitation on a consumer Agent."""
+        self._require_ready()
+        if self._profile is None:
+            raise AgentSdkError(
+                ErrorCode.GROUP_NOT_ACTIVE, "local identity has not been applied"
+            )
+        assert self._groups is not None
+        await self._groups.resolve(group_id, sender_agent_id)
+        await self._groups.resolve(group_id, self._profile.agent_id)
+        if invitation.get("type") != "processed_video_invitation":
+            raise AgentSdkError(
+                ErrorCode.OFFLOADING_SESSION_INVALID,
+                "invitation type must be processed_video_invitation",
+                field="type",
+            )
+        if invitation.get("version") != "1.0":
+            raise AgentSdkError(
+                ErrorCode.OFFLOADING_SESSION_INVALID,
+                "unsupported offloading invitation version",
+                field="version",
+            )
+        expected_fields = {
+            "group_id": group_id,
+            "source_agent_id": sender_agent_id,
+            "consumer_agent_id": self._profile.agent_id,
+        }
+        for field, expected in expected_fields.items():
+            if invitation.get(field) != expected:
+                raise AgentSdkError(
+                    ErrorCode.OFFLOADING_SESSION_INVALID,
+                    f"invitation {field} does not match the authenticated context",
+                    field=field,
+                )
+        session_id = self._require_nonempty_string(
+            invitation.get("session_id"),
+            "session_id",
+            ErrorCode.OFFLOADING_SESSION_INVALID,
         )
+        expires_at = self._parse_optional_datetime(
+            invitation.get("expires_at"),
+            error_code=ErrorCode.OFFLOADING_SESSION_INVALID,
+        )
+        if expires_at is not None and expires_at <= datetime.now(timezone.utc):
+            raise AgentSdkError(
+                ErrorCode.CREDENTIAL_EXPIRED,
+                "offloading invitation has expired",
+                field="expires_at",
+            )
+        processed_stream = self._parse_processed_video_endpoint(
+            invitation.get("processed_stream"),
+            error_code=ErrorCode.OFFLOADING_SESSION_INVALID,
+            field_prefix="processed_stream",
+        )
+        session = OffloadingSession(
+            session_id=session_id,
+            sandbox_id=str(invitation.get("sandbox_id", "")),
+            state=str(invitation.get("state", "SOURCE_CONNECTED")),
+            expires_at=expires_at,
+            metadata={
+                key: value
+                for key, value in invitation.items()
+                if key != "processed_stream"
+            },
+            role=OffloadingSessionRole.CONSUMER,
+            group_id=group_id,
+            source_agent_id=sender_agent_id,
+            processed_stream=processed_stream,
+        )
+        existing = self._offloading_sessions.get(session_id)
+        if existing is not None and existing != session:
+            raise AgentSdkError(
+                ErrorCode.OFFLOADING_SESSION_INVALID,
+                f"offloading session {session_id} is already bound to different metadata",
+            )
+        assert self._routes is not None
+        await self._routes.replace_group_peers(
+            self._offloading_route_key(session_id),
+            {processed_stream.video_server_ip},
+        )
+        self._offloading_sessions[session_id] = session
+        return session
 
     @logged_async
     async def get_processed_video_stream(
@@ -1402,22 +1610,294 @@ class AgentSdk:
                 "timeout_seconds must be greater than zero",
                 field="timeout_seconds",
             )
-        session = self._require_offloading_session(session_id)
+        session = self._require_offloading_session(
+            session_id, role=OffloadingSessionRole.CONSUMER
+        )
+        if session.processed_stream is None:
+            raise AgentSdkError(
+                ErrorCode.OFFLOADING_SESSION_INVALID,
+                f"processed stream endpoint is missing for offloading session {session_id}",
+            )
         adapter = self._require_media_adapter()
         return await asyncio.wait_for(
             adapter.get_processed_video_stream(session, timeout_seconds),
             timeout=timeout_seconds,
         )
 
-    def _require_offloading_session(self, session_id: str) -> OffloadingSession:
+    def _require_offloading_session(
+        self,
+        session_id: str,
+        *,
+        role: OffloadingSessionRole,
+    ) -> OffloadingSession:
         self._require_ready()
         session = self._offloading_sessions.get(session_id)
-        if session is None or session.state != "CONNECTED":
+        if session is None or session.state in {"CLOSED", "FAILED", "STOPPED"}:
             raise AgentSdkError(
                 ErrorCode.OFFLOADING_SESSION_NOT_FOUND,
-                f"connected offloading session {session_id} was not found",
+                f"active offloading session {session_id} was not found",
+            )
+        if session.role is not role:
+            raise AgentSdkError(
+                ErrorCode.OFFLOADING_ROLE_INVALID,
+                f"offloading session {session_id} has role {session.role.value}; "
+                f"{role.value} is required",
             )
         return session
+
+    async def _validate_offloading_targets(
+        self,
+        session: OffloadingSession,
+        target_agent_ids: Sequence[str],
+    ) -> tuple[str, ...]:
+        if target_agent_ids is None or isinstance(target_agent_ids, (str, bytes)):
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "target_agent_ids must be a sequence of Agent IDs",
+                field="target_agent_ids",
+            )
+        try:
+            targets = tuple(target_agent_ids)
+        except TypeError as exc:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "target_agent_ids must be a sequence of Agent IDs",
+                field="target_agent_ids",
+            ) from exc
+        if not targets or any(
+            not isinstance(item, str) or not item.strip() for item in targets
+        ):
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "target_agent_ids must contain non-empty Agent IDs",
+                field="target_agent_ids",
+            )
+        if len(set(targets)) != len(targets):
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "target_agent_ids must not contain duplicates",
+                field="target_agent_ids",
+            )
+        if session.source_agent_id in targets:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "the source Agent cannot be a video consumer",
+                field="target_agent_ids",
+            )
+        assert self._groups is not None
+        for target_agent_id in targets:
+            await self._groups.resolve(session.group_id, target_agent_id)
+        return targets
+
+    async def _request_offloading_consumers(
+        self,
+        session: OffloadingSession,
+        target_agent_ids: tuple[str, ...],
+    ) -> dict[str, ProcessedVideoEndpoint]:
+        assert self._compute_runtime is not None
+        path = (
+            "/compute/v1/offloading-sessions/"
+            f"{quote(session.session_id, safe='')}/consumers"
+        )
+        body = await self._authenticate_control_request(
+            path,
+            {
+                "request_id": str(uuid.uuid4()),
+                "agent_id": session.source_agent_id,
+                "group_id": session.group_id,
+                "target_agent_ids": list(target_agent_ids),
+            },
+        )
+        response = await self._compute_runtime.request("POST", path, body)
+        raw_consumers = self._require_response_object(response, "consumers")
+        consumers: dict[str, ProcessedVideoEndpoint] = {}
+        for target_agent_id in target_agent_ids:
+            consumers[target_agent_id] = self._parse_processed_video_endpoint(
+                raw_consumers.get(target_agent_id),
+                error_code=ErrorCode.RUNTIME_REJECTED,
+                field_prefix=f"consumers.{target_agent_id}",
+            )
+        tickets = [endpoint.access_ticket for endpoint in consumers.values()]
+        if len(set(tickets)) != len(tickets):
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime returned a consumer ticket shared by multiple Agents",
+                field="consumers",
+            )
+        return consumers
+
+    @staticmethod
+    def _build_offloading_invitation(
+        session: OffloadingSession,
+        consumer_agent_id: str,
+        endpoint: ProcessedVideoEndpoint,
+    ) -> dict[str, Any]:
+        invitation: dict[str, Any] = {
+            "type": "processed_video_invitation",
+            "version": "1.0",
+            "session_id": session.session_id,
+            "group_id": session.group_id,
+            "source_agent_id": session.source_agent_id,
+            "consumer_agent_id": consumer_agent_id,
+            "sandbox_id": session.sandbox_id,
+            "state": "SOURCE_CONNECTED",
+            "processed_stream": {
+                "video_server_ip": endpoint.video_server_ip,
+                "offer_url": endpoint.offer_url,
+                "access_ticket": endpoint.access_ticket,
+                "protocol": endpoint.protocol,
+                "signaling": endpoint.signaling,
+            },
+        }
+        if session.expires_at is not None:
+            invitation["expires_at"] = session.expires_at.isoformat().replace(
+                "+00:00", "Z"
+            )
+        return invitation
+
+    @staticmethod
+    def _require_nonempty_string(
+        value: Any,
+        field: str,
+        error_code: ErrorCode,
+    ) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise AgentSdkError(
+                error_code,
+                f"{field} must be a non-empty string",
+                field=field,
+            )
+        return value.strip()
+
+    @classmethod
+    def _parse_video_upload_endpoint(
+        cls,
+        value: Any,
+        *,
+        error_code: ErrorCode,
+        field_prefix: str,
+    ) -> VideoUploadEndpoint:
+        if not isinstance(value, Mapping):
+            raise AgentSdkError(
+                error_code,
+                f"{field_prefix} must be an object",
+                field=field_prefix,
+            )
+        return VideoUploadEndpoint(
+            video_server_ip=cls._require_ip_address(
+                value.get("video_server_ip"),
+                f"{field_prefix}.video_server_ip",
+                error_code,
+            ),
+            source_start_url=cls._require_http_url(
+                value.get("source_start_url"),
+                f"{field_prefix}.source_start_url",
+                error_code,
+            ),
+            source_stop_url=cls._require_http_url(
+                value.get("source_stop_url"),
+                f"{field_prefix}.source_stop_url",
+                error_code,
+            ),
+            access_token=cls._require_nonempty_string(
+                value.get("access_token"),
+                f"{field_prefix}.access_token",
+                error_code,
+            ),
+        )
+
+    @classmethod
+    def _parse_processed_video_endpoint(
+        cls,
+        value: Any,
+        *,
+        error_code: ErrorCode,
+        field_prefix: str,
+    ) -> ProcessedVideoEndpoint:
+        if not isinstance(value, Mapping):
+            raise AgentSdkError(
+                error_code,
+                f"{field_prefix} must be an object",
+                field=field_prefix,
+            )
+        protocol = str(value.get("protocol", "webrtc"))
+        signaling = str(value.get("signaling", "non-trickle"))
+        if protocol != "webrtc" or signaling not in {"non-trickle", "trickle"}:
+            raise AgentSdkError(
+                error_code,
+                f"{field_prefix} contains an unsupported WebRTC profile",
+                field=field_prefix,
+            )
+        return ProcessedVideoEndpoint(
+            video_server_ip=cls._require_ip_address(
+                value.get("video_server_ip"),
+                f"{field_prefix}.video_server_ip",
+                error_code,
+            ),
+            offer_url=cls._require_http_url(
+                value.get("offer_url"),
+                f"{field_prefix}.offer_url",
+                error_code,
+            ),
+            access_ticket=cls._require_nonempty_string(
+                value.get("access_ticket"),
+                f"{field_prefix}.access_ticket",
+                error_code,
+            ),
+            protocol=protocol,
+            signaling=signaling,
+        )
+
+    @classmethod
+    def _require_ip_address(
+        cls,
+        value: Any,
+        field: str,
+        error_code: ErrorCode,
+    ) -> str:
+        text = cls._require_nonempty_string(value, field, error_code)
+        try:
+            return str(ipaddress.ip_address(text))
+        except ValueError as exc:
+            raise AgentSdkError(
+                error_code,
+                f"{field} must be an IP address",
+                field=field,
+            ) from exc
+
+    @classmethod
+    def _require_http_url(
+        cls,
+        value: Any,
+        field: str,
+        error_code: ErrorCode,
+    ) -> str:
+        text = cls._require_nonempty_string(value, field, error_code)
+        try:
+            parsed = urlsplit(text)
+            port = parsed.port
+        except ValueError as exc:
+            raise AgentSdkError(
+                error_code, f"{field} is not a valid URL", field=field
+            ) from exc
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+            or port is not None and not 1 <= port <= 65535
+        ):
+            raise AgentSdkError(
+                error_code,
+                f"{field} must be an HTTP/HTTPS URL without credentials or fragment",
+                field=field,
+            )
+        return text
+
+    @staticmethod
+    def _offloading_route_key(session_id: str) -> str:
+        return f"offloading:{session_id}"
 
     def _require_media_adapter(self) -> MediaOffloadAdapter:
         if self._media_offload_adapter is None:
@@ -1710,16 +2190,26 @@ class AgentSdk:
         return value
 
     @staticmethod
-    def _parse_optional_datetime(value: Any) -> datetime | None:
+    def _parse_optional_datetime(
+        value: Any,
+        *,
+        error_code: ErrorCode = ErrorCode.RUNTIME_REJECTED,
+    ) -> datetime | None:
         if not isinstance(value, str) or not value:
             return None
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError as exc:
             raise AgentSdkError(
-                ErrorCode.RUNTIME_REJECTED,
-                "Runtime response contains an invalid RFC3339 timestamp",
+                error_code,
+                "Response data contains an invalid RFC3339 timestamp",
             ) from exc
+        if parsed.tzinfo is None:
+            raise AgentSdkError(
+                error_code,
+                "Response data contains an RFC3339 timestamp without a timezone",
+            )
+        return parsed.astimezone(timezone.utc)
 
     @logged_async
     async def get_group_snapshot(self, group_id: str) -> GroupConfigSnapshot | None:
@@ -1757,6 +2247,9 @@ class AgentSdk:
                 await self._routes.close()
             if self._masque is not None:
                 await self._masque.close()
+            if self._compute_runtime is not None and self._compute_runtime is not self._runtime:
+                await self._compute_runtime.close()
+            self._compute_runtime = None
             if self._runtime is not None:
                 await self._runtime.close()
             if self._tun is not None:

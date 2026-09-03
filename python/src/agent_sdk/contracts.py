@@ -122,14 +122,12 @@ class RemoteVideoStream(Protocol):
 
 
 class MediaOffloadAdapter(Protocol):
-    """Platform WebRTC adapter; implementations own camera and PeerConnections."""
+    """Platform WebRTC adapter; implementations own camera and PeerConnections.
 
-    async def connect(
-        self,
-        session: OffloadingSession,
-        signaling: Mapping[str, Any],
-        timeout_seconds: float,
-    ) -> None: ...
+    ``start_video_upload`` must not return until the Video Server has started
+    pulling the source track. The SDK sends consumer invitations only after
+    that point.
+    """
 
     async def start_video_upload(
         self,

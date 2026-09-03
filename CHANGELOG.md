@@ -2,6 +2,76 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-03 — 群组下行确认回带 group_id
+
+### 修改原因
+
+- 核心网下发建组邀请和群组配置时已在 payload 中携带 `group_id`；原 SDK 的 WebSocket 响应只有 `result`，无法按最新 `message.txt` 契约明确关联群组。
+
+### 修改方式
+
+- Python 与 Android Runtime WebSocket 传输层从下发 payload 读取非空 `group_id`，并在邀请 `ACCEPT`/`REJECT` 或配置 `ACK`/`REJECT` 响应中原样回带为 `payload.group_id`；`request_id` 并发关联与 `transaction_id` 处理保持不变。
+- 两端协议说明和下行线路契约测试同步更新，覆盖乱序返回时各请求的 `group_id` 不串线。
+
+### 验证内容
+
+- Python 全量 `105 passed`；Android SDK、Generic App 与 RayNeo App Debug 单元测试全部通过，Android SDK Lint 通过；Generic 与 RayNeo Debug APK 已重新构建并核对包名、版本与 SHA-256。
+
+## 2026-09-01 — N6/DN Mock Video Server 与 App 算力视频联调
+
+### 修改原因
+
+- 当前核心网没有实际算力沙箱，`create_offloading_session/createOffloadingSession` 无法得到可用的 Video Server 端点，端侧摄像头拉源、按 Agent 分发 Ticket 和处理流下行无法做物理链路验证。
+- SDK 的算力控制调用原来只能使用 AgentRuntime 地址；联调 Mock 位于 N6 后的 DN，需要一个显式、可路由且不改变生产默认行为的控制面覆写。
+
+### 修改方式
+
+- 新增 `mock-video-server`：以 `172.30.0.10:28500` 接入已有 `compose_n6`，实现会话分配、服务端拉源 Offer、首帧确认、多 Agent 独立 Ticket、处理流 Offer/Answer、会话停止和状态调试接口。视频经真实 aiortc WebRTC 中继，左上角增加紫色/绿色标记以证明经过服务端处理。
+- 容器显式把 UE 网段 `10.60.0.0/16`、`10.61.0.0/16` 的回程下一跳设为 UPF N6 地址 `172.30.0.2`；部署文件复用外部 `compose_n6`，不修改 free6GC 主 Compose。
+- Python/Android SDK 初始化增加可选 `compute_control_ip/computeControlIp + compute_control_port/computeControlPort`。未设置时继续请求原 AgentRuntime；设置时为控制端点安装 Agent TUN 主机路由，并仅把 `/compute` 请求发往该端点。
+- Android Generic/RayNeo App 接入真实 `google-webrtc` 媒体适配器。B 的群组就绪后显示“开始视频算力测试”按钮，授权摄像头后创建会话并启动上传；A/眼镜异步接受 P2P 视频邀请、拉取处理流，并记录首帧和持续帧计数。App 升级为 `0.2.6`。
+
+### 验证内容
+
+- Mock 本机与已部署容器均完成真实 WebRTC 端到端探测：`SOURCE_CONNECTED`、独立 consumer ticket、处理流 `320x180` 及服务端标记像素均通过。
+- 容器健康检查通过，固定接入 `compose_n6/172.30.0.10`；UPF `172.30.0.2` 可达 Mock，容器回程路由已核对。
+- Python 105 项测试通过，Wheel 重建并通过 `twine check`；Android SDK、Generic/RayNeo 单元测试通过，两个 flavor 编译、Lint 和 Debug APK 构建通过。当前主机没有 ADB 设备，未冒充完成手机/眼镜实机媒体测试。
+
+## 2026-09-01 — 视频卸载支持按多个 Agent 定向同步
+
+### 修改原因
+
+- 视频源 Agent B 所在群组可能包含多个 Agent，原单接收方流程无法表达“只把本次处理流同步给指定成员”。
+- Video Server 尚未确认从 B 拉流时就发送处理流信息，会使接收方拿到暂不可用的流；生产端 Token 也不能通过 P2P 泄露给其他 Agent。
+
+### 修改方式
+
+- Python/Android SDK 将卸载会话区分为生产端和消费端角色；B 使用本地身份及已提交的 `group_id/groupId` 创建生产端会话。
+- `start_video_upload/startVideoUpload` 新增目标 Agent ID 列表。SDK 先校验目标均为当前群组成员并启动摄像头/WebRTC，待媒体适配器确认 Video Server 已开始拉流后，再调用 `/compute/v1/offloading-sessions/{session_id}/consumers` 获取每个目标独立的处理流端点和 Ticket。
+- SDK 通过现有 A2A P2P 通道逐个发送 `processed_video_invitation`；接收方使用 `accept_offloading_session/acceptOffloadingSession` 导入会话后调用 `get_processed_video_stream/getProcessedVideoStream` 拉取处理流。
+- 生产端 Token 不进入 P2P 消息，消费端 Ticket 按 Agent 隔离并从日志脱敏；任一控制面请求或通知失败时停止本次上传并恢复会话状态。Python Wheel 升级为 `0.17.0`。
+
+### 验证内容
+
+- Python 单元测试覆盖两个目标的定向通知、生产/消费角色约束、群外目标拦截、处理流导入和 Ticket 脱敏。
+- Android 单元测试覆盖控制面参数、P2P 邀请内容、消费端导入、路由安装和处理流获取；同时执行 Android Lint。
+
+## 2026-09-01 — 新增雷鸟眼镜 App 独立安装说明
+
+### 修改原因
+
+- 上午完成的雷鸟 X3 Pro USB 驱动、ADB、APK 安装和首次 VPN 授权流程分散在脚本、Android 手册及现场截图中，不便于交付给测试人员重复操作。
+
+### 修改方式
+
+- 新增《雷鸟 X3 Pro Agent App 安装说明》，整理 Windows 环境准备、Zadig WinUSB 驱动、ADB 授权、PowerShell 一键安装、内部 VPN 预授权、手工安装、眼镜操作、版本验证、升级卸载和故障排查。
+- 文档引用上午的两张 Zadig 截图，并明确只能选择 USB ID `18D1:4EE2` 的 `ADB Interface (Interface 1)`，避免误改 MTP 或其他设备驱动。
+- 根 README 和 Android 手册增加独立安装说明入口。
+
+### 验证内容
+
+- 文档命令、包名、Activity、脚本参数、固定部署端点、APK 版本及 SHA-256 均按当前代码和重新构建产物核对。
+
 ## 2026-09-01 — 测试能力 VC 生效时间提前一年
 
 ### 修改原因

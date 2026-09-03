@@ -179,6 +179,7 @@ class HttpRuntimeTransport:
         ],
     ) -> None:
         request_id: str | None = None
+        group_id: str | None = None
         try:
             message = json.loads(raw_message)
             if not isinstance(message, Mapping):
@@ -202,6 +203,9 @@ class HttpRuntimeTransport:
             payload = message.get("payload")
             if not isinstance(payload, Mapping):
                 raise ValueError("payload must be a JSON object")
+            raw_group_id = payload.get("group_id")
+            if isinstance(raw_group_id, str) and raw_group_id:
+                group_id = raw_group_id
             log_event(
                 self._logger,
                 logging.INFO,
@@ -231,10 +235,13 @@ class HttpRuntimeTransport:
             action = NetworkMessageAction.REJECT
         if request_id is None:
             return
+        response_payload = {"result": action.value}
+        if group_id is not None:
+            response_payload = {"group_id": group_id, **response_payload}
         response = {
             "kind": "response",
             "request_id": request_id,
-            "payload": {"result": action.value},
+            "payload": response_payload,
         }
         try:
             async with self._downlink_send_lock:

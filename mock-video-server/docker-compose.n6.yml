@@ -1,0 +1,28 @@
+services:
+  mock-video-server:
+    build:
+      context: .
+    container_name: agent-sdk-mock-video-server
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    environment:
+      MOCK_VIDEO_SERVER_IP: "172.30.0.10"
+      MOCK_VIDEO_PORT: "28500"
+      UPF_N6_IP: "172.30.0.2"
+      UE_INTERNET_CIDR: "10.60.0.0/16"
+      UE_ACN_CIDR: "10.61.0.0/16"
+      LOG_LEVEL: "INFO"
+    networks:
+      n6:
+        ipv4_address: 172.30.0.10
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:28500/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+networks:
+  n6:
+    external: true
+    name: compose_n6

@@ -50,7 +50,7 @@ async def test_runtime_downlink_websocket_supports_concurrent_out_of_order_respo
         if payload["sequence"] == 1:
             await release_first.wait()
             return NetworkMessageAction.ACCEPT
-        return NetworkMessageAction.REJECT
+        return NetworkMessageAction.ACK
 
     transport = HttpRuntimeTransport("127.0.0.1", port)
     try:
@@ -66,29 +66,29 @@ async def test_runtime_downlink_websocket_supports_concurrent_out_of_order_respo
                 "request_id": "delivery-1",
                 "message_type": "ACN_AGENT_GROUPING_INVITATION",
                 "transaction_id": 49,
-                "payload": {"sequence": 1},
+                "payload": {"group_id": "group-invitation", "sequence": 1},
             }
         )
         await socket.send_json(
             {
                 "kind": "request",
                 "request_id": "delivery-2",
-                "message_type": "ACN_AGENT_GROUPING_INVITATION",
+                "message_type": "ACN_AGENT_GROUPING_NOTIFICATION",
                 "transaction_id": 50,
-                "payload": {"sequence": 2},
+                "payload": {"group_id": "group-config", "sequence": 2},
             }
         )
 
         assert await asyncio.wait_for(responses.get(), timeout=1) == {
             "kind": "response",
             "request_id": "delivery-2",
-            "payload": {"result": "REJECT"},
+            "payload": {"group_id": "group-config", "result": "ACK"},
         }
         release_first.set()
         assert await asyncio.wait_for(responses.get(), timeout=1) == {
             "kind": "response",
             "request_id": "delivery-1",
-            "payload": {"result": "ACCEPT"},
+            "payload": {"group_id": "group-invitation", "result": "ACCEPT"},
         }
         assert {call[1] for call in calls} == {49, 50}
     finally:
@@ -134,6 +134,7 @@ async def test_sdk_maps_nas_invitation_to_network_listener(sdk_fixture):
     listener = AckNetworkListener(NetworkMessageAction.ACCEPT)
     sdk.register_network_message_listener(listener)
     payload = {
+        "group_id": "group-a-b",
         "group_config": {"group_name": "task-patrol"},
         "group_administrator": {"agent_id": "a1"},
     }

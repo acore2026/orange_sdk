@@ -35,6 +35,7 @@ _SENSITIVE_KEYS = {
     "signature",
     "set_cookie",
     "token",
+    "ticket",
     "vc0",
     "vc1",
     "vc_list",
@@ -45,7 +46,7 @@ def _is_sensitive(key: str) -> bool:
     normalized = key.lower().replace("-", "_")
     return normalized in _SENSITIVE_KEYS or normalized.endswith("_vc_id") or any(
         normalized.endswith(f"_{suffix}")
-        for suffix in ("api_key", "password", "secret", "signature", "token")
+        for suffix in ("api_key", "password", "secret", "signature", "token", "ticket")
     )
 
 

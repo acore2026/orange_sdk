@@ -148,6 +148,7 @@ class AgentSdkGroupConfigTest {
         val action = runtime.deliverDownlink(
             "ACN_AGENT_GROUPING_INVITATION",
             buildJsonObject {
+                put("group_id", "group-a-b")
                 put("group_config", buildJsonObject { put("group_name", "task-patrol") })
                 put("group_administrator", buildJsonObject { put("agent_id", "a1") })
             },
@@ -286,49 +287,147 @@ class AgentSdkGroupConfigTest {
     @Test
     fun `offloading video delegates to configured media adapter`() = runTest {
         initializeSdk()
+        runtime.deliverGroupConfig(groupConfig(includeSecondPeer = true))
 
         val session = sdk.createOffloadingSession(
             LOCAL_ID,
             workloadType = "video_rendering",
+            groupId = "g1",
             sandboxId = "sandbox-edge-1",
         )
         val upload = sdk.startVideoUpload(
             session.sessionId,
+            targetAgentIds = listOf(PEER_ID, SECOND_PEER_ID),
             cameraId = "2",
             width = 1280,
             height = 720,
             fps = 30,
             bitrateKbps = 2500,
         )
-        val track = sdk.getProcessedVideoStream(session.sessionId)
-
-        assertEquals("CONNECTED", session.state)
-        assertEquals("session-1", media.connectedSession)
+        assertEquals("ALLOCATED", session.state)
+        assertFalse(session.toString().contains("producer-token"))
         assertEquals("camera-track-1", upload.trackId)
-        assertEquals("processed-track-1", track.trackId)
         assertEquals("2", media.cameraId)
         assertEquals(
             setOf(
-                "request_id", "agent_id", "workload_type", "preferred_sandbox_id",
+                "request_id", "agent_id", "workload_type", "group_id", "preferred_sandbox_id",
                 "timestamp", "proof",
             ),
-            runtime.lastBody!!.keys,
+            runtime.bodies.getValue("/compute/v1/offloading-sessions").keys,
         )
         assertEquals(
             "video_rendering",
-            runtime.lastBody!!["workload_type"]!!.jsonPrimitive.content,
+            runtime.bodies.getValue("/compute/v1/offloading-sessions")
+                .getValue("workload_type").jsonPrimitive.content,
         )
-        UUID.fromString(runtime.lastBody!!["request_id"]!!.jsonPrimitive.content)
-        assertFalse(runtime.lastBody!!.containsKey("task_type"))
+        UUID.fromString(
+            runtime.bodies.getValue("/compute/v1/offloading-sessions")
+                .getValue("request_id").jsonPrimitive.content,
+        )
+        assertFalse(runtime.bodies.getValue("/compute/v1/offloading-sessions").containsKey("task_type"))
         assertEquals(
             "2026-08-21T09:00:00Z",
-            runtime.lastBody!!["timestamp"]!!.jsonPrimitive.content,
+            runtime.bodies.getValue("/compute/v1/offloading-sessions")
+                .getValue("timestamp").jsonPrimitive.content,
         )
         assertEquals(
             "test-proof",
-            runtime.lastBody!!["proof"]!!.jsonObject["jws"]!!
+            runtime.bodies.getValue("/compute/v1/offloading-sessions")
+                .getValue("proof").jsonObject["jws"]!!
                 .jsonPrimitive.content,
         )
+        assertEquals(listOf(PEER_ID, SECOND_PEER_ID), runtime.bodies
+            .getValue("/compute/v1/offloading-sessions/session-1/consumers")
+            .getValue("target_agent_ids").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(2, peer.bodies.size)
+        peer.bodies.forEachIndexed { index, wire ->
+            val invitation = wire.getValue("payload").jsonObject
+            assertEquals(
+                "processed_video_invitation",
+                invitation.getValue("type").jsonPrimitive.content,
+            )
+            assertEquals(
+                listOf(PEER_ID, SECOND_PEER_ID)[index],
+                invitation.getValue("consumer_agent_id").jsonPrimitive.content,
+            )
+            assertFalse(invitation.toString().contains("producer-token"))
+            assertEquals(
+                "consumer-ticket-${index + 1}",
+                invitation.getValue("processed_stream").jsonObject
+                    .getValue("access_ticket").jsonPrimitive.content,
+            )
+        }
+    }
+
+    @Test
+    fun `compute control override installs route and isolates compute requests`() = runTest {
+        val computeRuntime = FakeRuntime()
+        sdk = AgentSdk(
+            tunnelController = tunnel,
+            masqueTransport = masque,
+            proofVerifier = ProofVerifier { },
+            controlRequestAuthenticator = FakeControlAuthenticator,
+            devicePublicKeyProvider = FakeDevicePublicKeyProvider,
+            messageSigner = FakeMessageSigner,
+            peerMessenger = peer,
+            runtimeFactory = { _, port -> if (port == 28500) computeRuntime else runtime },
+            localServerFactory = { server },
+            localAddressResolver = addressResolver,
+            mediaOffloadAdapter = media,
+            testCapabilityVcIssuer = testCapabilityIssuer,
+        )
+        sdk.importTestCapabilityIssuerPrivateKey(testPrivateKeyPem())
+        sdk.initialize(
+            agentRuntimeIp = "192.168.3.10",
+            agentRuntimePort = 8080,
+            localTcpPort = 4001,
+            localUdpPort = 28443,
+            masqueServerUrl = "https://192.168.3.10:4433",
+            computeControlIp = "172.30.0.10",
+            computeControlPort = 28500,
+        )
+        sdk.restoreLocalProfile(
+            AgentProfile(LOCAL_ID, "Agent A", buildJsonObject { put("id", "vc-a") }),
+        )
+        runtime.deliverGroupConfig(groupConfig())
+
+        sdk.createOffloadingSession(LOCAL_ID, "video_rendering", "g1")
+
+        assertEquals(setOf("172.30.0.10"), tunnel.groupPeers["compute-control"])
+        assertEquals("/compute/v1/offloading-sessions", computeRuntime.lastPath)
+        assertFalse(runtime.paths.contains("/compute/v1/offloading-sessions"))
+    }
+
+    @Test
+    fun `consumer imports invitation and gets processed video`() = runTest {
+        initializeSdk()
+        runtime.deliverGroupConfig(groupConfig())
+        val invitation = buildJsonObject {
+            put("type", "processed_video_invitation")
+            put("version", "1.0")
+            put("session_id", "session-from-b")
+            put("group_id", "g1")
+            put("source_agent_id", PEER_ID)
+            put("consumer_agent_id", LOCAL_ID)
+            put("sandbox_id", "video-server-1")
+            put("state", "SOURCE_CONNECTED")
+            put("expires_at", "2027-09-01T00:00:00Z")
+            put("processed_stream", buildJsonObject {
+                put("video_server_ip", "8.8.8.9")
+                put("offer_url", "https://8.8.8.9:28500/v1/processed/offer")
+                put("access_ticket", "consumer-ticket-a")
+                put("protocol", "webrtc")
+                put("signaling", "non-trickle")
+            })
+        }
+
+        val session = sdk.acceptOffloadingSession(PEER_ID, "g1", invitation)
+        val track = sdk.getProcessedVideoStream(session.sessionId)
+
+        assertEquals(com.rayneo.agent.sdk.model.OffloadingSessionRole.CONSUMER, session.role)
+        assertFalse(session.toString().contains("consumer-ticket-a"))
+        assertEquals("processed-track-1", track.trackId)
+        assertEquals(setOf("8.8.8.9"), tunnel.groupPeers["offloading:session-from-b"])
     }
 
     @Test
@@ -742,7 +841,10 @@ class AgentSdkGroupConfigTest {
         }
     }
 
-    private fun groupConfig(peerPort: String = "4001"): JsonObject = buildJsonObject {
+    private fun groupConfig(
+        peerPort: String = "4001",
+        includeSecondPeer: Boolean = false,
+    ): JsonObject = buildJsonObject {
         put("notification_type", "acf_group_config")
         put("version", "1.0.0")
         put("timestamp", Instant.now().toString())
@@ -750,6 +852,9 @@ class AgentSdkGroupConfigTest {
         put("members", buildJsonObject {
             put("agent1", member(LOCAL_ID, "Agent A", "8.8.8.7", "4001"))
             put("not-an-id", member(PEER_ID, "Agent B", "8.8.8.8", peerPort))
+            if (includeSecondPeer) {
+                put("agent-c", member(SECOND_PEER_ID, "Agent C", "8.8.8.10", "4002"))
+            }
         })
         put("proof", buildJsonObject { put("jws", "test") })
     }
@@ -816,6 +921,7 @@ class AgentSdkGroupConfigTest {
         var lastPath = ""
         var lastBody: JsonObject? = null
         val paths = mutableListOf<String>()
+        val bodies = mutableMapOf<String, JsonObject>()
         var ueInfoRequests = 0
         var downlinkHandler: (suspend (String, Int, JsonObject) -> NetworkMessageAction)? = null
 
@@ -839,13 +945,35 @@ class AgentSdkGroupConfigTest {
             lastPath = path
             paths += path
             lastBody = body
+            bodies[path] = body
             return if (path == "/compute/v1/offloading-sessions") {
                 buildJsonObject {
                     put("session_id", "session-1")
                     put("sandbox_id", "sandbox-edge-1")
-                    put("state", "CONNECTING")
-                    put("sdp_answer", "test-answer")
-                    put("expires_at", "2026-08-18T12:00:00Z")
+                    put("state", "ALLOCATED")
+                    put("group_id", "g1")
+                    put("source_agent_id", LOCAL_ID)
+                    put("expires_at", "2027-08-18T12:00:00Z")
+                    put("producer", buildJsonObject {
+                        put("video_server_ip", "8.8.8.9")
+                        put("source_start_url", "https://8.8.8.9:28500/v1/source-pulls")
+                        put("source_stop_url", "https://8.8.8.9:28500/v1/source-pulls/session-1")
+                        put("access_token", "producer-token")
+                    })
+                }
+            } else if (path == "/compute/v1/offloading-sessions/session-1/consumers") {
+                buildJsonObject {
+                    put("consumers", buildJsonObject {
+                        body.getValue("target_agent_ids").jsonArray.forEachIndexed { index, target ->
+                            put(target.jsonPrimitive.content, buildJsonObject {
+                                put("video_server_ip", "8.8.8.9")
+                                put("offer_url", "https://8.8.8.9:28500/v1/processed/offer")
+                                put("access_ticket", "consumer-ticket-${index + 1}")
+                                put("protocol", "webrtc")
+                                put("signaling", "non-trickle")
+                            })
+                        }
+                    })
                 }
             } else if (path == "/idm/v1/identity-applications") {
                 buildJsonObject {
@@ -908,6 +1036,7 @@ class AgentSdkGroupConfigTest {
         var ip = ""
         var port = 0
         var body: JsonObject? = null
+        val bodies = mutableListOf<JsonObject>()
         override suspend fun send(
             endpoint: String,
             body: JsonObject,
@@ -918,6 +1047,7 @@ class AgentSdkGroupConfigTest {
             this.ip = url.host
             this.port = url.port
             this.body = body
+            bodies += body
             return buildJsonObject { put("status", "OK") }
         }
     }
@@ -952,17 +1082,7 @@ class AgentSdkGroupConfigTest {
     }
 
     private class FakeMedia : MediaOffloadAdapter {
-        var connectedSession = ""
         var cameraId = ""
-
-        override suspend fun connect(
-            session: OffloadingSession,
-            signaling: JsonObject,
-            timeoutSeconds: Double,
-        ) {
-            assertEquals("test-answer", signaling["sdp_answer"].toString().trim('"'))
-            connectedSession = session.sessionId
-        }
 
         override suspend fun startVideoUpload(
             session: OffloadingSession,
@@ -997,5 +1117,6 @@ class AgentSdkGroupConfigTest {
     private companion object {
         const val LOCAL_ID = "did:example:agent-a"
         const val PEER_ID = "did:example:agent-b"
+        const val SECOND_PEER_ID = "did:example:agent-c"
     }
 }

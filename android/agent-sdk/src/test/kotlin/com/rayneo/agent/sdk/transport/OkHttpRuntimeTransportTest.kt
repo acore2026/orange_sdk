@@ -91,7 +91,7 @@ class OkHttpRuntimeTransportTest {
                     releaseFirst.await()
                     NetworkMessageAction.ACCEPT
                 } else {
-                    NetworkMessageAction.REJECT
+                    NetworkMessageAction.ACK
                 }
             }
             val serverSocket = opened.await()
@@ -99,13 +99,28 @@ class OkHttpRuntimeTransportTest {
             assertEquals(DOWNLINK_WEBSOCKET_PATH, upgrade.path)
             assertEquals("websocket", upgrade.getHeader("Upgrade")?.lowercase())
 
-            serverSocket.send(downlinkRequest("delivery-1", 49, 1))
-            serverSocket.send(downlinkRequest("delivery-2", 50, 2))
+            serverSocket.send(downlinkRequest(
+                requestId = "delivery-1",
+                messageType = "ACN_AGENT_GROUPING_INVITATION",
+                transactionId = 49,
+                groupId = "group-invitation",
+                sequence = 1,
+            ))
+            serverSocket.send(downlinkRequest(
+                requestId = "delivery-2",
+                messageType = "ACN_AGENT_GROUPING_NOTIFICATION",
+                transactionId = 50,
+                groupId = "group-config",
+                sequence = 2,
+            ))
             assertEquals(
                 buildJsonObject {
                     put("kind", "response")
                     put("request_id", "delivery-2")
-                    put("payload", buildJsonObject { put("result", "REJECT") })
+                    put("payload", buildJsonObject {
+                        put("group_id", "group-config")
+                        put("result", "ACK")
+                    })
                 },
                 Json.parseToJsonElement(responses.poll(2, TimeUnit.SECONDS)),
             )
@@ -114,7 +129,10 @@ class OkHttpRuntimeTransportTest {
                 buildJsonObject {
                     put("kind", "response")
                     put("request_id", "delivery-1")
-                    put("payload", buildJsonObject { put("result", "ACCEPT") })
+                    put("payload", buildJsonObject {
+                        put("group_id", "group-invitation")
+                        put("result", "ACCEPT")
+                    })
                 },
                 Json.parseToJsonElement(responses.poll(2, TimeUnit.SECONDS)),
             )
@@ -126,13 +144,22 @@ class OkHttpRuntimeTransportTest {
         }
     }
 
-    private fun downlinkRequest(requestId: String, transactionId: Int, sequence: Int) =
+    private fun downlinkRequest(
+        requestId: String,
+        messageType: String,
+        transactionId: Int,
+        groupId: String,
+        sequence: Int,
+    ) =
         buildJsonObject {
             put("kind", "request")
             put("request_id", requestId)
-            put("message_type", "ACN_AGENT_GROUPING_INVITATION")
+            put("message_type", messageType)
             put("transaction_id", transactionId)
-            put("payload", buildJsonObject { put("sequence", sequence) })
+            put("payload", buildJsonObject {
+                put("group_id", groupId)
+                put("sequence", sequence)
+            })
         }.toString()
 
     private companion object {

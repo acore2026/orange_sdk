@@ -10,11 +10,18 @@ import com.rayneo.agent.sdk.model.NetworkMessageType
 import com.rayneo.agent.sdk.model.OperationResult
 import com.rayneo.agent.sdk.transport.GroupMessageListener
 import com.rayneo.agent.sdk.transport.NetworkMessageListener
+import com.rayneo.agent.sdk.transport.VideoTrack
+import com.rayneo.agent.sdk.transport.VideoUploadHandle
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -22,6 +29,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import org.webrtc.VideoSink
 
 enum class LabLogLevel { INFO, SUCCESS, WARNING, ERROR }
 
@@ -65,7 +73,9 @@ class AgentTestRunner(
     private val onStatus: (RunnerStatus) -> Unit,
     private val onManualMessageSession: (ManualMessageSession?) -> Unit,
     private val onResetAvailability: (Boolean) -> Unit = {},
+    private val onVideoUploadAvailability: (Boolean) -> Unit = {},
 ) {
+    private val mediaScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val retrySignal = Channel<Unit>(Channel.CONFLATED)
     private val sendMutex = Mutex()
     private val operationMutex = Mutex()
@@ -77,6 +87,9 @@ class AgentTestRunner(
     private var manualMessageSession: ManualMessageSession? = null
     @Volatile
     private var resetRequested = false
+    @Volatile
+    private var videoUploadHandle: VideoUploadHandle? = null
+    private val receivedVideoSinks = mutableListOf<Pair<VideoTrack, VideoSink>>()
 
     fun retryCurrentStep() {
         retrySignal.trySend(Unit)
@@ -99,6 +112,8 @@ class AgentTestRunner(
                 localUdpPort = config.localUdpPort,
                 masqueServerUrl = config.masqueServerUrl,
                 masqueAuthorization = config.masqueToken?.let { "Bearer $it" },
+                computeControlIp = config.computeControlIp,
+                computeControlPort = config.computeControlPort,
             )
         }
         onLog(
@@ -125,7 +140,7 @@ class AgentTestRunner(
                     metadata = buildJsonObject {
                         put("region", "CN")
                         put("os", "Android")
-                        put("version", "0.2.5")
+                        put("version", "0.2.6")
                     },
                 )
             }
@@ -189,8 +204,12 @@ class AgentTestRunner(
 
     fun close() {
         onResetAvailability(false)
+        onVideoUploadAvailability(false)
         runCatching { networkListener?.close() }
         runCatching { groupListener?.close() }
+        receivedVideoSinks.forEach { (track, sink) -> runCatching { track.removeSink(sink) } }
+        receivedVideoSinks.clear()
+        mediaScope.cancel()
         manualMessageSession = null
         onManualMessageSession(null)
         retrySignal.close()
@@ -246,6 +265,58 @@ class AgentTestRunner(
         }
     }
 
+    suspend fun startVideoOffload(): VideoUploadHandle = operationMutex.withLock {
+        ensureResetNotRequested()
+        check(config.role == TestRole.B) { "只有 Agent B 可以启动视频上传" }
+        videoUploadHandle?.let { return@withLock it }
+        val route = checkNotNull(manualMessageSession) { "群组尚未就绪，不能启动视频算力测试" }
+        onVideoUploadAvailability(false)
+        onLog(
+            LabLogLevel.INFO,
+            "COMPUTE CREATE",
+            "调用 createOffloadingSession，group_id=${route.groupId}，Mock=${config.computeControlIp}:${config.computeControlPort}",
+        )
+        try {
+            val session = sdk.createOffloadingSession(
+                agentId = route.localAgentId,
+                workloadType = "video_relay",
+                groupId = route.groupId,
+                sandboxId = "mock-video-sandbox",
+                timeoutSeconds = 30.0,
+            )
+            onLog(
+                LabLogLevel.SUCCESS,
+                "COMPUTE CREATE",
+                "session_id=${session.sessionId}，video_server=${session.producer?.videoServerIp}",
+            )
+            onLog(
+                LabLogLevel.INFO,
+                "VIDEO UPLOAD",
+                "调用 startVideoUpload，视频消费者=[${route.targetAgentId}]",
+            )
+            sdk.startVideoUpload(
+                sessionId = session.sessionId,
+                targetAgentIds = listOf(route.targetAgentId),
+                cameraId = "0",
+                width = 1280,
+                height = 720,
+                fps = 24,
+                bitrateKbps = 2500,
+            ).also { handle ->
+                videoUploadHandle = handle
+                onLog(
+                    LabLogLevel.SUCCESS,
+                    "VIDEO UPLOAD",
+                    "服务端已拉到首帧，并已向 ${route.targetAgentName} 同步 ticket；track=${handle.trackId}",
+                )
+                onStatus(RunnerStatus("视频算力链路已启动", "B → Mock Video Server → ${route.targetAgentName}"))
+            }
+        } catch (error: Throwable) {
+            onVideoUploadAvailability(true)
+            throw error
+        }
+    }
+
     private fun installListeners() {
         networkListener = sdk.registerNetworkMessageListener(
             NetworkMessageListener { type, payload ->
@@ -284,7 +355,16 @@ class AgentTestRunner(
                     "A2A RECEIVE",
                     "group_id=$groupId，from=$senderAgentId，payload=${compact(payload)}",
                 )
-                onStatus(RunnerStatus("已收到 A2A 消息", "链路验证成功，SDK 继续运行"))
+                if (payload["type"]?.jsonPrimitive?.content == "processed_video_invitation") {
+                    onLog(
+                        LabLogLevel.INFO,
+                        "VIDEO INVITE",
+                        "已确认 P2P 邀请，后台调用 acceptOffloadingSession + getProcessedVideoStream",
+                    )
+                    mediaScope.launch { receiveProcessedVideo(groupId, senderAgentId, payload) }
+                } else {
+                    onStatus(RunnerStatus("已收到 A2A 消息", "链路验证成功，SDK 继续运行"))
+                }
             },
         )
     }
@@ -353,6 +433,7 @@ class AgentTestRunner(
         if (manualMessageSession == session) return
         manualMessageSession = session
         onManualMessageSession(session)
+        onVideoUploadAvailability(config.role == TestRole.B && videoUploadHandle == null)
         onLog(
             LabLogLevel.SUCCESS,
             "A2A READY",
@@ -364,6 +445,50 @@ class AgentTestRunner(
                 "目标 ${session.targetAgentName} · ${session.groupId}",
             ),
         )
+    }
+
+    private suspend fun receiveProcessedVideo(
+        groupId: String,
+        senderAgentId: String,
+        invitation: JsonObject,
+    ) {
+        try {
+            val track = operationMutex.withLock {
+                val session = sdk.acceptOffloadingSession(senderAgentId, groupId, invitation)
+                onLog(
+                    LabLogLevel.SUCCESS,
+                    "VIDEO ACCEPT",
+                    "session_id=${session.sessionId}，video_server=${session.processedStream?.videoServerIp}",
+                )
+                sdk.getProcessedVideoStream(session.sessionId, timeoutSeconds = 20.0)
+            }
+            var frames = 0L
+            val sink = VideoSink { frame ->
+                frames += 1
+                if (frames == 1L || frames % 120L == 0L) {
+                    onLog(
+                        LabLogLevel.SUCCESS,
+                        "VIDEO FRAME",
+                        "processed track=${track.trackId}，frames=$frames，${frame.buffer.width}x${frame.buffer.height}",
+                    )
+                    if (frames == 1L) {
+                        onStatus(RunnerStatus("已收到处理后视频首帧", "Mock Video Server WebRTC 下行正常"))
+                    }
+                }
+            }
+            track.addSink(sink)
+            synchronized(receivedVideoSinks) { receivedVideoSinks += track to sink }
+            onLog(LabLogLevel.SUCCESS, "VIDEO STREAM", "getProcessedVideoStream 返回 track=${track.trackId}")
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            onLog(
+                LabLogLevel.ERROR,
+                "VIDEO STREAM",
+                "处理流接收失败：${error.message ?: error::class.java.simpleName}",
+            )
+            onStatus(RunnerStatus("处理流接收失败", error.message ?: error::class.java.simpleName))
+        }
     }
 
     private suspend fun waitUntilCancelled(): Nothing {

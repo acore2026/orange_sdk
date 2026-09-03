@@ -14,6 +14,8 @@
 - [Agent B：发布能力、接受建组并接收消息](python/examples/agent_b_test.py)
 - [A/B 双实例 MASQUE 消息联调脚本](python/examples/masque_two_instance_test.py)
 - [Android/RayNeoOS 使用说明](android/README.md)
+- [N6 / DN Mock Video Server](mock-video-server/README.md)
+- [雷鸟 X3 Pro Agent App 安装说明](雷鸟眼镜App安装说明.md)
 - [Android A/B 双向手动消息联调 App](android/example-app/src/main/kotlin/com/rayneo/agent/example/MainActivity.kt)
 - [Proof 生成与校验说明](Agent-SDK-Proof生成与校验说明.md)
 
@@ -75,7 +77,9 @@ Python `reset_agent()` 与 Android `resetAgent()` 提供参数less 状态重置�
 两个摘要均为 32 字节且 proof 摘要在前。控制请求的 `request_id` 不进入业务
 文档摘要。
 核心网群组配置下行消息类型固定为
-`ACN_AGENT_GROUPING_NOTIFICATION`。A2A 消息使用
+`ACN_AGENT_GROUPING_NOTIFICATION`。建组邀请接受和群组配置确认的 WebSocket
+响应会将下发 payload 中的 `group_id` 原样回带，并分别返回 `ACCEPT` 和 `ACK`。
+A2A 消息使用
 `src_agent_id/dst_agent_id/type/task_id/payload`，成功响应为
 `{"status":"OK"}`。
 

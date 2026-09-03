@@ -1,6 +1,7 @@
 package com.rayneo.agent.example
 
 import android.annotation.SuppressLint
+import android.Manifest
 import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -8,6 +9,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -31,6 +33,7 @@ import android.widget.Toast
 import com.rayneo.agent.sdk.AgentSdk
 import com.rayneo.agent.sdk.model.AgentLifecycleState
 import com.rayneo.agent.sdk.vpn.AgentVpnService
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -75,6 +78,11 @@ class MainActivity : Activity() {
     private var manualSendButton: TextView? = null
     private var manualMessageSession: ManualMessageSession? = null
     private var manualMessageSending = false
+    private var computeVideoPanel: View? = null
+    private var computeVideoButton: TextView? = null
+    private var computeVideoAvailable = false
+    private var computeVideoStarting = false
+    private var pendingVideoStart = false
     private var resetAvailable = false
     private var resetArmed = false
     private var resetInProgress = false
@@ -106,6 +114,11 @@ class MainActivity : Activity() {
         manualMessageInput = null
         manualSendButton = null
         manualMessageSession = null
+        computeVideoPanel = null
+        computeVideoButton = null
+        computeVideoAvailable = false
+        computeVideoStarting = false
+        pendingVideoStart = false
         resetButton = null
         resetAvailable = false
         resetArmed = false
@@ -136,6 +149,10 @@ class MainActivity : Activity() {
                 ))
                 addView(field("masque_path", "CONNECT-IP 路径", "/.well-known/masque/ip"))
                 addView(field("masque_token", "MASQUE Token（可选，不保存）", "Bearer token", password = true))
+                addView(twoColumns(
+                    field("compute_ip", "N6 Mock Video Server IP", "172.30.0.10"),
+                    field("compute_port", "Mock 控制/信令端口", "28500", numeric = true),
+                ))
 
                 addView(section("03  Agent 服务端口"))
                 addView(body("MASQUE 外层源地址由 Android 系统路由自动选择，无需填写本机 Wi-Fi 或 VLAN 地址。"))
@@ -299,7 +316,10 @@ class MainActivity : Activity() {
             return
         }
         val config = activeConfig ?: return
-        val value = AgentSdk.create(service)
+        val mediaAdapter = AndroidWebRtcMediaOffloadAdapter(service) { event ->
+            appendLog(LabLogLevel.INFO, "WEBRTC", event)
+        }
+        val value = AgentSdk.create(service, mediaOffloadAdapter = mediaAdapter)
         val flow = AgentTestRunner(
             value,
             config,
@@ -307,6 +327,7 @@ class MainActivity : Activity() {
             ::setRunnerStatus,
             ::setManualMessageSession,
             ::setResetAvailable,
+            ::setVideoUploadAvailable,
         )
         sdk = value
         runner = flow
@@ -384,6 +405,13 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(12) })
+
+        if (config.role == TestRole.B) {
+            root.addView(computeVideoControls(), LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) })
+        }
 
         logOutput = TextView(this).apply {
             setTextColor(Palette.LOG_TEXT)
@@ -489,6 +517,38 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun computeVideoControls(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(16), dp(14), dp(16), dp(16))
+        background = rounded(Palette.INK_SURFACE, 14f, Palette.INK_LINE)
+        visibility = View.GONE
+        computeVideoPanel = this
+        addView(TextView(this@MainActivity).apply {
+            text = "COMPUTE VIDEO  /  N6 DN MOCK"
+            setTextColor(Palette.LINK)
+            textSize = 11f
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = .08f
+        })
+        addView(TextView(this@MainActivity).apply {
+            text = "B 创建算力会话、开启摄像头；Mock 拉到首帧后通过 P2P 通知 A 拉处理流。"
+            setTextColor(Palette.INK_MUTED)
+            textSize = 12f
+            setPadding(0, dp(6), 0, 0)
+        })
+        computeVideoButton = actionButton("开始视频算力测试", filled = true) {
+            startComputeVideo()
+        }.apply {
+            isEnabled = false
+            alpha = .45f
+        }.also {
+            addView(it, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48),
+            ).apply { topMargin = dp(10) })
+        }
+    }
+
     private fun setRunnerStatus(status: RunnerStatus) {
         runOnUiThread {
             logStatusTitle?.text = status.title
@@ -507,6 +567,80 @@ class MainActivity : Activity() {
                 manualMessageInput?.hint = "发送给 ${session.targetAgentName}"
             }
             updateManualSendButton()
+        }
+    }
+
+    private fun setVideoUploadAvailable(available: Boolean) {
+        runOnUiThread {
+            computeVideoAvailable = available
+            computeVideoPanel?.visibility = if (available || computeVideoStarting) View.VISIBLE else View.GONE
+            updateComputeVideoButton()
+        }
+    }
+
+    private fun startComputeVideo() {
+        val flow = runner ?: return
+        if (!computeVideoAvailable || computeVideoStarting) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingVideoStart = true
+            appendLog(LabLogLevel.INFO, "CAMERA", "等待摄像头权限；授权后自动继续")
+            requestPermissions(arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_REQUEST)
+            return
+        }
+        pendingVideoStart = false
+        computeVideoStarting = true
+        updateComputeVideoButton()
+        scope.launch {
+            try {
+                flow.startVideoOffload()
+                computeVideoAvailable = false
+                setRunnerStatus(RunnerStatus("视频算力链路已启动", "等待 A 接收 Mock 处理流"))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                computeVideoAvailable = true
+                appendLog(
+                    LabLogLevel.ERROR,
+                    "COMPUTE VIDEO",
+                    "启动失败：${error.message ?: error::class.java.simpleName}",
+                )
+                setRunnerStatus(RunnerStatus("视频算力测试失败", error.message ?: error::class.java.simpleName))
+            } finally {
+                computeVideoStarting = false
+                updateComputeVideoButton()
+            }
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != CAMERA_PERMISSION_REQUEST) return
+        val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+        appendLog(
+            if (granted) LabLogLevel.SUCCESS else LabLogLevel.ERROR,
+            "CAMERA",
+            if (granted) "摄像头权限已授予" else "摄像头权限被拒绝，无法启动视频上传",
+        )
+        if (granted && pendingVideoStart) startComputeVideo()
+        pendingVideoStart = false
+    }
+
+    private fun updateComputeVideoButton() {
+        computeVideoButton?.apply {
+            val ready = computeVideoAvailable && !computeVideoStarting
+            isEnabled = ready
+            alpha = if (ready) 1f else .45f
+            text = when {
+                computeVideoStarting -> "正在启动视频链路…"
+                !computeVideoAvailable -> "视频算力链路已启动"
+                else -> "开始视频算力测试"
+            }
         }
     }
 
@@ -740,6 +874,8 @@ class MainActivity : Activity() {
         dnn = value("dnn"),
         groupName = value("group_name"),
         message = value("message"),
+        computeControlIp = value("compute_ip"),
+        computeControlPort = intValue("compute_port"),
     )
 
     private fun restoreFormValues() {
@@ -758,6 +894,9 @@ class MainActivity : Activity() {
             ?: preferences.getString("masque_path", "/.well-known/masque/ip"))
         setValue("tcp_port", intentInt("tcp_port", preferences.getInt("tcp_port", 4001)))
         setValue("udp_port", intentInt("udp_port", preferences.getInt("udp_port", 28443)))
+        setValue("compute_ip", intent.getStringExtra("compute_ip")
+            ?: preferences.getString("compute_ip", "172.30.0.10"))
+        setValue("compute_port", intentInt("compute_port", preferences.getInt("compute_port", 28500)))
         setValue("owner", intent.getStringExtra("owner")
             ?: preferences.getString("owner", "android-test-owner-${selectedRole.name.lowercase()}"))
         setValue("agent_name", intent.getStringExtra("agent_name")
@@ -781,6 +920,8 @@ class MainActivity : Activity() {
             .putString("masque_path", config.masquePath)
             .putInt("tcp_port", config.localTcpPort)
             .putInt("udp_port", config.localUdpPort)
+            .putString("compute_ip", config.computeControlIp)
+            .putInt("compute_port", config.computeControlPort)
             .putString("owner", config.owner)
             .putString("agent_name", config.agentName)
             .putString("capability", config.capability)
@@ -940,6 +1081,7 @@ class MainActivity : Activity() {
 
     private companion object {
         const val VPN_PERMISSION_REQUEST = 1001
+        const val CAMERA_PERMISSION_REQUEST = 1002
         const val PREFERENCES = "agent-link-lab"
         const val MAX_LOG_LINES = 300
     }
