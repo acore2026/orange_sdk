@@ -310,13 +310,16 @@ Generic 与 RayNeo 示例 App 的运行页均提供“重置到状态1”。为�
 Reset 需要连续确认两次；执行期间会等待当前 SDK 调用明确结束，再清除本地状态，避免
 尚未结束的调用在 Reset 后重新写入身份。成功后停止自动流程并关闭当前链路，不会向
 AgentRuntime 发送去注册请求，也不会自动重新申请身份；本地持久化删除失败时保留原状态。
+Generic 与 RayNeo App 的“停止”按钮会先以 `reason=normal` 调用
+`deregisterIdentity`，等待成功或明确失败并记录日志后，再关闭 SDK、MASQUE、TUN
+和本地服务；它与上述 local-only Reset 语义互不混用。
 
 Core-network downlink frames use `kind + request_id + message_type +
 transaction_id + payload`. Each frame is handled in its own coroutine, so
 responses may be returned out of order and are correlated only by `request_id`.
 Invitation acceptance and group-configuration acknowledgement copy the
-downlink payload's `group_id` into the response payload alongside `result`,
-using `ACCEPT` and `ACK` respectively.
+downlink `payload.group_info.group_id` and `payload.group_id`, respectively,
+into the response payload alongside `result`, using `ACCEPT` and `ACK`.
 The local HTTP/1.1 listener now exposes only `/A2A/message` inside the CONNECT-IP
 path; the former Runtime callback paths are not available.
 

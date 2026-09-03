@@ -837,20 +837,40 @@ class MainActivity : Activity() {
             return
         }
         stopButton?.isEnabled = false
+        setRunnerStatus(RunnerStatus("正在停止", "先向核心网发送 Agent 去注册请求"))
+        val activeJob = runnerJob
+        val activeRunner = runner
+        val activeSdk = sdk
+        runnerJob = null
         scope.launch {
-            runnerJob?.cancel()
-            runnerJob = null
-            runner?.close()
+            activeJob?.cancelAndJoin()
+            if (activeSdk != null) {
+                try {
+                    withContext(Dispatchers.IO) {
+                        if (activeRunner != null) {
+                            activeRunner.deregisterAgentForStop()
+                        } else {
+                            deregisterIdentityForStop(activeSdk, ::appendLog)
+                        }
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    // The attempt and failure are logged by deregisterIdentityForStop.
+                    // A user-requested stop still releases all local resources.
+                }
+            }
+            activeRunner?.close()
             runner = null
             setManualMessageSession(null)
-            withContext(Dispatchers.IO) { sdk?.close() }
+            withContext(Dispatchers.IO) { activeSdk?.close() }
             sdk = null
             if (serviceBound) {
                 runCatching { unbindService(connection) }
                 serviceBound = false
                 vpnService = null
             }
-            appendLog(LabLogLevel.INFO, "APP", "SDK、MASQUE、TUN 与本地服务已关闭")
+            appendLog(LabLogLevel.INFO, "APP", "去注册流程结束；SDK、MASQUE、TUN 与本地服务已关闭")
             setRunnerStatus(RunnerStatus("已停止", "可以返回配置页修改参数"))
             stopButton?.apply {
                 text = "返回配置"

@@ -63,6 +63,8 @@ Python `reset_agent()` 与 Android `resetAgent()` 提供参数less 状态重置�
 仅清除本地持久化的 Profile/Card 并回到状态1 `NO_IDENTITY`，不发送去注册消息、
 不修改网侧身份；状态1调用幂等成功且同样不发送 HTTP。Generic 与雷鸟示例 App 均提供
 二次确认的“重置到状态1”操作，成功后停止当前自动流程，不会立即重新申请身份。
+两个 App 的“停止”操作语义不同：存在本地身份时先调用 `deregisterIdentity(..., "normal")`
+完成网侧去注册，再关闭 SDK、MASQUE、TUN 与本地服务；Reset 始终保持仅重置本地状态。
 
 能力注册通过 `capabilities` 现场生成的测试 VC，其 `valid_from` 固定为实际签发时间前
 一个日历年；`proof.created` 仍是实际签发时间，`valid_until` 仍从实际签发时间计算。
@@ -78,7 +80,8 @@ Python `reset_agent()` 与 Android `resetAgent()` 提供参数less 状态重置�
 文档摘要。
 核心网群组配置下行消息类型固定为
 `ACN_AGENT_GROUPING_NOTIFICATION`。建组邀请接受和群组配置确认的 WebSocket
-响应会将下发 payload 中的 `group_id` 原样回带，并分别返回 `ACCEPT` 和 `ACK`。
+响应分别将下发的 `payload.group_info.group_id` 和 `payload.group_id` 原样回带，
+并返回 `ACCEPT` 和 `ACK`。
 A2A 消息使用
 `src_agent_id/dst_agent_id/type/task_id/payload`，成功响应为
 `{"status":"OK"}`。

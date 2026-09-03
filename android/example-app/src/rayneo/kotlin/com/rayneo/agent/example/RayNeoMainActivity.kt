@@ -67,6 +67,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     private var resetAvailable = false
     private var resetArmed = false
     private var resetInProgress = false
+    private var stopInProgress = false
 
     private val vpnPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -457,22 +458,46 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private fun stopAndFinish() {
-        if (isFinishing) return
+        if (isFinishing || stopInProgress) return
+        stopInProgress = true
         setPrimaryAction(PrimaryMode.BUSY, "正在关闭…")
+        setStatus("正在停止", "先向核心网发送 Agent 去注册请求")
+        mBindingPair.updateView {
+            stopAction.isEnabled = false
+            stopAction.alpha = 0.45f
+        }
         lifecycleScope.launch {
-            closeResources()
+            closeResources(deregisterIdentity = true)
             finish()
         }
     }
 
-    private suspend fun closeResources() {
+    private suspend fun closeResources(deregisterIdentity: Boolean = false) {
         val activeJob = runnerJob
+        val activeRunner = runner
+        val activeSdk = sdk
         runnerJob = null
         activeJob?.cancelAndJoin()
-        runner?.close()
+        if (deregisterIdentity && activeSdk != null) {
+            try {
+                withContext(Dispatchers.IO) {
+                    if (activeRunner != null) {
+                        activeRunner.deregisterAgentForStop()
+                    } else {
+                        deregisterIdentityForStop(activeSdk, ::appendLog)
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // The attempt and failure are logged by deregisterIdentityForStop.
+                // A user-requested stop still releases all local resources.
+            }
+        }
+        activeRunner?.close()
         runner = null
         messageSession = null
-        withContext(Dispatchers.IO) { runCatching { sdk?.close() } }
+        withContext(Dispatchers.IO) { runCatching { activeSdk?.close() } }
         sdk = null
         if (serviceBound) {
             runCatching { unbindService(connection) }

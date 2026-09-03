@@ -2,6 +2,24 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-03 — 修正邀请 group_id 路径并让 App Stop 执行去注册
+
+### 修改原因
+
+- 真实建组邀请将群组 ID 放在 `payload.group_info.group_id`，上一版传输层和测试错误地按配置通知的顶层 `payload.group_id` 读取，导致邀请 `ACCEPT` 回包缺少 `group_id`。
+- Generic/RayNeo App 原“停止”按钮只关闭本地 SDK、MASQUE 和 TUN，没有向核心网发送 Agent 去注册请求。
+
+### 修改方式
+
+- Python/Android Runtime Transport 按消息类型提取群组 ID：邀请读取 `payload.group_info.group_id`，配置通知读取 `payload.group_id`；测试及协议示例改用真实邀请结构。
+- App Stop 在取消当前自动任务后、关闭 SDK 前调用 `deregisterIdentity(agentId, "normal")`；成功、拒绝和异常均写入日志，然后释放本地资源。Reset 继续保持只清理本地状态且不发送去注册。
+- Python SDK 升级为 `0.17.1`；Generic/RayNeo App 升级为 `0.2.7`、`versionCode=9`。
+
+### 验证内容
+
+- Python 全量 `105 passed`，`0.17.1` Wheel 重建并通过 `twine check`；Android SDK、Generic/RayNeo App 单元测试与三组 Lint 均通过。
+- Generic `0.2.7` 与 RayNeo `0.2.7-rayneo` Debug APK 已重新构建，包名、`versionCode=9`、SHA-256 和 APK v2 签名校验通过。
+
 ## 2026-09-03 — 群组下行确认回带 group_id
 
 ### 修改原因

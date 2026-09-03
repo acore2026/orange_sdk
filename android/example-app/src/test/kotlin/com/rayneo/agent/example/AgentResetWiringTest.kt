@@ -37,4 +37,24 @@ class AgentResetWiringTest {
         assertTrue(source.contains("activeSdk.resetAgent()"))
         assertTrue(source.contains("已回到状态1"))
     }
+
+    @Test
+    fun stopActionsDeregisterBeforeClosingTheSdk() {
+        val generic = File(
+            "src/main/kotlin/com/rayneo/agent/example/MainActivity.kt",
+        ).readText()
+        val rayneo = File(
+            "src/rayneo/kotlin/com/rayneo/agent/example/RayNeoMainActivity.kt",
+        ).readText()
+        val runner = File(
+            "src/main/kotlin/com/rayneo/agent/example/AgentTestRunner.kt",
+        ).readText()
+
+        assertTrue(runner.contains("sdk.deregisterIdentity(profile.agentId, \"normal\")"))
+        assertTrue(runner.contains("suspend fun deregisterAgentForStop()"))
+        assertTrue(generic.contains("activeRunner.deregisterAgentForStop()"))
+        assertTrue(rayneo.contains("closeResources(deregisterIdentity = true)"))
+        assertTrue(rayneo.contains("activeRunner.deregisterAgentForStop()"))
+        assertTrue(rayneo.contains("if (isFinishing || stopInProgress) return"))
+    }
 }

@@ -203,7 +203,17 @@ class HttpRuntimeTransport:
             payload = message.get("payload")
             if not isinstance(payload, Mapping):
                 raise ValueError("payload must be a JSON object")
-            raw_group_id = payload.get("group_id")
+            if message_type == "ACN_AGENT_GROUPING_INVITATION":
+                group_info = payload.get("group_info")
+                raw_group_id = (
+                    group_info.get("group_id")
+                    if isinstance(group_info, Mapping)
+                    else None
+                )
+            elif message_type == "ACN_AGENT_GROUPING_NOTIFICATION":
+                raw_group_id = payload.get("group_id")
+            else:
+                raw_group_id = None
             if isinstance(raw_group_id, str) and raw_group_id:
                 group_id = raw_group_id
             log_event(

@@ -157,7 +157,18 @@ class OkHttpRuntimeTransportTest {
             put("message_type", messageType)
             put("transaction_id", transactionId)
             put("payload", buildJsonObject {
-                put("group_id", groupId)
+                if (messageType == "ACN_AGENT_GROUPING_INVITATION") {
+                    put("group_info", buildJsonObject {
+                        put("target_agent_id", "agent-b")
+                        put("group_id", groupId)
+                        put("group_name", "task-patrol")
+                    })
+                    put("group_administrator", buildJsonObject {
+                        put("agent_id", "agent-a")
+                    })
+                } else {
+                    put("group_id", groupId)
+                }
                 put("sequence", sequence)
             })
         }.toString()

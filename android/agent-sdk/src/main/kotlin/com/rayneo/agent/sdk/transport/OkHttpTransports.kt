@@ -244,7 +244,13 @@ class OkHttpRuntimeTransport(
                 ?: throw IllegalArgumentException("transaction_id must be an integer")
             val payload = message["payload"] as? JsonObject
                 ?: throw IllegalArgumentException("payload must be a JSON object")
-            groupId = payload["group_id"]?.jsonPrimitive?.contentOrNull
+            val rawGroupId = when (messageType) {
+                "ACN_AGENT_GROUPING_INVITATION" ->
+                    (payload["group_info"] as? JsonObject)?.get("group_id")
+                "ACN_AGENT_GROUPING_NOTIFICATION" -> payload["group_id"]
+                else -> null
+            }
+            groupId = rawGroupId?.jsonPrimitive?.contentOrNull
                 ?.takeIf { it.isNotEmpty() }
             handler(messageType, transactionId, payload)
         } catch (error: Exception) {

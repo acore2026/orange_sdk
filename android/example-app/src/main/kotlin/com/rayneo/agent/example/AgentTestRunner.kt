@@ -66,6 +66,40 @@ internal fun selectManualMessageSession(
     )
 }
 
+internal suspend fun deregisterIdentityForStop(
+    sdk: AgentSdk,
+    onLog: (LabLogLevel, String, String) -> Unit,
+): OperationResult? {
+    val profile = sdk.localProfile
+    if (profile == null) {
+        onLog(LabLogLevel.INFO, "H-ID DELETE", "本地没有已申请身份，无需发送去注册请求")
+        return null
+    }
+    onLog(LabLogLevel.INFO, "H-ID DELETE", "停止前发送去注册请求 agent_id=${profile.agentId}")
+    return try {
+        sdk.deregisterIdentity(profile.agentId, "normal").also { result ->
+            if (result.success) {
+                onLog(LabLogLevel.SUCCESS, "H-ID DELETE", "去注册成功，网侧与本地身份已清除")
+            } else {
+                onLog(
+                    LabLogLevel.ERROR,
+                    "H-ID DELETE",
+                    "去注册被拒绝：${result.message.ifBlank { "Runtime 未返回原因" }}",
+                )
+            }
+        }
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Exception) {
+        onLog(
+            LabLogLevel.ERROR,
+            "H-ID DELETE",
+            "去注册请求失败：${error.message ?: error::class.java.simpleName}",
+        )
+        throw error
+    }
+}
+
 class AgentTestRunner(
     private val sdk: AgentSdk,
     private val config: TestConfig,
@@ -140,7 +174,7 @@ class AgentTestRunner(
                     metadata = buildJsonObject {
                         put("region", "CN")
                         put("os", "Android")
-                        put("version", "0.2.6")
+                        put("version", "0.2.7")
                     },
                 )
             }
@@ -220,6 +254,9 @@ class AgentTestRunner(
         retrySignal.trySend(Unit)
         return operationMutex.withLock { sdk.resetAgent() }
     }
+
+    suspend fun deregisterAgentForStop(): OperationResult? =
+        operationMutex.withLock { deregisterIdentityForStop(sdk, onLog) }
 
     suspend fun sendManualMessage(content: String): MessageReceipt = sendMutex.withLock {
         operationMutex.withLock {

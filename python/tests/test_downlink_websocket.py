@@ -66,7 +66,15 @@ async def test_runtime_downlink_websocket_supports_concurrent_out_of_order_respo
                 "request_id": "delivery-1",
                 "message_type": "ACN_AGENT_GROUPING_INVITATION",
                 "transaction_id": 49,
-                "payload": {"group_id": "group-invitation", "sequence": 1},
+                "payload": {
+                    "group_info": {
+                        "target_agent_id": "agent-b",
+                        "group_id": "group-invitation",
+                        "group_name": "task-patrol",
+                    },
+                    "group_administrator": {"agent_id": "agent-a"},
+                    "sequence": 1,
+                },
             }
         )
         await socket.send_json(
@@ -134,8 +142,11 @@ async def test_sdk_maps_nas_invitation_to_network_listener(sdk_fixture):
     listener = AckNetworkListener(NetworkMessageAction.ACCEPT)
     sdk.register_network_message_listener(listener)
     payload = {
-        "group_id": "group-a-b",
-        "group_config": {"group_name": "task-patrol"},
+        "group_info": {
+            "target_agent_id": "agent-b",
+            "group_id": "group-a-b",
+            "group_name": "task-patrol",
+        },
         "group_administrator": {"agent_id": "a1"},
     }
 

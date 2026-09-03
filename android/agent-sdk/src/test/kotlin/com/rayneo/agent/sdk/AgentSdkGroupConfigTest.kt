@@ -148,8 +148,11 @@ class AgentSdkGroupConfigTest {
         val action = runtime.deliverDownlink(
             "ACN_AGENT_GROUPING_INVITATION",
             buildJsonObject {
-                put("group_id", "group-a-b")
-                put("group_config", buildJsonObject { put("group_name", "task-patrol") })
+                put("group_info", buildJsonObject {
+                    put("target_agent_id", "agent-b")
+                    put("group_id", "group-a-b")
+                    put("group_name", "task-patrol")
+                })
                 put("group_administrator", buildJsonObject { put("agent_id", "a1") })
             },
         )

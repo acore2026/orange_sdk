@@ -10,9 +10,9 @@
 | 用途 | 雷鸟 X3 Pro 发起方 Agent A 联调 |
 | 应用 ID | `com.rayneo.agent.example.rayneo` |
 | 启动 Activity | `com.rayneo.agent.example.RayNeoMainActivity` |
-| 当前版本 | `0.2.6-rayneo`，`versionCode=8` |
+| 当前版本 | `0.2.7-rayneo`，`versionCode=9` |
 | APK | `android/example-app/build/outputs/apk/rayneo/debug/example-app-rayneo-debug.apk` |
-| 当前 APK SHA-256 | `6337f24acbe96d2c6558e148d164de30bd51d46bf4793f9bcff7e6c0bce82452` |
+| 当前 APK SHA-256 | `1f741da9da78fcb6a033f676eab9d324256e8620a59f69b73ca277f3e0dbe77a` |
 
 该专用包固定为发起方 A，预置以下联调参数：
 
@@ -209,7 +209,7 @@ C:\Android\platform-tools\adb.exe shell dumpsys package com.rayneo.agent.example
 
 ```text
 versionCode=8
-versionName=0.2.6-rayneo
+versionName=0.2.7-rayneo
 ```
 
 检查 VPN AppOps：
