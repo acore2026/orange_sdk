@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from types import MappingProxyType
@@ -17,11 +17,6 @@ class NetworkMessageAction(str, Enum):
     ACCEPT = "ACCEPT"
     REJECT = "REJECT"
     ACK = "ACK"
-
-
-class OffloadingSessionRole(str, Enum):
-    PRODUCER = "PRODUCER"
-    CONSUMER = "CONSUMER"
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,15 +121,16 @@ class DiscoveredAgent:
 @dataclass(slots=True)
 class OffloadingSession:
     session_id: str
-    sandbox_id: str
     state: str
     expires_at: datetime | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-    role: OffloadingSessionRole = OffloadingSessionRole.PRODUCER
-    group_id: str = ""
-    source_agent_id: str = ""
     producer: "VideoUploadEndpoint | None" = None
     processed_stream: "ProcessedVideoEndpoint | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxSpec:
+    vcpus: int
+    memory_mb: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,13 +138,11 @@ class VideoUploadEndpoint:
     video_server_ip: str
     source_start_url: str
     source_stop_url: str
-    access_token: str = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
 class ProcessedVideoEndpoint:
     video_server_ip: str
     offer_url: str
-    access_ticket: str = field(repr=False)
     protocol: str = "webrtc"
     signaling: str = "non-trickle"

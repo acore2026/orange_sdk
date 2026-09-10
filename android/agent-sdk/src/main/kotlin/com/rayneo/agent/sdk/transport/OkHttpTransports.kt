@@ -6,8 +6,10 @@ import com.rayneo.agent.sdk.ErrorCode
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -42,11 +44,22 @@ class OkHttpRuntimeTransport(
     port: Int,
     private val client: OkHttpClient = OkHttpClient(),
     private val json: Json = Json,
+    private val reconnectInitialDelayMillis: Long = 1_000,
+    private val reconnectMaxDelayMillis: Long = 30_000,
 ) : RuntimeTransport {
     private val baseUrl = "http://$host:$port"
     private val downlinkScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val downlinkClient = client.newBuilder()
+        .pingInterval(DOWNLINK_PING_INTERVAL_SECONDS, TimeUnit.SECONDS)
+        .build()
     private val downlinkStarted = AtomicBoolean(false)
+    private val downlinkClosed = AtomicBoolean(false)
+    private val downlinkLock = Any()
     @Volatile private var downlinkSocket: WebSocket? = null
+    @Volatile private var downlinkHandler:
+        (suspend (String, Int, JsonObject) -> NetworkMessageAction)? = null
+    private var reconnectJob: Job? = null
+    private var reconnectAttempt = 0
 
     override suspend fun getUeAgentIp(): String = withContext(Dispatchers.IO) {
         val request = Request.Builder()
@@ -173,52 +186,169 @@ class OkHttpRuntimeTransport(
                 "Runtime downlink WebSocket is already started",
             )
         }
+        require(reconnectInitialDelayMillis >= 0) {
+            "reconnectInitialDelayMillis must not be negative"
+        }
+        require(reconnectMaxDelayMillis >= reconnectInitialDelayMillis) {
+            "reconnectMaxDelayMillis must be at least reconnectInitialDelayMillis"
+        }
+        downlinkClosed.set(false)
+        downlinkHandler = handler
         try {
             suspendCancellableCoroutine<Unit> { continuation ->
-                val request = Request.Builder()
-                    .url(baseUrl + DOWNLINK_WEBSOCKET_PATH)
-                    .get()
-                    .build()
-                val opened = AtomicBoolean(false)
-                val socket = client.newWebSocket(request, object : WebSocketListener() {
-                    override fun onOpen(webSocket: WebSocket, response: Response) {
-                        opened.set(true)
-                        downlinkSocket = webSocket
-                        Log.i(TAG, "Runtime downlink WebSocket connected")
-                        if (continuation.isActive) continuation.resume(Unit)
-                    }
-
-                    override fun onMessage(webSocket: WebSocket, text: String) {
-                        downlinkScope.launch {
-                            processDownlinkFrame(webSocket, text, handler)
-                        }
-                    }
-
-                    override fun onFailure(
-                        webSocket: WebSocket,
-                        t: Throwable,
-                        response: Response?,
-                    ) {
-                        Log.e(TAG, "Runtime downlink WebSocket failed", t)
-                        if (!opened.get() && continuation.isActive) {
-                            continuation.resumeWithException(
-                                AgentSdkException(
-                                    ErrorCode.RUNTIME_UNREACHABLE,
-                                    "AgentRuntime downlink WebSocket is unreachable",
-                                    retryable = true,
-                                    cause = t,
-                                )
-                            )
-                        }
-                    }
-                })
-                downlinkSocket = socket
+                val socket = connectDownlink(handler, continuation, attempt = 0)
                 continuation.invokeOnCancellation { socket.cancel() }
             }
         } catch (error: Exception) {
             downlinkStarted.set(false)
+            downlinkHandler = null
             throw error
         }
+    }
+
+    private fun connectDownlink(
+        handler: suspend (String, Int, JsonObject) -> NetworkMessageAction,
+        initialContinuation: kotlinx.coroutines.CancellableContinuation<Unit>?,
+        attempt: Int,
+    ): WebSocket {
+        val request = Request.Builder()
+            .url(baseUrl + DOWNLINK_WEBSOCKET_PATH)
+            .get()
+            .build()
+        val opened = AtomicBoolean(false)
+        Log.i(
+            TAG,
+            if (attempt == 0) {
+                "Runtime downlink WebSocket connecting url=${request.url}"
+            } else {
+                "Runtime downlink WebSocket reconnecting attempt=$attempt url=${request.url}"
+            },
+        )
+        val socket = downlinkClient.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                opened.set(true)
+                if (downlinkClosed.get()) {
+                    webSocket.close(NORMAL_CLOSE_CODE, "SDK closed")
+                    return
+                }
+                synchronized(downlinkLock) { downlinkSocket = webSocket }
+                Log.i(
+                    TAG,
+                    if (attempt == 0) {
+                        "Runtime downlink WebSocket connected http=${response.code}"
+                    } else {
+                        "Runtime downlink WebSocket reconnected attempt=$attempt http=${response.code}"
+                    },
+                )
+                if (initialContinuation?.isActive == true) initialContinuation.resume(Unit)
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                synchronized(downlinkLock) { reconnectAttempt = 0 }
+                Log.d(TAG, "Runtime downlink WebSocket frame received bytes=${text.length}")
+                downlinkScope.launch {
+                    processDownlinkFrame(webSocket, text, handler)
+                }
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                Log.w(
+                    TAG,
+                    "Runtime downlink WebSocket closing code=$code reason=${reason.take(200)}",
+                )
+                webSocket.close(code, reason)
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                clearDownlinkSocket(webSocket)
+                if (!downlinkClosed.get()) {
+                    Log.w(
+                        TAG,
+                        "Runtime downlink WebSocket closed unexpectedly code=$code " +
+                            "reason=${reason.take(200)}",
+                    )
+                    scheduleDownlinkReconnect("closed code=$code")
+                } else {
+                    Log.i(TAG, "Runtime downlink WebSocket closed code=$code")
+                }
+            }
+
+            override fun onFailure(
+                webSocket: WebSocket,
+                t: Throwable,
+                response: Response?,
+            ) {
+                clearDownlinkSocket(webSocket)
+                val detail = throwableSummary(t)
+                Log.e(
+                    TAG,
+                    "Runtime downlink WebSocket failed http=${response?.code ?: "none"} " +
+                        "error=$detail",
+                    t,
+                )
+                if (!opened.get() && initialContinuation?.isActive == true) {
+                    initialContinuation.resumeWithException(
+                        AgentSdkException(
+                            ErrorCode.RUNTIME_UNREACHABLE,
+                            "AgentRuntime downlink WebSocket is unreachable: $detail",
+                            retryable = true,
+                            cause = t,
+                        )
+                    )
+                } else if (!downlinkClosed.get()) {
+                    scheduleDownlinkReconnect("failure $detail")
+                }
+            }
+        })
+        synchronized(downlinkLock) {
+            if (downlinkClosed.get()) socket.cancel() else downlinkSocket = socket
+        }
+        return socket
+    }
+
+    private fun clearDownlinkSocket(socket: WebSocket) {
+        synchronized(downlinkLock) {
+            if (downlinkSocket === socket) downlinkSocket = null
+        }
+    }
+
+    private fun scheduleDownlinkReconnect(reason: String) {
+        val handler = downlinkHandler ?: return
+        val attempt: Int
+        val delayMillis: Long
+        synchronized(downlinkLock) {
+            if (downlinkClosed.get() || reconnectJob?.isActive == true) return
+            reconnectAttempt += 1
+            attempt = reconnectAttempt
+            delayMillis = reconnectDelayMillis(attempt)
+            reconnectJob = downlinkScope.launch {
+                Log.w(
+                    TAG,
+                    "Runtime downlink WebSocket reconnect scheduled attempt=$attempt " +
+                        "delay_ms=$delayMillis reason=${reason.take(240)}",
+                )
+                delay(delayMillis)
+                if (!downlinkClosed.get()) {
+                    connectDownlink(handler, initialContinuation = null, attempt = attempt)
+                }
+            }
+        }
+    }
+
+    private fun reconnectDelayMillis(attempt: Int): Long {
+        if (reconnectInitialDelayMillis == 0L) return 0L
+        var result = reconnectInitialDelayMillis
+        repeat((attempt - 1).coerceAtMost(30)) {
+            if (result >= reconnectMaxDelayMillis / 2) return reconnectMaxDelayMillis
+            result *= 2
+        }
+        return result.coerceAtMost(reconnectMaxDelayMillis)
+    }
+
+    private fun throwableSummary(error: Throwable): String {
+        val root = generateSequence(error) { it.cause }.last()
+        val message = root.message?.takeIf(String::isNotBlank) ?: "no message"
+        return "${root::class.java.simpleName}: $message"
     }
 
     private suspend fun processDownlinkFrame(
@@ -273,6 +403,8 @@ class OkHttpRuntimeTransport(
 
     private companion object {
         const val TAG = "AgentSdkRuntime"
+        const val NORMAL_CLOSE_CODE = 1000
+        const val DOWNLINK_PING_INTERVAL_SECONDS = 20L
         val IPV4_LITERAL = Regex("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}")
     }
 
@@ -314,9 +446,15 @@ class OkHttpRuntimeTransport(
         }
 
     override suspend fun close() {
-        downlinkSocket?.close(1000, "SDK closed")
-        downlinkSocket = null
+        downlinkClosed.set(true)
+        val socket = synchronized(downlinkLock) {
+            reconnectJob?.cancel()
+            reconnectJob = null
+            downlinkSocket.also { downlinkSocket = null }
+        }
+        socket?.close(NORMAL_CLOSE_CODE, "SDK closed")
         downlinkStarted.set(false)
+        downlinkHandler = null
         downlinkScope.cancel()
     }
 }
@@ -354,9 +492,11 @@ class OkHttpPeerMessenger(
         } catch (error: AgentSdkException) {
             throw error
         } catch (error: Exception) {
+            val root = generateSequence(error as Throwable) { it.cause }.last()
+            val detail = root.message?.takeIf(String::isNotBlank) ?: "no message"
             throw AgentSdkException(
                 ErrorCode.MESSAGE_DELIVERY_FAILED,
-                "A2A delivery failed",
+                "A2A delivery failed: ${root::class.java.simpleName}: $detail",
                 retryable = true,
                 cause = error,
             )

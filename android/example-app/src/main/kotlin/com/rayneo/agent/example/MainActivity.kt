@@ -21,10 +21,12 @@ import android.text.InputType
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Space
@@ -44,6 +46,9 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import org.webrtc.RendererCommon
+import org.webrtc.EglBase
+import org.webrtc.VideoSink
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -53,6 +58,7 @@ class MainActivity : Activity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val fields = mutableMapOf<String, EditText>()
     private val logLines = ArrayDeque<CharSequence>()
+    private val diagnosticLogLines = ArrayDeque<String>()
 
     private var selectedRole = TestRole.A
     private var activeConfig: TestConfig? = null
@@ -83,6 +89,14 @@ class MainActivity : Activity() {
     private var computeVideoAvailable = false
     private var computeVideoStarting = false
     private var pendingVideoStart = false
+    private var videoPreviewRenderer: VideoSink? = null
+    private var videoPreviewEglBase: EglBase? = null
+    private var videoPreviewStatus: TextView? = null
+    private var videoPreviewHasFrame = false
+    private var videoPreviewResolution = ""
+    private var lastSdkDiagnosticSummary: String? = null
+    private var lastDiagnosticLocalTcpEndpoint: String? = null
+    private var lastVideoPreviewSummary: String? = null
     private var resetAvailable = false
     private var resetArmed = false
     private var resetInProgress = false
@@ -108,6 +122,7 @@ class MainActivity : Activity() {
     }
 
     private fun showConfigScreen() {
+        releaseProcessedVideoPreview()
         fields.clear()
         manualMessagePanel = null
         manualRouteLabel = null
@@ -265,6 +280,9 @@ class MainActivity : Activity() {
         }
         persistFormValues(config)
         activeConfig = config
+        lastSdkDiagnosticSummary = null
+        lastDiagnosticLocalTcpEndpoint = null
+        lastVideoPreviewSummary = null
         showLogScreen(config)
         appendLog(LabLogLevel.INFO, "APP", "配置校验完成；准备请求 VPN 权限")
         bindVpnService()
@@ -316,9 +334,10 @@ class MainActivity : Activity() {
             return
         }
         val config = activeConfig ?: return
-        val mediaAdapter = AndroidWebRtcMediaOffloadAdapter(service) { event ->
-            appendLog(LabLogLevel.INFO, "WEBRTC", event)
-        }
+        val mediaAdapter = AndroidWebRtcMediaOffloadAdapter(
+            context = service,
+            sharedEglContext = videoPreviewEglBase?.eglBaseContext,
+        ) { event -> appendLog(LabLogLevel.INFO, "WEBRTC", event) }
         val value = AgentSdk.create(service, mediaOffloadAdapter = mediaAdapter)
         val flow = AgentTestRunner(
             value,
@@ -328,6 +347,8 @@ class MainActivity : Activity() {
             ::setManualMessageSession,
             ::setResetAvailable,
             ::setVideoUploadAvailable,
+            processedVideoRenderSinks = ::processedVideoRenderSinks,
+            onProcessedVideoStatus = ::setProcessedVideoStatus,
         )
         sdk = value
         runner = flow
@@ -349,6 +370,7 @@ class MainActivity : Activity() {
 
     private fun showLogScreen(config: TestConfig) {
         logLines.clear()
+        diagnosticLogLines.clear()
         manualMessageSession = null
         manualMessageSending = false
         val root = LinearLayout(this).apply {
@@ -375,9 +397,16 @@ class MainActivity : Activity() {
                     typeface = Typeface.DEFAULT_BOLD
                 })
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(actionButton("复制日志", filled = false) { copyLogs() }.apply {
-                setTextColor(Palette.LINK)
-            }, LinearLayout.LayoutParams(dp(96), dp(42)))
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(actionButton("复制日志", filled = false) { copyLogs() }.apply {
+                    setTextColor(Palette.LINK)
+                }, LinearLayout.LayoutParams(dp(92), dp(42)))
+                addView(Space(this@MainActivity), LinearLayout.LayoutParams(dp(8), 1))
+                addView(actionButton("Dump 日志", filled = false) { dumpLogs() }.apply {
+                    setTextColor(Palette.WARNING)
+                }, LinearLayout.LayoutParams(dp(108), dp(42)))
+            })
         })
 
         root.addView(LinearLayout(this).apply {
@@ -400,6 +429,13 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(18) })
+
+        if (config.role == TestRole.A) {
+            root.addView(processedVideoPreview(), LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) })
+        }
 
         root.addView(manualMessageComposer(config), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -547,6 +583,140 @@ class MainActivity : Activity() {
                 dp(48),
             ).apply { topMargin = dp(10) })
         }
+    }
+
+    private fun processedVideoPreview(): View {
+        releaseProcessedVideoPreview()
+        videoPreviewHasFrame = false
+        videoPreviewResolution = ""
+        val rendererEvents = object : RendererCommon.RendererEvents {
+            override fun onFirstFrameRendered() {
+                runOnUiThread {
+                    videoPreviewHasFrame = true
+                    renderProcessedVideoLiveStatus()
+                    appendLog(
+                        LabLogLevel.SUCCESS,
+                        "VIDEO DISPLAY",
+                        "${videoPreviewRendererName()} 已绘制处理流首帧",
+                    )
+                }
+            }
+
+            override fun onFrameResolutionChanged(width: Int, height: Int, rotation: Int) {
+                runOnUiThread {
+                    videoPreviewResolution = if (rotation % 180 == 0) {
+                        "${width}x$height"
+                    } else {
+                        "${height}x$width"
+                    }
+                    if (videoPreviewHasFrame) renderProcessedVideoLiveStatus()
+                }
+            }
+        }
+        val eglBase = EglBase.create().also { videoPreviewEglBase = it }
+        val renderer: View = TextureViewEglRenderer(this).apply {
+            init(eglBase.eglBaseContext, rendererEvents)
+            setMirror(false)
+            setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+        }.also { videoPreviewRenderer = it }
+        val status = TextView(this).apply {
+            text = "等待处理后视频\n收到 B 的邀请后自动播放"
+            setTextColor(Palette.INK_MUTED)
+            textSize = 13f
+            gravity = Gravity.CENTER
+            setPadding(dp(14), dp(9), dp(14), dp(9))
+            background = rounded(Color.rgb(13, 27, 36), 9f, Palette.INK_LINE)
+        }.also { videoPreviewStatus = it }
+
+        val stage = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            addView(renderer, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ))
+            addView(status, centeredPreviewStatusParams())
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(11), dp(12), dp(12))
+            background = rounded(Palette.INK_SURFACE, 14f, Palette.INK_LINE)
+            addView(TextView(this@MainActivity).apply {
+                text = "PROCESSED VIDEO  /  N6 COMPUTE"
+                setTextColor(Palette.LINK)
+                textSize = 11f
+                typeface = Typeface.DEFAULT_BOLD
+                letterSpacing = .08f
+            })
+            addView(stage, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(200),
+            ).apply { topMargin = dp(9) })
+        }
+    }
+
+    private fun processedVideoRenderSinks(): List<VideoSink> =
+        listOfNotNull(videoPreviewRenderer)
+
+    private fun setProcessedVideoStatus(title: String, detail: String) {
+        runOnUiThread {
+            videoPreviewHasFrame = false
+            (videoPreviewRenderer as? TextureViewEglRenderer)?.clearImage()
+            videoPreviewStatus?.apply {
+                text = "$title\n$detail"
+                setTextColor(Palette.INK_MUTED)
+                textSize = 13f
+                gravity = Gravity.CENTER
+                background = rounded(Color.rgb(13, 27, 36), 9f, Palette.INK_LINE)
+                layoutParams = centeredPreviewStatusParams()
+                visibility = View.VISIBLE
+            }
+        }
+    }
+
+    private fun renderProcessedVideoLiveStatus() {
+        videoPreviewStatus?.apply {
+            text = "● LIVE${videoPreviewResolution.takeIf(String::isNotBlank)?.let { "  $it" }.orEmpty()}"
+            setTextColor(Palette.LINK)
+            textSize = 11f
+            background = rounded(Color.argb(205, 8, 17, 25), 8f, Palette.INK_LINE)
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.END,
+            ).apply {
+                topMargin = dp(9)
+                marginEnd = dp(9)
+            }
+        }
+    }
+
+    private fun centeredPreviewStatusParams() = FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.WRAP_CONTENT,
+        ViewGroup.LayoutParams.WRAP_CONTENT,
+        Gravity.CENTER,
+    )
+
+    private fun detachProcessedVideoRenderer(): EglBase? {
+        (videoPreviewRenderer as? TextureViewEglRenderer)?.let { renderer ->
+            lastVideoPreviewSummary = renderer.diagnosticSummary()
+            runCatching { renderer.release() }
+        }
+        videoPreviewRenderer = null
+        val eglBase = videoPreviewEglBase
+        videoPreviewEglBase = null
+        return eglBase
+    }
+
+    private fun releaseProcessedVideoPreview() {
+        detachProcessedVideoRenderer()?.let { eglBase -> runCatching { eglBase.release() } }
+        videoPreviewStatus = null
+        videoPreviewHasFrame = false
+        videoPreviewResolution = ""
+    }
+
+    private fun videoPreviewRendererName(): String = when (videoPreviewRenderer) {
+        is TextureViewEglRenderer -> "TextureView/EglRenderer"
+        else -> "<unavailable>"
     }
 
     private fun setRunnerStatus(status: RunnerStatus) {
@@ -804,9 +974,18 @@ class MainActivity : Activity() {
     }
 
     private fun appendLog(level: LabLogLevel, stage: String, message: String) {
+        val time = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
+        val raw = "$time  ${level.name.padEnd(7)}  ${stage.padEnd(17)}  $message"
+        Log.println(
+            when (level) {
+                LabLogLevel.INFO, LabLogLevel.SUCCESS -> Log.INFO
+                LabLogLevel.WARNING -> Log.WARN
+                LabLogLevel.ERROR -> Log.ERROR
+            },
+            APP_LOG_TAG,
+            "$stage $message",
+        )
         runOnUiThread {
-            val time = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
-            val raw = "$time  ${level.name.padEnd(7)}  ${stage.padEnd(17)}  $message"
             val line = SpannableString(raw).apply {
                 val color = when (level) {
                     LabLogLevel.INFO -> Palette.LOG_TEXT
@@ -816,6 +995,10 @@ class MainActivity : Activity() {
                 }
                 setSpan(ForegroundColorSpan(color), 14, minOf(21, length), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             }
+            diagnosticLogLines.addLast(raw)
+            while (diagnosticLogLines.size > MAX_DIAGNOSTIC_LOG_LINES) {
+                diagnosticLogLines.removeFirst()
+            }
             logLines.addLast(line)
             while (logLines.size > MAX_LOG_LINES) logLines.removeFirst()
             logOutput?.text = logLines.joinToString("\n")
@@ -824,10 +1007,57 @@ class MainActivity : Activity() {
     }
 
     private fun copyLogs() {
-        val text = logLines.joinToString("\n")
+        val text = diagnosticLogLines.joinToString("\n")
         val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("Agent Link Lab logs", text))
         Toast.makeText(this, "日志已复制", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun dumpLogs() {
+        val config = activeConfig ?: run {
+            Toast.makeText(this, "当前没有运行配置", Toast.LENGTH_SHORT).show()
+            return
+        }
+        appendLog(LabLogLevel.INFO, "DUMP", "开始采集端侧诊断日志")
+        val appLogs = diagnosticLogLines.toList()
+        val activeRunner = runner
+        val activeSdk = sdk
+        scope.launch {
+            try {
+                val dump = DiagnosticLogExporter.createDump(
+                    context = this@MainActivity,
+                    config = config,
+                    appLogs = appLogs,
+                    sdkSummary = activeRunner?.diagnosticSummary()
+                        ?: lastSdkDiagnosticSummary
+                        ?: "lifecycle_state=${activeSdk?.agentLifecycleState ?: "<sdk unavailable>"}\n" +
+                            "agent_id=${activeSdk?.localProfile?.agentId ?: "<none>"}",
+                    localTcpEndpoint = activeRunner?.diagnosticLocalTcpEndpoint()
+                        ?: lastDiagnosticLocalTcpEndpoint,
+                    videoPreviewSummary =
+                        (videoPreviewRenderer as? TextureViewEglRenderer)?.diagnosticSummary()
+                            ?: lastVideoPreviewSummary
+                            ?: "renderer=<unavailable>",
+                )
+                appendLog(
+                    LabLogLevel.SUCCESS,
+                    "DUMP",
+                    "诊断日志已生成：${dump.displayLocation}",
+                )
+                DiagnosticLogExporter.share(this@MainActivity, dump)
+            } catch (error: Exception) {
+                appendLog(
+                    LabLogLevel.ERROR,
+                    "DUMP",
+                    "诊断日志生成失败：${error.message ?: error::class.java.simpleName}",
+                )
+                Toast.makeText(
+                    this@MainActivity,
+                    "诊断日志生成失败",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
     }
 
     private fun stopOrReturn() {
@@ -844,6 +1074,12 @@ class MainActivity : Activity() {
         runnerJob = null
         scope.launch {
             activeJob?.cancelAndJoin()
+            lastSdkDiagnosticSummary = activeRunner?.diagnosticSummary()
+                ?: activeSdk?.let {
+                    "lifecycle_state=${it.agentLifecycleState}\n" +
+                        "agent_id=${it.localProfile?.agentId ?: "<none>"}"
+                }
+            lastDiagnosticLocalTcpEndpoint = activeRunner?.diagnosticLocalTcpEndpoint()
             if (activeSdk != null) {
                 try {
                     withContext(Dispatchers.IO) {
@@ -863,7 +1099,11 @@ class MainActivity : Activity() {
             activeRunner?.close()
             runner = null
             setManualMessageSession(null)
+            // The renderer can still retain a decoded texture after its Track sinks are removed.
+            // Flush/release it before disposing the decoder's shared EGL child context.
+            val previewEglBase = detachProcessedVideoRenderer()
             withContext(Dispatchers.IO) { activeSdk?.close() }
+            previewEglBase?.let { eglBase -> runCatching { eglBase.release() } }
             sdk = null
             if (serviceBound) {
                 runCatching { unbindService(connection) }
@@ -871,7 +1111,7 @@ class MainActivity : Activity() {
                 vpnService = null
             }
             appendLog(LabLogLevel.INFO, "APP", "去注册流程结束；SDK、MASQUE、TUN 与本地服务已关闭")
-            setRunnerStatus(RunnerStatus("已停止", "可以返回配置页修改参数"))
+            setRunnerStatus(RunnerStatus("已停止 · 日志已保留", "可先 Dump 日志，再返回配置页"))
             stopButton?.apply {
                 text = "返回配置"
                 isEnabled = true
@@ -1072,7 +1312,10 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         runnerJob?.cancel()
         runner?.close()
+        val previewEglBase = detachProcessedVideoRenderer()
         runBlocking(Dispatchers.IO) { runCatching { sdk?.close() } }
+        previewEglBase?.let { eglBase -> runCatching { eglBase.release() } }
+        releaseProcessedVideoPreview()
         if (serviceBound) runCatching { unbindService(connection) }
         scope.cancel()
         super.onDestroy()
@@ -1104,5 +1347,7 @@ class MainActivity : Activity() {
         const val CAMERA_PERMISSION_REQUEST = 1002
         const val PREFERENCES = "agent-link-lab"
         const val MAX_LOG_LINES = 300
+        const val MAX_DIAGNOSTIC_LOG_LINES = 2_000
+        const val APP_LOG_TAG = "AgentLinkLab"
     }
 }

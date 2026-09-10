@@ -48,6 +48,55 @@
         android:layout_marginTop="14dp"
         android:background="#29404A" />
 
+    <LinearLayout
+        android:id="@+id/video_preview_panel"
+        android:layout_width="match_parent"
+        android:layout_height="210dp"
+        android:layout_marginTop="10dp"
+        android:background="@drawable/rayneo_video_panel"
+        android:orientation="vertical"
+        android:padding="10dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="sans"
+            android:letterSpacing="0.08"
+            android:text="PROCESSED VIDEO  ·  N6 COMPUTE"
+            android:textColor="#5EEAD4"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_marginTop="8dp"
+            android:layout_weight="1"
+            android:background="#000000">
+
+            <org.webrtc.SurfaceViewRenderer
+                android:id="@+id/video_renderer"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+
+            <TextView
+                android:id="@+id/video_status"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:background="@drawable/rayneo_video_status"
+                android:fontFamily="sans"
+                android:gravity="center"
+                android:paddingStart="14dp"
+                android:paddingTop="8dp"
+                android:paddingEnd="14dp"
+                android:paddingBottom="8dp"
+                android:text="等待处理后视频\n收到 B 的邀请后自动播放"
+                android:textColor="#B7CBD4"
+                android:textSize="14sp" />
+        </FrameLayout>
+    </LinearLayout>
+
     <ScrollView
         android:id="@+id/log_scroll"
         android:layout_width="match_parent"
@@ -112,6 +161,23 @@
             android:layout_height="1dp" />
 
         <TextView
+            android:id="@+id/dump_action"
+            android:layout_width="140dp"
+            android:layout_height="match_parent"
+            android:background="@drawable/rayneo_action_secondary"
+            android:focusable="true"
+            android:fontFamily="sans"
+            android:gravity="center"
+            android:text="Dump 日志"
+            android:textColor="#5EEAD4"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <Space
+            android:layout_width="10dp"
+            android:layout_height="1dp" />
+
+        <TextView
             android:id="@+id/stop_action"
             android:layout_width="140dp"
             android:layout_height="match_parent"
@@ -132,7 +198,7 @@
         android:layout_marginTop="8dp"
         android:fontFamily="sans"
         android:gravity="center"
-        android:text="前后 / 上下滑动切换焦点  ·  Reset 需单击两次确认  ·  双击退出"
+        android:text="切换焦点  ·  Reset 需单击两次确认  ·  Dump 导出诊断  ·  双击退出"
         android:textColor="#8FA9B4"
         android:textSize="16sp" />
 

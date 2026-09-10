@@ -22,6 +22,9 @@ import com.rayneo.agent.sdk.transport.TunnelController
 import com.rayneo.agent.sdk.transport.VideoTrack
 import com.rayneo.agent.sdk.transport.VideoUploadHandle
 import com.rayneo.agent.sdk.model.OffloadingSession
+import com.rayneo.agent.sdk.model.ProcessedVideoEndpoint
+import com.rayneo.agent.sdk.model.SandboxSpec
+import com.rayneo.agent.sdk.model.VideoUploadEndpoint
 import com.rayneo.agent.sdk.security.TestCapabilityVcIssuer
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
@@ -55,6 +58,43 @@ class AgentSdkGroupConfigTest {
     private lateinit var testCapabilityIssuer: TestCapabilityVcIssuer
     private lateinit var addressResolver: FakeLocalAddressResolver
     private lateinit var sdk: AgentSdk
+
+    @Test
+    fun `media API surface has no accept or target distribution`() {
+        val publicMethods = AgentSdk::class.java.methods
+        assertFalse(publicMethods.any { it.name == "acceptOffloadingSession" })
+        val upload = publicMethods.single { it.name == "startVideoUpload" }
+        assertEquals(7, upload.parameterCount)
+        assertEquals(OffloadingSession::class.java, upload.parameterTypes.first())
+        val processed = publicMethods.single { it.name == "getProcessedVideoStream" }
+        assertEquals(OffloadingSession::class.java, processed.parameterTypes.first())
+        val create = publicMethods.single { it.name == "createOffloadingSession" }
+        assertEquals(String::class.java, create.parameterTypes[0])
+        assertEquals(SandboxSpec::class.java, create.parameterTypes[1])
+    }
+
+    @Test
+    fun `offloading creation rejects invalid sandbox spec`() = runTest {
+        initializeSdk()
+
+        val cpuError = runCatching {
+            sdk.createOffloadingSession(
+                workloadType = "video_rendering",
+                sandboxSpec = SandboxSpec(vcpus = 0, memoryMb = 4096),
+            )
+        }.exceptionOrNull() as AgentSdkException
+        assertEquals(ErrorCode.INVALID_ARGUMENT, cpuError.code)
+        assertEquals("sandboxSpec.vcpus", cpuError.field)
+
+        val memoryError = runCatching {
+            sdk.createOffloadingSession(
+                workloadType = "video_rendering",
+                sandboxSpec = SandboxSpec(vcpus = 2, memoryMb = 0),
+            )
+        }.exceptionOrNull() as AgentSdkException
+        assertEquals(ErrorCode.INVALID_ARGUMENT, memoryError.code)
+        assertEquals("sandboxSpec.memoryMb", memoryError.field)
+    }
 
     @Before
     fun setUp() {
@@ -107,6 +147,69 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
+    fun `identical group config replay ACKs without route or listener side effects`() = runTest {
+        initializeSdk()
+        var listenerCalls = 0
+        sdk.registerNetworkMessageListener(NetworkMessageListener { _, _ ->
+            listenerCalls += 1
+            NetworkMessageAction.ACK
+        })
+        val timestamp = Instant.parse("2026-09-03T07:00:00Z")
+        val payload = groupConfig(timestamp = timestamp)
+
+        assertEquals(NetworkMessageAction.ACK, runtime.deliverGroupConfig(payload))
+        assertEquals(NetworkMessageAction.ACK, runtime.deliverGroupConfig(payload))
+
+        assertEquals(1, listenerCalls)
+        assertEquals(1, tunnel.replacements.size)
+        assertEquals(1L, sdk.getGroupSnapshot("g1")!!.generation)
+    }
+
+    @Test
+    fun `newer identical group config commits and notifies listener`() = runTest {
+        initializeSdk()
+        var listenerCalls = 0
+        sdk.registerNetworkMessageListener(NetworkMessageListener { _, _ ->
+            listenerCalls += 1
+            NetworkMessageAction.ACK
+        })
+        val timestamp = Instant.parse("2026-09-03T07:00:00Z")
+
+        runtime.deliverGroupConfig(groupConfig(timestamp = timestamp))
+        val action = runtime.deliverGroupConfig(
+            groupConfig(timestamp = timestamp.plusSeconds(1)),
+        )
+
+        assertEquals(NetworkMessageAction.ACK, action)
+        assertEquals(2, listenerCalls)
+        assertEquals(2, tunnel.replacements.size)
+        assertEquals(2L, sdk.getGroupSnapshot("g1")!!.generation)
+    }
+
+    @Test
+    fun `same timestamp with different group content is rejected`() = runTest {
+        initializeSdk()
+        var listenerCalls = 0
+        sdk.registerNetworkMessageListener(NetworkMessageListener { _, _ ->
+            listenerCalls += 1
+            NetworkMessageAction.ACK
+        })
+        val timestamp = Instant.parse("2026-09-03T07:00:00Z")
+        runtime.deliverGroupConfig(groupConfig(timestamp = timestamp))
+
+        val error = runCatching {
+            runtime.deliverGroupConfig(
+                groupConfig(timestamp = timestamp, peerIp = "8.8.8.9"),
+            )
+        }.exceptionOrNull() as AgentSdkException
+
+        assertEquals(ErrorCode.GROUP_CONFIG_STALE, error.code)
+        assertEquals(1, listenerCalls)
+        assertEquals(1, tunnel.replacements.size)
+        assertEquals("8.8.8.8", sdk.getGroupSnapshot("g1")!!.membersByAgentId[PEER_ID]!!.agentIp)
+    }
+
+    @Test
     fun `initialize queries UE info and registers runtime downlink websocket`() = runTest {
         initializeSdk()
 
@@ -117,6 +220,46 @@ class AgentSdkGroupConfigTest {
         assertEquals(1, addressResolver.calls)
         assertEquals("192.168.1.10", masque.configuration?.localVlanIp)
         assertEquals("8.8.8.7", server.agentIp)
+    }
+
+    @Test
+    fun `TUN fd replacement recreates local ingress after MASQUE packet swap`() = runTest {
+        val events = mutableListOf<String>()
+        val localServers = mutableListOf<FakeServer>()
+        masque = FakeMasque(events)
+        sdk = AgentSdk(
+            tunnelController = tunnel,
+            masqueTransport = masque,
+            proofVerifier = ProofVerifier { },
+            controlRequestAuthenticator = FakeControlAuthenticator,
+            devicePublicKeyProvider = FakeDevicePublicKeyProvider,
+            messageSigner = FakeMessageSigner,
+            peerMessenger = peer,
+            runtimeFactory = { _, _ -> runtime },
+            localServerFactory = {
+                val number = localServers.size + 1
+                FakeServer(
+                    onStart = { events += "server-start-$number" },
+                    onClose = { events += "server-close-$number" },
+                ).also(localServers::add)
+            },
+            localAddressResolver = addressResolver,
+            mediaOffloadAdapter = media,
+            testCapabilityVcIssuer = testCapabilityIssuer,
+        )
+        sdk.importTestCapabilityIssuerPrivateKey(testPrivateKeyPem())
+        initializeSdk()
+        events.clear()
+
+        tunnel.simulateTunReplacement(43)
+
+        assertEquals(2, localServers.size)
+        assertEquals(1, localServers.first().closeCount)
+        assertEquals(1, localServers.last().startCount)
+        assertEquals(
+            listOf("masque-replace-43", "server-close-1", "server-start-2"),
+            events,
+        )
     }
 
     @Test
@@ -293,14 +436,11 @@ class AgentSdkGroupConfigTest {
         runtime.deliverGroupConfig(groupConfig(includeSecondPeer = true))
 
         val session = sdk.createOffloadingSession(
-            LOCAL_ID,
             workloadType = "video_rendering",
-            groupId = "g1",
-            sandboxId = "sandbox-edge-1",
+            sandboxSpec = SandboxSpec(vcpus = 2, memoryMb = 4096),
         )
         val upload = sdk.startVideoUpload(
-            session.sessionId,
-            targetAgentIds = listOf(PEER_ID, SECOND_PEER_ID),
+            session,
             cameraId = "2",
             width = 1280,
             height = 720,
@@ -308,12 +448,15 @@ class AgentSdkGroupConfigTest {
             bitrateKbps = 2500,
         )
         assertEquals("ALLOCATED", session.state)
-        assertFalse(session.toString().contains("producer-token"))
+        assertNotNull(session.producer)
+        assertNotNull(session.processedStream)
+        assertFalse(session.toString().contains("access_token"))
+        assertFalse(session.toString().contains("access_ticket"))
         assertEquals("camera-track-1", upload.trackId)
         assertEquals("2", media.cameraId)
         assertEquals(
             setOf(
-                "request_id", "agent_id", "workload_type", "group_id", "preferred_sandbox_id",
+                "request_id", "workload_type", "sandbox_spec",
                 "timestamp", "proof",
             ),
             runtime.bodies.getValue("/compute/v1/offloading-sessions").keys,
@@ -323,6 +466,21 @@ class AgentSdkGroupConfigTest {
             runtime.bodies.getValue("/compute/v1/offloading-sessions")
                 .getValue("workload_type").jsonPrimitive.content,
         )
+        assertEquals(
+            2,
+            runtime.bodies.getValue("/compute/v1/offloading-sessions")
+                .getValue("sandbox_spec").jsonObject
+                .getValue("vcpus").jsonPrimitive.content.toInt(),
+        )
+        assertEquals(
+            4096,
+            runtime.bodies.getValue("/compute/v1/offloading-sessions")
+                .getValue("sandbox_spec").jsonObject
+                .getValue("memory_mb").jsonPrimitive.content.toInt(),
+        )
+        assertFalse(runtime.bodies.getValue("/compute/v1/offloading-sessions").containsKey("agent_id"))
+        assertFalse(runtime.bodies.getValue("/compute/v1/offloading-sessions").containsKey("group_id"))
+        assertFalse(runtime.bodies.getValue("/compute/v1/offloading-sessions").containsKey("sandbox_id"))
         UUID.fromString(
             runtime.bodies.getValue("/compute/v1/offloading-sessions")
                 .getValue("request_id").jsonPrimitive.content,
@@ -339,27 +497,11 @@ class AgentSdkGroupConfigTest {
                 .getValue("proof").jsonObject["jws"]!!
                 .jsonPrimitive.content,
         )
-        assertEquals(listOf(PEER_ID, SECOND_PEER_ID), runtime.bodies
-            .getValue("/compute/v1/offloading-sessions/session-1/consumers")
-            .getValue("target_agent_ids").jsonArray.map { it.jsonPrimitive.content })
-        assertEquals(2, peer.bodies.size)
-        peer.bodies.forEachIndexed { index, wire ->
-            val invitation = wire.getValue("payload").jsonObject
-            assertEquals(
-                "processed_video_invitation",
-                invitation.getValue("type").jsonPrimitive.content,
-            )
-            assertEquals(
-                listOf(PEER_ID, SECOND_PEER_ID)[index],
-                invitation.getValue("consumer_agent_id").jsonPrimitive.content,
-            )
-            assertFalse(invitation.toString().contains("producer-token"))
-            assertEquals(
-                "consumer-ticket-${index + 1}",
-                invitation.getValue("processed_stream").jsonObject
-                    .getValue("access_ticket").jsonPrimitive.content,
-            )
-        }
+        assertFalse(runtime.paths.any { it.endsWith("/consumers") })
+        assertTrue(peer.bodies.isEmpty())
+        val track = sdk.getProcessedVideoStream(session)
+        assertEquals("processed-track-1", track.trackId)
+        assertEquals(setOf("8.8.8.9"), tunnel.groupPeers["offloading:session-1"])
     }
 
     @Test
@@ -394,7 +536,10 @@ class AgentSdkGroupConfigTest {
         )
         runtime.deliverGroupConfig(groupConfig())
 
-        sdk.createOffloadingSession(LOCAL_ID, "video_rendering", "g1")
+        sdk.createOffloadingSession(
+            "video_rendering",
+            SandboxSpec(vcpus = 2, memoryMb = 4096),
+        )
 
         assertEquals(setOf("172.30.0.10"), tunnel.groupPeers["compute-control"])
         assertEquals("/compute/v1/offloading-sessions", computeRuntime.lastPath)
@@ -402,35 +547,49 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
-    fun `consumer imports invitation and gets processed video`() = runTest {
+    fun `application supplied remote session gets processed video`() = runTest {
         initializeSdk()
         runtime.deliverGroupConfig(groupConfig())
-        val invitation = buildJsonObject {
-            put("type", "processed_video_invitation")
-            put("version", "1.0")
-            put("session_id", "session-from-b")
-            put("group_id", "g1")
-            put("source_agent_id", PEER_ID)
-            put("consumer_agent_id", LOCAL_ID)
-            put("sandbox_id", "video-server-1")
-            put("state", "SOURCE_CONNECTED")
-            put("expires_at", "2027-09-01T00:00:00Z")
-            put("processed_stream", buildJsonObject {
-                put("video_server_ip", "8.8.8.9")
-                put("offer_url", "https://8.8.8.9:28500/v1/processed/offer")
-                put("access_ticket", "consumer-ticket-a")
-                put("protocol", "webrtc")
-                put("signaling", "non-trickle")
-            })
-        }
+        val session = OffloadingSession(
+            sessionId = "session-from-b",
+            state = "SOURCE_CONNECTED",
+            expiresAt = Instant.parse("2027-09-01T00:00:00Z"),
+            processedStream = ProcessedVideoEndpoint(
+                videoServerIp = "8.8.8.9",
+                offerUrl = "https://8.8.8.9:28500/v1/processed/offer",
+            ),
+        )
+        val track = sdk.getProcessedVideoStream(session)
 
-        val session = sdk.acceptOffloadingSession(PEER_ID, "g1", invitation)
-        val track = sdk.getProcessedVideoStream(session.sessionId)
-
-        assertEquals(com.rayneo.agent.sdk.model.OffloadingSessionRole.CONSUMER, session.role)
-        assertFalse(session.toString().contains("consumer-ticket-a"))
         assertEquals("processed-track-1", track.trackId)
         assertEquals(setOf("8.8.8.9"), tunnel.groupPeers["offloading:session-from-b"])
+    }
+
+    @Test
+    fun `application supplied session drives upload endpoints`() = runTest {
+        initializeSdk()
+        val session = OffloadingSession(
+            sessionId = "session-created-elsewhere",
+            state = "ALLOCATED",
+            expiresAt = null,
+            producer = VideoUploadEndpoint(
+                videoServerIp = "9.9.9.9",
+                sourceStartUrl = "https://9.9.9.9:29500/source",
+                sourceStopUrl = "https://9.9.9.9:29500/source/stop",
+            ),
+            processedStream = ProcessedVideoEndpoint(
+                videoServerIp = "9.9.9.10",
+                offerUrl = "https://9.9.9.10:29501/processed",
+            ),
+        )
+
+        val upload = sdk.startVideoUpload(session, fps = 24)
+
+        assertEquals("camera-track-1", upload.trackId)
+        assertEquals(
+            setOf("9.9.9.9", "9.9.9.10"),
+            tunnel.groupPeers["offloading:session-created-elsewhere"],
+        )
     }
 
     @Test
@@ -847,14 +1006,16 @@ class AgentSdkGroupConfigTest {
     private fun groupConfig(
         peerPort: String = "4001",
         includeSecondPeer: Boolean = false,
+        timestamp: Instant = Instant.now(),
+        peerIp: String = "8.8.8.8",
     ): JsonObject = buildJsonObject {
         put("notification_type", "acf_group_config")
         put("version", "1.0.0")
-        put("timestamp", Instant.now().toString())
+        put("timestamp", timestamp.toString())
         put("group_id", "g1")
         put("members", buildJsonObject {
             put("agent1", member(LOCAL_ID, "Agent A", "8.8.8.7", "4001"))
-            put("not-an-id", member(PEER_ID, "Agent B", "8.8.8.8", peerPort))
+            put("not-an-id", member(PEER_ID, "Agent B", peerIp, peerPort))
             if (includeSecondPeer) {
                 put("agent-c", member(SECOND_PEER_ID, "Agent C", "8.8.8.10", "4002"))
             }
@@ -894,28 +1055,42 @@ class AgentSdkGroupConfigTest {
         override val tunFd: Int = 42
         override val clientIdentityDirectory: String = "/tmp/agent-sdk-test-identity"
         val groupPeers = mutableMapOf<String, Set<String>>()
+        val replacements = mutableListOf<Pair<String, Set<String>>>()
         var establishedConfiguration: TunnelConfiguration? = null
         private var swapper: (suspend (Int) -> Unit)? = null
+        private var replacedListener: (suspend () -> Unit)? = null
 
         override suspend fun establish(configuration: TunnelConfiguration) {
             establishedConfiguration = configuration
         }
         override suspend fun replaceGroupPeers(groupId: String, peerIps: Set<String>) {
+            replacements += groupId to peerIps.toSet()
             if (peerIps.isEmpty()) groupPeers.remove(groupId) else groupPeers[groupId] = peerIps
         }
         override fun currentAllowedPeerIps(): Set<String> = groupPeers.values.flatten().toSet()
         override fun setTunFdSwapper(swapper: suspend (Int) -> Unit) { this.swapper = swapper }
+        override fun setTunReplacedListener(listener: suspend () -> Unit) {
+            replacedListener = listener
+        }
+        suspend fun simulateTunReplacement(newFd: Int) {
+            checkNotNull(swapper) { "TUN fd swapper is not registered" }.invoke(newFd)
+            replacedListener?.invoke()
+        }
         override suspend fun close() = Unit
     }
 
-    private class FakeMasque : MasqueTransport {
+    private class FakeMasque(
+        private val events: MutableList<String>? = null,
+    ) : MasqueTransport {
         override var connected: Boolean = false
         var configuration: MasqueConfiguration? = null
         override suspend fun start(tunFd: Int, configuration: MasqueConfiguration) {
             this.configuration = configuration
             connected = true
         }
-        override suspend fun replaceTunFd(tunFd: Int) = Unit
+        override suspend fun replaceTunFd(tunFd: Int) {
+            events?.add("masque-replace-$tunFd")
+        }
         override suspend fun close() { connected = false }
     }
 
@@ -952,30 +1127,18 @@ class AgentSdkGroupConfigTest {
             return if (path == "/compute/v1/offloading-sessions") {
                 buildJsonObject {
                     put("session_id", "session-1")
-                    put("sandbox_id", "sandbox-edge-1")
                     put("state", "ALLOCATED")
-                    put("group_id", "g1")
-                    put("source_agent_id", LOCAL_ID)
                     put("expires_at", "2027-08-18T12:00:00Z")
                     put("producer", buildJsonObject {
                         put("video_server_ip", "8.8.8.9")
                         put("source_start_url", "https://8.8.8.9:28500/v1/source-pulls")
                         put("source_stop_url", "https://8.8.8.9:28500/v1/source-pulls/session-1")
-                        put("access_token", "producer-token")
                     })
-                }
-            } else if (path == "/compute/v1/offloading-sessions/session-1/consumers") {
-                buildJsonObject {
-                    put("consumers", buildJsonObject {
-                        body.getValue("target_agent_ids").jsonArray.forEachIndexed { index, target ->
-                            put(target.jsonPrimitive.content, buildJsonObject {
-                                put("video_server_ip", "8.8.8.9")
-                                put("offer_url", "https://8.8.8.9:28500/v1/processed/offer")
-                                put("access_ticket", "consumer-ticket-${index + 1}")
-                                put("protocol", "webrtc")
-                                put("signaling", "non-trickle")
-                            })
-                        }
+                    put("processed_stream", buildJsonObject {
+                        put("video_server_ip", "8.8.8.9")
+                        put("offer_url", "https://8.8.8.9:28500/v1/processed/offer")
+                        put("protocol", "webrtc")
+                        put("signaling", "non-trickle")
                     })
                 }
             } else if (path == "/idm/v1/identity-applications") {
@@ -1013,8 +1176,13 @@ class AgentSdkGroupConfigTest {
         override suspend fun close() = Unit
     }
 
-    private class FakeServer : LocalServer {
+    private class FakeServer(
+        private val onStart: () -> Unit = {},
+        private val onClose: () -> Unit = {},
+    ) : LocalServer {
         var agentIp = ""
+        var startCount = 0
+        var closeCount = 0
         override suspend fun start(
             agentIp: String,
             tcpPort: Int,
@@ -1022,8 +1190,13 @@ class AgentSdkGroupConfigTest {
             onA2aMessage: suspend (JsonObject) -> Unit,
         ) {
             this.agentIp = agentIp
+            startCount += 1
+            onStart()
         }
-        override suspend fun close() = Unit
+        override suspend fun close() {
+            closeCount += 1
+            onClose()
+        }
     }
 
     private class FakeLocalAddressResolver : LocalAddressResolver {

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import signal
 from collections.abc import Mapping
 from typing import Any
 
@@ -164,6 +165,33 @@ async def run_agent_a(
             agent_lifecycle_state=lifecycle_state.value,
             agent_id=profile.agent_id if profile else None,
         )
+        if (
+            args.fresh_registration
+            and lifecycle_state is not AgentLifecycleState.NO_IDENTITY
+        ):
+            if profile is None:
+                raise RuntimeError("persisted Agent state has no local profile")
+            previous_agent_id = profile.agent_id
+            await _before_step(
+                gate,
+                "sdk.deregister_identity",
+                "Fresh 模式：先注销上次测试遗留身份，再从状态1重新注册。",
+            )
+            deregistered = await client.deregister_identity(
+                previous_agent_id, reason="replaced"
+            )
+            if not deregistered.success:
+                raise RuntimeError(
+                    "Agent A previous identity deregistration failed: "
+                    f"{deregistered.message}"
+                )
+            _emit(
+                "PREVIOUS_IDENTITY_DEREGISTERED",
+                agent_id=previous_agent_id,
+            )
+            lifecycle_state = AgentLifecycleState.NO_IDENTITY
+            profile = None
+
         if lifecycle_state is AgentLifecycleState.NO_IDENTITY:
             await _before_step(
                 gate,
@@ -177,7 +205,7 @@ async def run_agent_a(
                 metadata={
                     "region": args.region,
                     "os": "Linux",
-                    "version": "0.17.1",
+                    "version": "0.17.5",
                 },
             )
             lifecycle_state = AgentLifecycleState.IDENTITY_READY
@@ -336,15 +364,6 @@ async def run_agent_a(
             target_agent_id=target.agent_id,
         )
 
-        if args.deregister_on_exit:
-            await _before_step(
-                gate,
-                "sdk.deregister_identity",
-                "POST /acn-agent/v1/agent-deletions，注销 Agent A 测试身份。",
-            )
-            await client.deregister_identity(profile.agent_id, reason="retired")
-            _emit("IDENTITY_DEREGISTERED", agent_id=profile.agent_id)
-
         completed = True
         return {
             "agent_id": profile.agent_id,
@@ -356,6 +375,16 @@ async def run_agent_a(
         unregister_group()
         unregister_network()
         try:
+            if args.deregister_on_exit and profile is not None:
+                deregistered = await client.deregister_identity(
+                    profile.agent_id, reason="retired"
+                )
+                if not deregistered.success:
+                    raise RuntimeError(
+                        "Agent A identity deregistration failed: "
+                        f"{deregistered.message}"
+                    )
+                _emit("IDENTITY_DEREGISTERED", agent_id=profile.agent_id)
             if completed:
                 await _before_step(
                     gate,
@@ -417,14 +446,48 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="wait for Enter before each outbound SDK operation",
     )
+    value.add_argument(
+        "--fresh-registration",
+        action="store_true",
+        help=(
+            "deregister any persisted identity during startup, then always "
+            "apply and publish a new identity"
+        ),
+    )
     value.add_argument("--deregister-on-exit", action="store_true")
     return value
 
 
 async def main(args: argparse.Namespace) -> None:
-    _emit("TEST_STARTING", interactive=args.prompt)
+    _emit(
+        "TEST_STARTING",
+        interactive=args.prompt,
+        fresh_registration=args.fresh_registration,
+        deregister_on_exit=args.deregister_on_exit,
+    )
     gate = EnterStepGate() if args.prompt else None
-    await run_agent_a(args, gate=gate)
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    terminate_requested = False
+
+    def request_termination() -> None:
+        nonlocal terminate_requested
+        terminate_requested = True
+        if task is not None:
+            task.cancel()
+
+    signal_handler_installed = False
+    try:
+        loop.add_signal_handler(signal.SIGTERM, request_termination)
+        signal_handler_installed = True
+        await run_agent_a(args, gate=gate)
+    except asyncio.CancelledError:
+        if not terminate_requested:
+            raise
+        _emit("TEST_TERMINATED", signal="SIGTERM")
+    finally:
+        if signal_handler_installed:
+            loop.remove_signal_handler(signal.SIGTERM)
 
 
 if __name__ == "__main__":

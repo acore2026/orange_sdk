@@ -7,7 +7,12 @@ import android.content.ServiceConnection
 import android.net.VpnService
 import android.os.Bundle
 import android.os.IBinder
+import android.util.Log
+import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -31,9 +36,14 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.webrtc.RendererCommon
+import org.webrtc.EglBase
+import org.webrtc.SurfaceViewRenderer
+import org.webrtc.VideoSink
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.CopyOnWriteArraySet
 
 /**
  * RayNeo X3 Pro launcher for the fixed Agent-A deployment.
@@ -49,6 +59,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         )
     }
     private val logLines = ArrayDeque<String>()
+    private val diagnosticLogLines = ArrayDeque<String>()
     private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     @Volatile
@@ -68,6 +79,11 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     private var resetArmed = false
     private var resetInProgress = false
     private var stopInProgress = false
+    private val videoRenderers = CopyOnWriteArraySet<SurfaceViewRenderer>()
+    @Volatile
+    private var videoEglBase: EglBase? = null
+    private var videoPreviewHasFrame = false
+    private var videoPreviewResolution = ""
 
     private val vpnPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -100,6 +116,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         renderDeployment()
+        initializeVideoPreviews()
         installFocusAndTempleActions()
         appendLog(
             LabLogLevel.INFO,
@@ -134,6 +151,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         mBindingPair.setLeft {
             primaryAction.setOnClickListener { handlePrimaryAction() }
             resetAction.setOnClickListener { requestAgentReset() }
+            dumpAction.setOnClickListener { dumpLogs() }
             stopAction.setOnClickListener { stopAndFinish() }
             focusHolder.addFocusTarget(
                 FocusInfo(
@@ -149,6 +167,13 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                         if (action is TempleAction.Click) requestAgentReset()
                     },
                     focusChangeHandler = { focused -> updateFocus(ActionTarget.RESET, focused) },
+                ),
+                FocusInfo(
+                    dumpAction,
+                    eventHandler = { action ->
+                        if (action is TempleAction.Click) dumpLogs()
+                    },
+                    focusChangeHandler = { focused -> updateFocus(ActionTarget.DUMP, focused) },
                 ),
                 FocusInfo(
                     stopAction,
@@ -182,6 +207,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             val target = when (action) {
                 ActionTarget.PRIMARY -> primaryAction
                 ActionTarget.RESET -> resetAction
+                ActionTarget.DUMP -> dumpAction
                 ActionTarget.STOP -> stopAction
             }
             target.setBackgroundResource(
@@ -243,9 +269,10 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         // the glasses UI.
         runnerJob = lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val mediaAdapter = AndroidWebRtcMediaOffloadAdapter(service) { event ->
-                    appendLog(LabLogLevel.INFO, "WEBRTC", event)
-                }
+                val mediaAdapter = AndroidWebRtcMediaOffloadAdapter(
+                    context = service,
+                    sharedEglContext = videoEglBase?.eglBaseContext,
+                ) { event -> appendLog(LabLogLevel.INFO, "WEBRTC", event) }
                 val sdkValue = AgentSdk.create(service, mediaOffloadAdapter = mediaAdapter)
                 val flow = AgentTestRunner(
                     sdk = sdkValue,
@@ -254,6 +281,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                     onStatus = ::setRunnerStatus,
                     onManualMessageSession = ::setManualMessageSession,
                     onResetAvailability = ::setResetAvailable,
+                    processedVideoRenderSinks = ::processedVideoRenderSinks,
+                    onProcessedVideoStatus = ::setProcessedVideoStatus,
                 )
                 sdk = sdkValue
                 runner = flow
@@ -293,6 +322,91 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             }
         }
     }
+
+    private fun initializeVideoPreviews() {
+        val events = object : RendererCommon.RendererEvents {
+            override fun onFirstFrameRendered() {
+                runOnUiThread {
+                    videoPreviewHasFrame = true
+                    renderProcessedVideoLiveStatus()
+                    appendLog(
+                        LabLogLevel.SUCCESS,
+                        "VIDEO DISPLAY",
+                        "SurfaceViewRenderer 已绘制处理流首帧",
+                    )
+                }
+            }
+
+            override fun onFrameResolutionChanged(width: Int, height: Int, rotation: Int) {
+                runOnUiThread {
+                    videoPreviewResolution = if (rotation % 180 == 0) {
+                        "${width}x$height"
+                    } else {
+                        "${height}x$width"
+                    }
+                    if (videoPreviewHasFrame) renderProcessedVideoLiveStatus()
+                }
+            }
+        }
+        val eglBase = videoEglBase ?: EglBase.create().also { videoEglBase = it }
+        mBindingPair.updateView {
+            videoRenderer.setBackgroundColor(android.graphics.Color.BLACK)
+            videoRenderer.init(eglBase.eglBaseContext, events)
+            videoRenderer.setEnableHardwareScaler(false)
+            videoRenderer.setMirror(false)
+            videoRenderer.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+            videoRenderers += videoRenderer
+        }
+    }
+
+    private fun processedVideoRenderSinks(): List<VideoSink> = videoRenderers.toList()
+
+    private fun setProcessedVideoStatus(title: String, detail: String) {
+        runOnUiThread {
+            videoPreviewHasFrame = false
+            mBindingPair.updateView {
+                videoRenderer.clearImage()
+                videoStatus.text = "$title\n$detail"
+                videoStatus.setTextColor(android.graphics.Color.rgb(183, 203, 212))
+                videoStatus.textSize = 14f
+                videoStatus.gravity = Gravity.CENTER
+                videoStatus.setBackgroundResource(R.drawable.rayneo_video_status)
+                videoStatus.layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER,
+                )
+            }
+        }
+    }
+
+    private fun renderProcessedVideoLiveStatus() {
+        mBindingPair.updateView {
+            videoStatus.text =
+                "● LIVE${videoPreviewResolution.takeIf(String::isNotBlank)?.let { "  $it" }.orEmpty()}"
+            videoStatus.setTextColor(android.graphics.Color.rgb(94, 234, 212))
+            videoStatus.textSize = 13f
+            videoStatus.setBackgroundResource(R.drawable.rayneo_video_status_live)
+            videoStatus.layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.END,
+            ).apply {
+                topMargin = dp(8)
+                marginEnd = dp(8)
+            }
+        }
+    }
+
+    private fun detachVideoPreviews(): EglBase? {
+        videoRenderers.forEach { renderer -> runCatching { renderer.release() } }
+        videoRenderers.clear()
+        val eglBase = videoEglBase
+        videoEglBase = null
+        return eglBase
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private fun setResetAvailable(available: Boolean) {
         runOnUiThread {
@@ -445,14 +559,69 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private fun appendLog(level: LabLogLevel, stage: String, message: String) {
+        val time = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
+        val raw = "$time  ${level.name.padEnd(7)}  ${stage.padEnd(17)}  $message"
+        Log.println(
+            when (level) {
+                LabLogLevel.INFO, LabLogLevel.SUCCESS -> Log.INFO
+                LabLogLevel.WARNING -> Log.WARN
+                LabLogLevel.ERROR -> Log.ERROR
+            },
+            APP_LOG_TAG,
+            "$stage $message",
+        )
         runOnUiThread {
-            val time = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+            diagnosticLogLines.addLast(raw)
+            while (diagnosticLogLines.size > MAX_DIAGNOSTIC_LOG_LINES) {
+                diagnosticLogLines.removeFirst()
+            }
             logLines.addLast("$time  ${level.name.first()}  $stage  $message")
             while (logLines.size > MAX_VISIBLE_LOG_LINES) logLines.removeFirst()
             val rendered = logLines.joinToString("\n")
             mBindingPair.updateView {
                 logOutput.text = rendered
                 logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
+            }
+        }
+    }
+
+    private fun dumpLogs() {
+        appendLog(LabLogLevel.INFO, "DUMP", "开始采集端侧诊断日志")
+        val appLogs = diagnosticLogLines.toList()
+        val activeRunner = runner
+        val activeSdk = sdk
+        lifecycleScope.launch {
+            try {
+                val dump = DiagnosticLogExporter.createDump(
+                    context = this@RayNeoMainActivity,
+                    config = config,
+                    appLogs = appLogs,
+                    sdkSummary = activeRunner?.diagnosticSummary()
+                        ?: "lifecycle_state=${activeSdk?.agentLifecycleState ?: "<sdk unavailable>"}\n" +
+                            "agent_id=${activeSdk?.localProfile?.agentId ?: "<none>"}",
+                    localTcpEndpoint = activeRunner?.diagnosticLocalTcpEndpoint(),
+                    videoPreviewSummary = videoRenderers.firstOrNull()?.let {
+                        "renderer=SurfaceViewRenderer first_frame_displayed=$videoPreviewHasFrame " +
+                            "last_frame=$videoPreviewResolution"
+                    } ?: "renderer=<unavailable>",
+                )
+                appendLog(
+                    LabLogLevel.SUCCESS,
+                    "DUMP",
+                    "诊断日志已生成：${dump.displayLocation}",
+                )
+                DiagnosticLogExporter.share(this@RayNeoMainActivity, dump)
+            } catch (error: Exception) {
+                appendLog(
+                    LabLogLevel.ERROR,
+                    "DUMP",
+                    "诊断日志生成失败：${error.message ?: error::class.java.simpleName}",
+                )
+                Toast.makeText(
+                    this@RayNeoMainActivity,
+                    "诊断日志生成失败",
+                    Toast.LENGTH_LONG,
+                ).show()
             }
         }
     }
@@ -517,9 +686,13 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         activeJob?.cancel()
         runner?.close()
         runner = null
+        // Renderers must release their EGL surfaces on the UI thread, while the shared root EGL
+        // context must outlive the adapter's decoder context. Release the root after SDK close.
+        val activeEglBase = detachVideoPreviews()
         cleanupScope.launch {
             activeJob?.cancelAndJoin()
             runCatching { activeSdk?.close() }
+            runCatching { activeEglBase?.release() }
             cleanupScope.cancel()
         }
         if (serviceBound) runCatching { unbindService(connection) }
@@ -527,9 +700,11 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private enum class PrimaryMode { BUSY, RETRY, SEND }
-    private enum class ActionTarget { PRIMARY, RESET, STOP }
+    private enum class ActionTarget { PRIMARY, RESET, DUMP, STOP }
 
     private companion object {
         const val MAX_VISIBLE_LOG_LINES = 7
+        const val MAX_DIAGNOSTIC_LOG_LINES = 2_000
+        const val APP_LOG_TAG = "AgentLinkLab"
     }
 }

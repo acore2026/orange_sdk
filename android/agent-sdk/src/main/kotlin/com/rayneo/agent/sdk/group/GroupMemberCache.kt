@@ -163,16 +163,30 @@ class GroupMemberCache(
         )
     }
 
-    suspend fun commit(
+    internal suspend fun commit(
         candidate: GroupConfigSnapshot,
         localAgentId: String,
-    ): GroupConfigSnapshot = mutex.withLock {
+    ): Boolean = mutex.withLock {
         val current = snapshots[candidate.groupId]
-        if (current != null && !candidate.notificationTimestamp.isAfter(current.notificationTimestamp)) {
-            throw AgentSdkException(
-                ErrorCode.GROUP_CONFIG_STALE,
-                "Group config is not newer than the committed snapshot",
-            )
+        if (current != null) {
+            if (candidate.notificationTimestamp.isBefore(current.notificationTimestamp)) {
+                throw AgentSdkException(
+                    ErrorCode.GROUP_CONFIG_STALE,
+                    "Group config is older than the committed snapshot",
+                )
+            }
+            if (candidate.notificationTimestamp == current.notificationTimestamp) {
+                if (
+                    candidate.version == current.version &&
+                    candidate.membersByAgentId == current.membersByAgentId
+                ) {
+                    return@withLock false
+                }
+                throw AgentSdkException(
+                    ErrorCode.GROUP_CONFIG_STALE,
+                    "Group config conflicts with the committed snapshot at the same timestamp",
+                )
+            }
         }
         val peers = candidate.membersByAgentId
             .filterKeys { it != localAgentId }
@@ -182,7 +196,7 @@ class GroupMemberCache(
         tunnelController.replaceGroupPeers(candidate.groupId, peers)
         val committed = candidate.copy(generation = (current?.generation ?: 0) + 1)
         snapshots[candidate.groupId] = committed
-        committed
+        true
     }
 
     suspend fun resolve(groupId: String, agentId: String): GroupMemberInfo = mutex.withLock {

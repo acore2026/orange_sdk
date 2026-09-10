@@ -34,6 +34,71 @@ async def test_group_config_caches_by_agent_id_and_installs_route(sdk_fixture):
     assert "8.8.8.7/32" not in backend.routes
 
 
+async def test_identical_group_config_replay_acks_without_side_effects(sdk_fixture):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    backend = sdk_fixture["backend"]
+    listener = AckNetworkListener()
+    sdk.register_network_message_listener(listener)
+    timestamp = datetime(2026, 9, 3, 7, 0, tzinfo=timezone.utc)
+    payload = group_payload(timestamp=timestamp)
+
+    assert await runtime.deliver_group_config(payload) is NetworkMessageAction.ACK
+    operations = list(backend.operations)
+    assert await runtime.deliver_group_config(payload) is NetworkMessageAction.ACK
+
+    snapshot = await sdk.get_group_snapshot("g1")
+    assert snapshot is not None
+    assert snapshot.generation == 1
+    assert len(listener.messages) == 1
+    assert backend.operations == operations
+
+
+async def test_newer_identical_group_config_commits_and_notifies(sdk_fixture):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    backend = sdk_fixture["backend"]
+    listener = AckNetworkListener()
+    sdk.register_network_message_listener(listener)
+    timestamp = datetime(2026, 9, 3, 7, 0, tzinfo=timezone.utc)
+
+    await runtime.deliver_group_config(group_payload(timestamp=timestamp))
+    operations = list(backend.operations)
+    action = await runtime.deliver_group_config(
+        group_payload(timestamp=timestamp + timedelta(seconds=1))
+    )
+
+    snapshot = await sdk.get_group_snapshot("g1")
+    assert action is NetworkMessageAction.ACK
+    assert snapshot is not None
+    assert snapshot.generation == 2
+    assert len(listener.messages) == 2
+    assert backend.operations == operations
+
+
+async def test_same_timestamp_with_different_content_is_rejected(sdk_fixture):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    backend = sdk_fixture["backend"]
+    listener = AckNetworkListener()
+    sdk.register_network_message_listener(listener)
+    timestamp = datetime(2026, 9, 3, 7, 0, tzinfo=timezone.utc)
+    await runtime.deliver_group_config(group_payload(timestamp=timestamp))
+    operations = list(backend.operations)
+
+    with pytest.raises(AgentSdkError) as exc:
+        await runtime.deliver_group_config(
+            group_payload(timestamp=timestamp, peer_ip="8.8.8.9")
+        )
+
+    snapshot = await sdk.get_group_snapshot("g1")
+    assert exc.value.code is ErrorCode.GROUP_CONFIG_STALE
+    assert snapshot is not None
+    assert snapshot.members_by_agent_id[PEER_ID].agent_ip == "8.8.8.8"
+    assert len(listener.messages) == 1
+    assert backend.operations == operations
+
+
 async def test_group_config_commits_without_listener(sdk_fixture):
     sdk = sdk_fixture["sdk"]
     runtime = sdk_fixture["runtime"]

@@ -2,19 +2,20 @@
 
 `agent-connect-sdk` 为 Linux 端 Agent 提供统一的控制面和数据面能力：应用只需要调用 SDK 函数，不需要感知对端 IP、TCP 端口、TUN 路由或 MASQUE 封装细节。
 
-SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_group_config` 后，会自动缓存 `group_id + agent_id -> agent_ip + service_endpoints + skills`，并自动维护对端 `/32` 或 `/128` 主机路由。应用发送时提供群组、目标 Agent、消息类型、任务 ID 和业务 JSON，不传 URL、IP、端口或路由。
+SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_group_config` 后，会自动缓存 `group_id + agent_id -> agent_ip + service_endpoints + skills`，并自动维护对端 `/32` 或 `/128` 主机路由。相同时间戳且规范化配置相同的重复通知会直接 ACK，不重复写路由或通知应用；时间戳更新的通知正常提交并通知应用。应用发送时提供群组、目标 Agent、消息类型、任务 ID 和业务 JSON，不传 URL、IP、端口或路由。
 
 ## 1. 交付物和运行要求
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.17.1-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
+- `agent_connect_sdk-0.17.5-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/interactive_linux_agent.py`：复用真实 Linux 全流程参数，每按一次回车只调用下一个 SDK 接口。
 - `examples/agent_a_test.py`：A 按 B 的能力发现 B、邀请 B 建组，随后通过群组缓存向 B 发送消息。
 - `examples/agent_b_test.py`：B 发布能力、自动接受 A 的邀请，并打印收到的群组消息。
 - `examples/masque_two_instance_test.py`：在两个隔离的 Ubuntu 实例中验证 A 经 MASQUE/5GC 向 B 发送消息，B 在控制台和本地文件记录收包证据。
+- `docker/arm64/`：在 x86 主机使用 Buildx 制作 `linux/arm64` 运行镜像，并提供 A/B 环境变量启动脚本；完整用法见 `docker/arm64/README.md`。
 
 本仓库不交付 MASQUE Server、AgentRuntime、UERANSIM 适配器、服务器证书或服务器
 启动命令。服务器侧如何解封装、选择 UE 和接入 5GC 由外部系统负责。
@@ -46,7 +47,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.17.1-py3-none-any.whl
+dist/agent_connect_sdk-0.17.5-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -58,7 +59,7 @@ dist/agent_connect_sdk-0.17.1-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.17.1-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.17.5-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -92,14 +93,14 @@ python -m pip install -e '.[test]'
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.17.1-py3-none-any.whl
+  ./agent_connect_sdk-0.17.5-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.17.1-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.17.5-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -412,7 +413,7 @@ profile = await sdk.apply_identity(
     owner="customer-a",
     name="Agent A",
     description="RayNeo edge agent",
-    metadata={"region": "CN", "os": "Linux", "version": "0.17.1"},
+    metadata={"region": "CN", "os": "Linux", "version": "0.17.5"},
 )
 
 ability = await sdk.get_network_ability(profile.agent_id)
@@ -548,23 +549,20 @@ service_endpoints = http://agent-b:4001/A2A/message
 
 ### 4.4 计算和视频卸载
 
-应用需要在构造 `AgentSdk` 时提供平台对应的 `MediaOffloadAdapter`。视频源 Agent B
-先在已提交的群组中创建会话；`start_video_upload` 接收一个或多个目标 Agent ID。
-媒体适配器只有在 Video Server 已开始从 B 拉流后才返回，随后 SDK 向控制面申请每个
-目标独立的消费者 Ticket，并自动通过 A2A P2P 消息发送
-`processed_video_invitation`：
+应用需要在构造 `AgentSdk` 时提供平台对应的 `MediaOffloadAdapter`。视频源 Agent C
+按资源规格申请网络分配的 Sandbox，再调用 `start_video_upload`。上传接口只负责媒体上传，
+不会选择接收者、申请消费者凭据或发送 A2A 消息：
 
 ```python
+from agent_sdk import SandboxSpec
+
 session = await sdk.create_offloading_session(
-    profile.agent_id,
     workload_type="video_rendering",
-    group_id=group.group_id,
-    sandbox_id="sandbox-edge-1",
+    sandbox_spec=SandboxSpec(vcpus=2, memory_mb=4096),
 )
 
 upload = await sdk.start_video_upload(
-    session.session_id,
-    target_agent_ids=[agent_a_id, agent_c_id],
+    session,
     camera_id=0,
     width=1280,
     height=720,
@@ -573,25 +571,34 @@ upload = await sdk.start_video_upload(
 )
 ```
 
-目标 Agent 的群组消息监听器收到邀请后导入消费者会话，再从 Video Server 拉取处理流：
+`create_offloading_session` 的公开入参不包含 `agent_id`、`group_id` 或 `sandbox_id`。
+Sandbox 由网络按 `sandbox_spec` 分配；2 vCPU、4 GiB 内存表示为
+`SandboxSpec(vcpus=2, memory_mb=4096)`。响应同时返回 producer 和
+processed-stream 端点。同一个 Agent
+可以上传后直接拉取自己的处理流：
 
 ```python
-consumer_session = await sdk.accept_offloading_session(
-    sender_agent_id,
-    group_id,
-    payload,
-)
-
-stream = await sdk.get_processed_video_stream(consumer_session.session_id)
+stream = await sdk.get_processed_video_stream(session)
 frame = await stream.recv()
 ```
 
-创建响应必须包含 producer 端点。Video Server 开始拉流后，SDK 调用
-`POST /compute/v1/offloading-sessions/{session_id}/consumers`，请求体包含
-`group_id + target_agent_ids`；返回的 `consumers` 必须按 Agent ID 提供独立的
-`video_server_ip/offer_url/access_ticket`。producer Token 不进入 P2P 消息，消费者
-Ticket 只发送给对应目标。SDK 仍由 `MediaOffloadAdapter` 隔离具体的 `aiortc`、
-GStreamer 或硬件媒体栈。
+如果上传方 C 希望让接收方 E 获取处理流，由应用使用既有 `send_message` 把必要的
+session 信息发送给 E；也可以完全不发送。E 把消息解析为 `OffloadingSession`（仅需
+`session_id/state/expires_at/processed_stream`），再传给
+`get_processed_video_stream(session)`。这属于应用协议，不新增 SDK 接口。
+
+`OffloadingSession` 不包含 `sandbox_id`、`group_id`、`source_agent_id` 或任意本机
+信息。A2A 的来源、目标和群组由 `send_message` 的消息信封承载，不重复放入视频
+会话载荷。
+
+`start_video_upload(session, ...)` 与 `get_processed_video_stream(session, ...)` 都从
+函数入参中的 session 读取 Video Server IP、端口/URL 和 session ID；SDK 内没有固定
+Video Server 地址，也不依赖名为 A/B 的角色。所需 producer 与 processed-stream
+信息都来自 `create_offloading_session` 返回值，应用跨终端传递时可按接收方用途裁剪。
+
+WebRTC 信令和端点中不携带业务层 token、ticket、Bearer 或 proof；Agent ID 的可信性
+由核心网会话维护。WebRTC 自身仍按协议执行 ICE、DTLS 和 SRTP。SDK 继续通过
+`MediaOffloadAdapter` 隔离具体的 `aiortc`、GStreamer 或硬件媒体栈。
 
 当前核心网没有实际算力沙箱时，可以部署仓库根目录的
 [`mock-video-server`](../mock-video-server/README.md)，并在初始化时只覆写算力控制端点：
@@ -872,7 +879,8 @@ sudo -E .venv/bin/python examples/linux_agent.py \
   --group-name customer-demo \
   --dnn internet \
   --message '{"type":"text","content":"hello"}' \
-  --sandbox-id sandbox-edge-1 \
+  --sandbox-vcpus 2 \
+  --sandbox-memory-mb 4096 \
   --log-file /var/log/agent-sdk/agent-a.log \
   --log-level INFO
 ```
@@ -925,6 +933,13 @@ WebSocket、A2A HTTP 监听仍然正常工作。交互步骤覆盖监听器注�
 发布；状态2只获取网络能力并发布 Agent Card；状态3复用保存的 Profile，跳过
 `apply_identity()`、`get_network_ability()` 和 `register_capabilities()`。因此脚本重启不会
 重复发布 Agent Card。只有显式增加 `--deregister-on-exit` 才在退出前回到状态1。
+
+`agent_a_test.py` 和 `agent_b_test.py` 还支持 `--fresh-registration`。启用后，脚本只把
+恢复出的 Profile 用作网侧清理句柄：先以 `reason=replaced` 调用
+`deregister_identity()`，成功后再完整执行 `apply_identity()`、
+`get_network_ability()` 和 `register_capabilities()`；注销失败时测试直接失败，绝不
+回退到复用。ARM 测试镜像默认同时启用 `--fresh-registration` 和
+`--deregister-on-exit`，普通命令行调用仍保持向后兼容的默认行为。
 
 本测试使用两个独立脚本。B 必须先启动并完成能力发布；A 随后以
 `required_skills=[target_capability]` 调用能力发现，用发现到的 B Agent ID 创建
@@ -1027,9 +1042,8 @@ ss -lunp | grep <MASQUE端口>
 | `get_group_snapshot(group_id)` | 查询 SDK 已提交的只读群组快照 | `GroupConfigSnapshot | None` |
 | `send_message(...)` | 按群组缓存直接调用完整 `service_endpoints` | `MessageReceipt` |
 | `create_offloading_session(...)` | 创建计算卸载会话 | `OffloadingSession` |
-| `start_video_upload(..., target_agent_ids)` | 启动视频上传；Server 拉流成功后自动通知多个目标 | `VideoUploadHandle` |
-| `accept_offloading_session(...)` | 目标 Agent 验证并导入 P2P 消费者邀请 | `OffloadingSession` |
-| `get_processed_video_stream(...)` | 获取处理后视频流 | `RemoteVideoStream` |
+| `start_video_upload(session, ...)` | 按会话中的 producer 端点启动视频上传；不选择接收者、不自动发消息 | `VideoUploadHandle` |
+| `get_processed_video_stream(session, ...)` | 使用应用持有或收到的会话获取处理后视频流 | `RemoteVideoStream` |
 | `close()` | 释放路由、TUN、HTTP/3 和监听服务 | 无 |
 
 ## 7. 常见问题定位

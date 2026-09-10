@@ -2,6 +2,318 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-10 — 计算卸载改为资源规格申请
+
+### 修改原因
+
+- Sandbox 由网络按资源需求分配，终端在创建计算卸载会话前没有 `sandbox_id`，也不应向创建接口重复提交本机 Agent ID 或群组信息。
+- `OffloadingSession` 是媒体端点的承载对象；`sandbox_id`、`group_id` 和 `source_agent_id` 对后续上传或拉流没有必要，消息路由身份应由 `send_message` 的群组信封负责。
+
+### 修改方式
+
+- Python/Android `create_offloading_session` / `createOffloadingSession` 改为接收 `workload_type` 和 `SandboxSpec(vcpus, memory)`，例如 2 vCPU、4096 MiB；删除 Agent、群组和指定 Sandbox 入参。
+- 创建请求业务字段只包含工作负载类型和资源规格；网络响应解析为最小 `OffloadingSession`：会话 ID、状态、到期时间、上传端点和处理流端点。
+- Generic/RayNeo 示例在应用层使用 `send_message` 分发最小会话信息，视频 payload 不再复制群组、源端 Agent、消费者 Agent 或 Sandbox 标识。
+- Mock Video Server 同步校验正整数 CPU/内存规格并动态返回 producer/processed-stream 端点；SDK、App 与 ARM 镜像版本分别升级为 `0.17.5`、`0.2.26`。
+
+### 验证内容
+
+- Python SDK 113 项、Mock Video Server 5 项测试通过；Python wheel/sdist 构建并通过 `twine check`。
+- Android SDK 55 项与 Generic App 25 项单元测试通过，三组 Lint 无阻断项；Release AAR、Generic/RayNeo Debug APK 构建成功，两个 APK 均通过 v2 签名校验。
+- Buildx/QEMU 构建并验证 `agent-connect-sdk:0.17.5-arm64`，`pip check` 与完整 SDK 自检通过；镜像归档 SHA-256 为 `8643b59e570c89759d7ca42afa2373507f3222c0a8ac20f532c5106dc8db10d7`，完整 ARM 交付包为 `b1e5939d075f63845e60e31145c56106e75d8a445c2877edd83dd8b6f0c49029`，Android 交付包为 `b6f60f29a8efbc35715e62f5c64ca61111f9f88c03c640b7af2005731fbc12e8`。
+
+## 2026-09-10 — 恢复原始视频卸载 SDK 边界并移除 WebRTC 业务凭据
+
+### 修改原因
+
+- `accept_offloading_session` / `acceptOffloadingSession` 并不属于原始 SDK 接口清单；消费者选择和 session 信息分发应由应用决定，SDK 不应把特定 A/B 邀请协议固化为新接口。
+- Agent ID 已由核心网会话鉴权，WebRTC HTTP 信令无需再叠加 producer token、consumer ticket、Bearer 或 proof。
+- 同一 Agent 创建会话并上传后也可能自行接收处理流，不能用 producer/consumer 角色限制阻止该用法。
+
+### 修改方式
+
+- Python 和 Android SDK 删除 accept 接口与会话角色，`start_video_upload` / `startVideoUpload` 恢复为只启动上传，不再接收目标列表、不调用 consumers 控制接口、不自动发送消息。
+- 会话创建响应同时解析 producer 与 processed-stream 端点；`start_video_upload(session)` / `startVideoUpload(session)` 和 `get_processed_video_stream(session)` / `getProcessedVideoStream(session)` 均从显式传入的 `OffloadingSession` 获取 Server 地址与 session ID，同时支持任意 Agent 上传、创建者自消费和远端应用导入。
+- Generic/RayNeo A/B 示例把 session 序列化、接收校验和 `send_message` 调用移到应用层；消息仅含处理流连接所需字段。Mock Video Server 删除 token/ticket 生成、Bearer 校验和 consumers 申请接口。
+- 同步更新 Python/Android/Mock Server 文档与测试，明确核心网会话负责 Agent 身份，WebRTC 仍保留协议自身的 ICE、DTLS 与 SRTP。
+- Python SDK/ARM 镜像升级为 `0.17.4`；Generic/RayNeo App 升级为 `0.2.25`、`versionCode=27`。
+
+### 验证内容
+
+- Python SDK 111 项测试通过并完成源码编译检查；`0.17.4` wheel/sdist 构建并通过 `twine check`。
+- Android SDK 54 项与 Generic App 25 项单元测试通过；Release AAR、Generic Debug APK、RayNeo Debug APK 均构建成功，两个 APK 均通过 v2 签名校验。
+- Mock Video Server 4 项接口/媒体测试通过，确认无凭据的 source 与 processed 信令仍可完成占位流到真实处理流切换。
+- Buildx/QEMU 构建并验证 `agent-connect-sdk:0.17.4-arm64`，`pip check` 和 `agent-sdk-self-check` 通过；镜像归档 SHA-256 为 `e8c2c6ab75f8fd7004f3d8078a8ece84c23734a8e1e882e40a2129db2f25fee8`，完整 ARM 交付包为 `28754c46f7b0c4e3c039fcf1c22cf799a4c4d64fb99036a941de5736f3f22608`，Android 交付包为 `4a20c475002597a16786af100ecc92f24457ef448bc96d6f2bb0232189414319`。
+
+## 2026-09-07 — ARM 测试镜像强制全新注册
+
+### 修改原因
+
+- A/B 测试容器此前会从持久卷恢复 `CARD_PUBLISHED` 状态并跳过身份申请、网络能力获取和 Agent Card 发布，不符合每轮测试必须完整覆盖注册链路的要求。
+- 只删除本地状态卷会丢失旧 Agent ID，无法注销网侧遗留身份；容器异常退出时也需要在下一次启动补做清理。
+
+### 修改方式
+
+- A/B 自动脚本新增 `--fresh-registration`：启动后若恢复到旧身份，先以 `reason=replaced` 注销；只有注销成功才从 `NO_IDENTITY` 重新执行身份申请、网络能力获取和能力注册，失败时禁止回退到复用。
+- A 的退出注销移入 `finally`，A/B 都校验注销结果；两个入口捕获 Docker `SIGTERM`，确保正常停止容器时执行注销和 SDK 关闭。
+- ARM 镜像入口与 Compose 默认启用 `AGENT_FRESH_REGISTRATION=true`、`AGENT_DEREGISTER_ON_EXIT=true`，同时保留状态卷用于异常退出后的旧身份追踪。
+- Python SDK 和 ARM 镜像版本升级为 `0.17.3`，同步更新离线交付、Compose 与升级说明。
+
+### 验证内容
+
+- Python 全量 110 项测试通过；新增 fresh 模式旧身份清理、完整重新注册、退出清理和注销失败时 fail-closed 覆盖。
+- `0.17.3` wheel/sdist 构建成功并通过 `twine check`；A/B shell、Buildx shell 和 Compose 配置检查通过。
+- Buildx/QEMU 构建并加载 `agent-connect-sdk:0.17.3-arm64`，镜像确认为 `linux/arm64`、SDK 版本为 `0.17.3`、`pip check` 无缺失依赖，`agent-sdk-self-check` 输出 `FULL FLOW DEMO PASSED`。
+- 导出的 `agent-connect-sdk-0.17.3-linux-arm64.tar.gz` 通过 gzip 和 SHA-256 校验，摘要为 `5058144518f38561c1d5459c83e8864b673344ad8139baf7b8227819a689f893`。
+
+## 2026-09-04 — Linux SDK ARM64 容器交付
+
+### 修改原因
+
+- ARM 边缘设备需要可离线搬运的 Linux SDK 运行环境，而构建机为 x86_64；目标设备还需要以相同镜像分别启动 Agent A 和 Agent B。
+
+### 修改方式
+
+- 新增基于 Python 3.12 slim 的 `linux/arm64` 镜像，包含当前 Python SDK 源码、运行依赖、iproute2/网络诊断工具、持久化状态目录和 tini。
+- 新增环境变量驱动的 `start-agent-a.sh`、`start-agent-b.sh`，启动前校验 `/dev/net/tun` 与 `LOCAL_VLAN_IP`，并将身份/TLS 状态和日志保存到可挂载目录。
+- 参考 free6GC 跨架构打包路径新增 Buildx 构建脚本，强制校验产物为 `linux/arm64`，经 QEMU 做 SDK 导入和镜像入口烟测，并导出 gzip 镜像归档及 SHA-256 文件。
+
+### 验证内容
+
+- A/B POSIX shell 脚本和 Buildx bash 脚本语法检查通过；Python SDK 108 项测试通过。构建机未安装 ShellCheck，因此未执行该项静态检查。
+- x86_64 构建机已通过 Buildx/QEMU 生成并加载 `agent-connect-sdk:0.17.2-arm64`；镜像内 `platform.machine()` 返回 `aarch64`，Python 3.12.14、SDK 0.17.2、全部依赖导入和 `pip check` 均通过。
+- ARM64 容器内 `agent-sdk-self-check` 完成全流程并输出 `FULL FLOW DEMO PASSED`，A/B 启动脚本的帮助入口均可执行；导出的 gzip 镜像归档通过完整性和 SHA-256 校验并成功重新导入 Docker。
+
+## 2026-09-04 — 视频链路升级为 30 FPS
+
+### 修改原因
+
+- 现场稳态链路已排除 MASQUE 超 MTU、接收缓冲截断和 EGL 渲染瓶颈，但采集端与 Video Server 输出均被固定在 15 FPS，运动画面的采样间隔较长、跟手感不足。
+
+### 修改方式
+
+- Android B 采集由 `640x480@15fps/1200kbps` 提升为 `640x480@30fps/2400kbps`，并在 App 流程日志中记录实际请求的采集参数。
+- Video Server 默认输出和 N6 部署配置统一提升为 `640x480@30fps`；H.264 RTP payload 继续限制为 1150 字节。
+- Server 健康检查新增 `output_fps`，Generic/RayNeo App 升级为 `0.2.24`、`versionCode=26`。
+
+### 验证内容
+
+- Mock Video Server 4 项测试通过；Android SDK 53 项、Generic/RayNeo App 各 25 项单元测试通过，两组 Lint 无阻断项，两个 Debug APK 构建成功并通过 APK v2 签名验证。
+- N6 Video Server 已重建部署，健康接口确认 `output_fps=30.0`、H.264 RTP payload 为 1150 字节；真实 WebRTC 烟测通过占位流到处理流的无重协商切换。当前构建机没有 ADB 在线设备，两个 APK 尚未安装到真机。
+
+## 2026-09-03 — Huawei 解码输出兼容与停止后保留诊断页
+
+### 修改原因
+
+- Video Server 最近一次普通 Android 会话持续按 15 FPS 产生处理帧并发送 RTP，Huawei A 仍明显卡顿；端侧已有 `OMX.hisi.video.decoder.avc` 无法启用 `DynamicANWBuffer` 的明确错误，因此瓶颈是海思 MediaCodec 的 Surface/纹理输出模式，而不是 Server 处理或 EGL 绘制。
+- Generic A 的停止流程先销毁 SDK 解码 EGL Context，Renderer 可能仍持有最后一帧纹理；该 native 生命周期逆序可导致 Activity 直接退出。同时停止后 Runner/SDK 引用被清空，Dump 会丢失停止前状态。
+
+### 修改方式
+
+- Huawei 设备继续使用 MediaCodec 硬解码，但将解码输出切换为 ByteBuffer，绕过故障的 DynamicANWBuffer/Surface 路径；解码帧仍由 TextureView/EglRenderer 直接做 YUV GL 绘制，不恢复 JPEG/Bitmap CPU 转换。
+- Generic 停止顺序改为摘除 Track Sink、同步释放 Renderer、关闭 SDK/解码器、最后释放 EGL 根 Context；停止后保留当前页面和 Dump 按钮，按钮变为“返回配置”。
+- 停止前缓存 SDK、TCP endpoint 和 Renderer 诊断快照，停止完成后仍能导出完整 Dump。
+- Generic/RayNeo App 升级为 `0.2.22`、`versionCode=24`。
+
+### 验证内容
+
+- Generic/RayNeo 两个变体各 25 项单元测试通过；两组 Lint 无阻断项，两个 Debug APK 构建成功，包名与 `0.2.22`/`versionCode=24` 核对正确，并通过 APK v2 签名验证。
+- 构建机没有 ADB 在线设备；Huawei MediaCodec ByteBuffer 输出模式和停止后原地 Dump 仍需安装 Generic `0.2.22` 后做一次真机验收。
+
+## 2026-09-03 — A 端改为共享上下文的 TextureView/EGL 直渲染
+
+### 修改原因
+
+- Huawei A 的 H.264 下行已经持续收到 RTP，但硬解码吞吐极低；旧 ImageView/Canvas 路径对每帧执行纹理读回、I420 拷贝、NV21/JPEG 压缩和 Bitmap 解码，产生大量 CPU、内存分配与 GC 压力，无法作为实时视频渲染链路。
+- 先前 Surface/Texture 黑屏方案中，WebRTC 解码器与 UI Renderer 分别创建了互不共享的 EGL Context。硬解码得到的纹理不能可靠地被另一个 EGL share group 消费，厂商实现上会表现为黑屏、花屏或 Surface 合成异常。
+
+### 修改方式
+
+- Generic A 新增 `TextureViewEglRenderer`：由 TextureView 管理 SurfaceTexture 生命周期，由 WebRTC `EglRenderer` 在独立 GL 线程直接绘制 VideoFrame；删除 I420→JPEG→Bitmap 的 CPU 渲染器。
+- Activity 持有 EGL 根 Context，Media Adapter 创建共享的子 Context，编码器、解码器和 Renderer 进入同一个 EGL share group；RayNeo 的双目 `SurfaceViewRenderer` 同样接入共享根 Context。
+- TextureView Renderer 保留首帧、分辨率、收帧/实绘帧、待处理或丢弃帧、Surface 状态与 GL 错误诊断；EglRenderer 的单帧队列避免 UI 反压解码线程。
+- Generic/RayNeo App 升级为 `0.2.21`、`versionCode=23`。
+
+### 验证内容
+
+- Generic/RayNeo 两个变体各 24 项单元测试通过；两组 Lint 无阻断项，两个 Debug APK 构建成功，包名与 `0.2.21`/`versionCode=23` 核对正确，并通过 APK v2 签名验证。
+- 本次只构建产物，未安装到手机、未重启 Video Server；Huawei 真机的持续解码/显示帧率仍需安装 Generic `0.2.21` 后复测。
+
+## 2026-09-03 — B 上行强制 H.264 High Profile 并恢复关键帧
+
+### 修改原因
+
+- Realme B 的 Qualcomm 硬编码器实际产生 High Profile SPS，但旧 Server Offer 只声明 Baseline/Constrained Baseline；SDP 与真实码流不一致，且首个分片 IDR 一旦不完整，aiortc 解码器不会因连续解码失败主动请求新 IDR，最终触发 `SOURCE_FRAME_TIMEOUT`。
+- 初版 High-only Server 上线后，Android 在 `setRemoteDescription` 直接拒绝 Offer。原因是旧 `com.infobip:google-webrtc:1.0.40793` 以及上游默认工厂按 `OMX.Exynos.*` 名称开放 High Profile，未使用现代 Qualcomm Codec2 编码器实际声明的 `AVCProfileHigh` 能力。
+
+### 修改方式
+
+- Video Server 为 B→Server 源流注册并只提供 H.264 High `64001f` 与 Constrained High `640c1f`，统一使用 `packetization-mode=1`；Server 和 Android B 都校验最终 Answer，禁止静默回退到 Baseline、VP8 或其他 codec。
+- Server 在源 PeerConnection 建连后根据实际媒体 SSRC 发送启动期 PLI burst，直到解出首帧；即使初始 SPS/PPS/IDR 分片丢失，也能让 Android 硬编码器立即补发完整关键帧。
+- Server→A 下行继续协商 H.264 Baseline，因为 aiortc 当前编码器实际输出 Baseline；上下行分别按各自真实编码能力声明 profile。
+- Smoke Client 改为直接发送 libx264 生成的真实 High Profile Annex-B 码流；调试接口新增 `source_codec` 和 `source_keyframes_requested`。
+- Android WebRTC 从停止维护的 `com.infobip:google-webrtc:1.0.40793` 升级到 `io.github.webrtc-sdk:android:150.7871.01`；新增基于 `MediaCodecInfo.profileLevels` 的 High Profile 工厂，不再按芯片厂商名称推断能力。
+- High 工厂仅在硬件编码器声明 `AVCProfileHigh` Level 3.1 或更高时发布 `64001f`，通过上游 `HardwareVideoEncoder` 显式设置 High，并从关键帧 Annex-B/AVCC SPS 校验实际 profile；不支持的设备在信令前明确失败。
+- Generic/RayNeo App 升级为 `0.2.20`、`versionCode=22`。
+
+### 验证内容
+
+- Mock Video Server 三项测试通过，其中端到端测试确认 SDP 仅包含 High Profile、真实 SPS 为 `67 64`、Server 成功解码并把处理帧发送给 consumer；Baseline Answer 拒绝测试通过。
+- Generic/RayNeo 两个变体各 24 项单元测试通过，新增 Annex-B/AVCC SPS 解析用例；Android SDK 单元测试、三组 Lint、两个 APK 构建及 v2 签名校验全部通过。N6 容器未在本次修复中自动重建或重启。
+
+## 2026-09-03 — 算力会话上下行并行建链与会话内低延迟切源
+
+### 修改原因
+
+- Video Server IP 只有算力会话分配后才能取得，无法复用固定 Sandbox 的应用级长期 WebRTC；原流程又必须等 B 首帧到达后才给 A 下发 ticket，导致两条 WebRTC 完全串行。
+- Mock Server 对每个 consumer 使用有缓冲 Relay 并逐帧同步处理，A 默认优先 VP8，预览还经过 I420→JPEG→Bitmap，和稳定链路的最新帧、固定 RTP 时钟、H264 及原生 EGL 渲染存在明显差异。
+
+### 修改方式
+
+- `startVideoUpload` 在会话分配完成后并发执行 B 上传和 consumer ticket/邀请；邀请状态改为 `SOURCE_PENDING`，A 无需等待 B 首帧即可建立下行 WebRTC。
+- Server 为每个会话建立固定 `640x480@15fps` 输出 Track：source 未就绪时发送占位帧，真实处理帧到达后在同一 Track、同一单调 RTP 时钟内切源；所有 Relay 使用无缓冲最新帧语义，并在切源边界补发关键帧。
+- Server 的上下行优先 H264，Android A 的 Offer 同步提升 H264/RTX 顺序；联调采集降为 `640x480@15fps/1200kbps`。
+- RayNeo 与非 Huawei Generic A 使用 WebRTC `SurfaceViewRenderer` 原生 EGL 渲染；Huawei Generic A 根据已确认的 BLAST 黑屏兼容问题保留 ImageView/Canvas 降级路径，避免重新引入已知实机故障。
+- Generic/RayNeo App 升级为 `0.2.18`、`versionCode=20`。
+
+### 验证内容
+
+- Mock Video Server 新增 consumer 先于 source 建链的端到端测试，验证先收到占位帧、source 到达后不改变远端 Track ID 即收到真实处理帧。
+- Mock Video Server 两项端到端测试全量通过；N6 `172.30.0.10:28500` 容器已重建，部署后烟测确认占位帧→真实帧无重协商切换、远端 Track ID 复用，consumer 为 `H264/90000` 且 RTP 计数持续增长。
+- Android SDK 与 Generic/RayNeo App 单元测试和三组 Lint 全部通过；`0.2.18` 两个 Debug APK 与 SDK Debug AAR 构建成功，两个 APK 均通过 v2 签名校验。当前构建机无 ADB 在线设备，手机端首帧时延仍需用新版 APK 实测。
+
+## 2026-09-03 — 修复 A 端首帧等待完整 GOP 与预览花屏
+
+### 修改原因
+
+- 现场会话中 Server 在 consumer 建连后 18ms 即开始发送 VP8，但 A 连续丢弃 428 个不可解码帧，约 28.6 秒后才解出首帧；这说明初始关键帧在接收端完全就绪前丢失，后续差分帧必须等待下一个周期关键帧。
+- A 的 ImageView 预览虽然进入 `VIDEO DISPLAY`，首次可解码帧却显示为花屏；上一版使用 Kotlin 逐像素读取 I420 并自行做 YUV→RGB，缺少 Android/WebRTC 原生转换路径的布局兼容保障。
+
+### 修改方式
+
+- Video Server 在 consumer Answer 就绪时请求一次关键帧，并在 ICE/DTLS 进入 `connected` 后于前 2.5 秒内再请求四次关键帧；即使某个分片关键帧丢失，也无需等待完整 GOP。调试接口新增 `keyframes_requested`，日志记录每次请求原因与次数。
+- A 端保留不创建 Surface/EGL 的 ImageView/Canvas 路线，但改用 WebRTC libyuv `I420ToNV12` 生成 Android NV21，再交给系统 `YuvImage`/`BitmapFactory` 转换，移除手写逐像素色彩转换。
+- Generic/RayNeo App 升级为 `0.2.17`、`versionCode=19`。
+
+### 验证内容
+
+- Mock Video Server 单元端到端和部署后真实 WebRTC smoke 均通过；部署实例日志确认在 Answer 和 consumer `connected` 边界各请求一次关键帧，处理流 `320x180` 及服务端标记像素正确，容器健康检查与 UE 回程路由正常。
+- Android SDK、Generic App 与 RayNeo App 合计 92 项单元测试通过，三组 Lint 通过；两个 `0.2.17` Debug APK 构建完成，包名和版本核对正确，并通过 APK v2 签名验证。
+
+## 2026-09-03 — 修复 Huawei A 端解码有帧但预览黑屏及启动崩溃
+
+### 修改原因
+
+- A 的 `inbound-rtp` 已有 313 个解码帧且 Java Sink 收到 313 次回调，但页面仍为黑屏；同一时刻 Huawei BLAST Surface 报 buffer 提交/释放不匹配，问题已收敛到 `SurfaceViewRenderer` 与厂商 Surface 合成路径。
+- 首轮改为 TextureView/EGL 后，Generic A 在点击启动、SDK 初始化前直接退出 Activity，说明该设备启动阶段创建额外 EGL 渲染线程同样不可靠。
+
+### 修改方式
+
+- Generic A 与 RayNeo A 改用 `DecodedFrameVideoRenderer`：预览本身不创建 EGL 或 Surface，而是在帧回调中复制 I420、后台转换 Bitmap，再通过普通 ImageView/Canvas 绘制，从启动路径完全移除厂商 Surface/EGL 风险。
+- 转换限速为最多 10 FPS，避免阻塞 WebRTC 解码线程；预览按 `FIT_CENTER` 完整显示画面，以 `ImageView.onDraw` 作为实际绘制首帧边界，成功后记录 `VIDEO DISPLAY` 并切换 `LIVE` 状态。
+- Dump 新增 `[VIDEO PREVIEW RENDERER]`，记录 `frames_received`、`frames_submitted`、`frames_displayed`、限速丢帧、首帧显示状态、末帧尺寸和转换错误，与 `[WEBRTC INBOUND RTP]` 分层诊断。
+- Generic/RayNeo App 升级为 `0.2.16`、`versionCode=18`。
+
+### 验证内容
+
+- Android SDK、Generic App 与 RayNeo App 合计 92 项单元测试通过，三组 Lint 通过；两个 `0.2.16` Debug APK 构建完成，包名和版本核对正确，并通过 APK v2 签名验证。
+- 当前构建机无连接的 Android 物理设备；ImageView 实机首帧显示仍需在 Huawei A 上复测，复测 Dump 可通过 `frames_displayed` 与 `VIDEO DISPLAY` 直接验收。
+
+## 2026-09-03 — Android A 显示处理后视频
+
+### 修改原因
+
+- A 已能取得 Video Server 的远端 Track 并进入解码回调，但 App 只统计帧和写日志，没有把 Track 绑定到任何可见渲染控件，因此用户看不到画面。
+
+### 修改方式
+
+- Generic A 和 RayNeo A 增加 16:9“PROCESSED VIDEO / N6 COMPUTE”预览窗，使用 WebRTC `SurfaceViewRenderer`、硬件缩放和 `SCALE_ASPECT_FIT` 直接显示远端 Track。
+- Runner 在取得处理流后同时挂载界面 Renderer 和原诊断 Sink；预览窗覆盖等待、协商、失败和停止状态，只有 `onFirstFrameRendered` 执行后才显示 `LIVE` 与实际分辨率。
+- Renderer、Track Sink 与 EGL context 按 Runner/Activity 生命周期逆序释放，避免返回配置页或退出后残留 Surface/EGL 资源。
+- Generic/RayNeo App 升级为 `0.2.14`、`versionCode=16`。
+
+### 验证内容
+
+- Android SDK、Generic App 与 RayNeo App 合计 92 项单元测试通过，三组 Lint 通过；两个 `0.2.14` Debug APK 构建完成，包名和版本核对正确，并通过 APK v2 签名校验。
+- 当前构建机没有连接 Android 设备或可用 Emulator，因此完成了代码、资源绑定、布局编译和 APK 静态验证；实际 `SurfaceView` 首帧显示需在两台手机下一轮物理联调确认。
+
+## 2026-09-03 — 视频下行 RTP 计数与 Unified Plan 回调诊断
+
+### 修改原因
+
+- A 与 Video Server 已进入 WebRTC `CONNECTED` 且取得远端 Track，但业务 `VideoSink` 没有首帧日志；原日志无法区分 Server 没有发 RTP、链路丢包、Android 未解码或业务 Sink 回调失效。
+- 原 Android 适配器同时通过 `onAddStream`、`onAddTrack` 和 `onTrack` 竞争完成同一个远端 Track Deferred，不符合当前 Unified Plan 会话的单一回调模型，也只证明 Track 对象创建，不能证明媒体已到达。
+
+### 修改方式
+
+- Mock Video Server 为每个 consumer 持久记录 `frames_processed`、`packets_sent`、`bytes_sent`、协商 codec 和首帧状态；首个处理帧单独写日志，调试接口即时刷新 aiortc `outbound-rtp` 统计。
+- Android A 在应用 Server Answer 后从已提交的唯一 video transceiver 确定 receiver Track，只使用 Unified Plan `onTrack` 作事件诊断；适配器立即挂载独立诊断 Sink，并每秒采集 `inbound-rtp` 的 `packetsReceived`、`bytesReceived`、`framesDecoded` 和 `framesDropped`。
+- 诊断计数在 WebRTC 关闭后仍保留于进程内，并新增到 Dump 的 `[WEBRTC INBOUND RTP]` 段；同时记录诊断 Sink 回调次数和末帧尺寸，以便与业务 `VIDEO FRAME` 回调交叉核对。
+- App 流程日志中的 consumer ticket/token 递归脱敏；Generic/RayNeo App 升级为 `0.2.13`、`versionCode=15`。
+
+### 验证内容
+
+- Mock Video Server 端到端测试通过，实际验证 consumer 收到处理帧且服务端 `frames_processed`、`packets_sent`、`bytes_sent` 与 codec 均有效；容器已在 N6 `172.30.0.10` 重建并通过健康检查及 UE 回程路由检查。
+- Android SDK、Generic App 与 RayNeo App 合计 90 项单元测试通过，三组 Lint 通过；两个 `0.2.13` Debug APK 构建完成，包名和版本核对正确，并通过 APK v2 签名校验。
+
+## 2026-09-03 — 修正 Android 视频源 Answerer 的 Track 协商顺序
+
+### 修改原因
+
+- B 与 N6 Video Server 的 ICE/DTLS 已连接且摄像头稳定产出约 24 FPS，但服务端没有触发 `source track negotiated`，`frames_seen` 始终为 0 并最终返回首帧超时。
+- 原 Android 适配器在应用 Server 的 `recvonly` Offer 前预创建本地 `SEND_ONLY` transceiver，依赖 WebRTC 实现自动复用未关联的 transceiver；当前 Android WebRTC 版本可能生成没有发送视频的 Answer。
+
+### 修改方式
+
+- B 先应用 Server Offer，再取得该 Offer 创建且已有 MID 的唯一 video transceiver；随后将方向设为 `SEND_ONLY`，把摄像头 Track 直接绑定到它的 sender，最后创建 SDP Answer。
+- 发送 Answer 前校验 SDP 只包含一条有效发送视频媒体段，并确认其 MID 与绑定的 transceiver 一致；日志记录实际绑定 MID 和方向。
+- Video Server 首帧等待窗口为 12 秒，App 的 OkHttp 读取超时提高到 30 秒，失败时保留服务端 `SOURCE_FRAME_TIMEOUT` 响应。
+- Generic/RayNeo App 升级为 `0.2.12`、`versionCode=14`。
+
+### 验证内容
+
+- Android SDK、Generic App 与 RayNeo App 合计 86 项单元测试通过，三组 Lint 通过；两个 `0.2.12` Debug APK 构建完成，包名和版本核对正确，并通过 APK v2 签名校验。
+
+## 2026-09-03 — 重复群组配置幂等 ACK
+
+### 修改原因
+
+- 核心网在重复建组命中仍存在的群组时，会向已有成员再次下发群组配置，用于恢复重启后丢失的端侧群组缓存。
+- 原 Android/Python SDK 将时间戳相同的完整重放一律视为过期配置并拒绝，正在运行的成员可能返回 `REJECT`，阻断重复建组恢复流程。
+
+### 修改方式
+
+- Android 与 Python 群组缓存均在同一互斥区内比较规范化快照：同一 `group_id`、相同时间戳、相同 schema 版本和成员配置时直接返回幂等结果。
+- 幂等重放仍执行报文结构和 proof 校验，但直接回复 `ACK`；不调用路由控制器、不增加本地 generation、不更新快照，也不触发业务 `GROUP_CONFIG` listener。
+- 时间戳严格更新的配置继续正常提交、更新 generation、协调路由并通知业务；更旧配置以及同时间戳但内容冲突的配置继续拒绝。
+- Python SDK 升级为 `0.17.2`；Generic/RayNeo App 升级为 `0.2.11`、`versionCode=13`。
+
+### 验证内容
+
+- Android/Python 专项测试覆盖完全相同重放、更新 timestamp 和同 timestamp 内容冲突三种情况；Python 全量 108 项测试通过，`0.17.2` Wheel 通过 `twine check`、隔离安装版本检查与完整 self-check；Android SDK、Generic App 与 RayNeo App 合计 82 项测试和三组 Lint 通过，两个 `0.2.11` Debug APK 均通过 v2 签名校验。
+
+## 2026-09-03 — Android TUN 监听重绑、WebSocket 重连与端侧诊断 Dump
+
+### 修改原因
+
+- Android Runtime WebSocket 首次握手成功后，`onFailure/onClosed` 只写 logcat，不会重新连接，且 `downlinkStarted` 一直保持已启动；网络瞬断或 Runtime 重启后可能持续收不到建组邀请。
+- 现有 App 页面日志没有 SDK WebSocket、A2A 本地监听、TUN 重建和端侧 socket/路由信息，无法仅凭复制日志区分核心网丢包、监听失效或 Android VPN 接口替换问题。
+- 华为端真实 Dump 证明初始化为算力控制地址重建 TUN 时，绑定旧 TUN 的 `10.60.0.2:4001` accept loop 因 `Socket closed` 退出；SDK 此后未重建 listener，导致 B→A 稳定返回 `ECONNREFUSED`。
+- Realme 端真实 Dump 进一步证明视频会话为已存在的 `172.30.0.10` 新增路由键时仍会无效重建 TUN；旧 listener 刚处理过 A2A 连接，立即重绑同一端口会报 `EADDRINUSE`，并使算力会话创建失败。
+
+### 修改方式
+
+- Android Runtime Transport 增加 20 秒 WebSocket Ping；已成功连接后的异常失败或关闭按 1/2/4/8/16/30 秒有界指数退避持续重连，SDK 主动关闭时取消重连。首次握手失败仍由 `initialize` 明确报错，不在失败初始化对象上后台重试。
+- TUN FD 真正替换时先由 MASQUE packet pump 接管新 FD，再同步关闭旧 TCP/UDP Server 并在新 TUN 上重绑；FD 交接一旦提交，listener 重绑失败不会回收已由 MASQUE 持有的新 FD。TCP/UDP listener 启用地址复用、同步等待 accept loop 退出，并对瞬时重绑冲突做 25/100/250ms 有界重试。
+- `VpnTunnelController` 按最终聚合路由集合判断是否需要重建；算力控制和具体 offloading session 指向同一 Video Server 时只记录新的路由所有者，不再无效替换 TUN。
+- Generic 与 RayNeo App 增加 `Dump 日志`：导出未截断的 App 流程历史、独立过滤的 App/SDK 关键 logcat、进程日志尾部、版本与设备信息、Android 网络接口/LinkProperties、`/proc/self/net` 表和 A2A 本地 TCP 自检；MASQUE Token 固定脱敏。Android 10 及以上同时写入公共 `Download/AgentLinkDiagnostics`，无分享应用时也可经 USB/ADB 直接取回。
+- SDK 增加 WebSocket 断线/重连、TUN 路由重建、本地 TCP/UDP 监听和 accept/request/response 生命周期日志，并记录 Android `VpnService.onRevoke/onDestroy`；A2A 连接失败信息包含根异常类型与原因。App 升级为 `0.2.10`、`versionCode=12`。
+
+### 验证内容
+
+- Android WebSocket 真实 MockWebServer 测试覆盖服务端异常关闭、自动二次 Upgrade 及重连后继续处理群组通知；SDK 与 Generic/RayNeo App 单元测试覆盖诊断按钮和分享线路。
+- Android SDK、Generic App 与 RayNeo App 合计 79 项单元测试通过，三组 Lint 通过；Generic `0.2.10` 与 RayNeo `0.2.10-rayneo`（`versionCode=12`）Debug APK 构建完成并通过 APK v2 签名校验。
+
 ## 2026-09-03 — 修正邀请 group_id 路径并让 App Stop 执行去注册
 
 ### 修改原因

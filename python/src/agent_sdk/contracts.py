@@ -125,8 +125,8 @@ class MediaOffloadAdapter(Protocol):
     """Platform WebRTC adapter; implementations own camera and PeerConnections.
 
     ``start_video_upload`` must not return until the Video Server has started
-    pulling the source track. The SDK sends consumer invitations only after
-    that point.
+    pulling the source track. Session distribution is an application concern;
+    the SDK never selects consumers or sends invitations from this adapter.
     """
 
     async def start_video_upload(

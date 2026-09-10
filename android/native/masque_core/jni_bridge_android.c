@@ -10,6 +10,7 @@ extern long long MasqueStart(int tun_fd, int udp_fd, char *server_url,
                              char *authorization, char *agent_tun_cidr,
                              char *identity_directory, int mtu);
 extern int MasqueReplaceTun(long long handle, int tun_fd);
+extern unsigned long long MasqueGetStat(long long handle, int statistic);
 extern void MasqueStop(long long handle);
 
 static int create_bound_socket(const char *local_ip) {
@@ -81,6 +82,14 @@ Java_com_rayneo_agent_sdk_masque_NativeMasqueBridge_nativeReplaceTunFd(
     (void)env;
     (void)bridge;
     return MasqueReplaceTun((long long)handle, tun_fd) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_rayneo_agent_sdk_masque_NativeMasqueBridge_nativeGetStat(
+        JNIEnv *env, jobject bridge, jlong handle, jint statistic) {
+    (void)env;
+    (void)bridge;
+    return (jlong)MasqueGetStat((long long)handle, statistic);
 }
 
 JNIEXPORT void JNICALL

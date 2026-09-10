@@ -14,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
@@ -21,6 +22,16 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/yosida95/uritemplate/v3"
 )
+
+const connectIPReceiveBufferBytes = 64 * 1024
+
+type Statistics struct {
+	DownlinkPackets            uint64
+	DownlinkPacketsOverMTU     uint64
+	DownlinkReadBufferTooSmall uint64
+	UplinkDatagramTooLarge     uint64
+	MaxDownlinkPacketBytes     uint64
+}
 
 type Configuration struct {
 	ServerURL         string
@@ -45,6 +56,12 @@ type Tunnel struct {
 	closed bool
 	done   chan struct{}
 	once   sync.Once
+
+	downlinkPackets            atomic.Uint64
+	downlinkPacketsOverMTU     atomic.Uint64
+	downlinkReadBufferTooSmall atomic.Uint64
+	uplinkDatagramTooLarge     atomic.Uint64
+	maxDownlinkPacketBytes     atomic.Uint64
 }
 
 func Start(tunFD, udpFD int, cfg Configuration) (*Tunnel, error) {
@@ -215,6 +232,16 @@ func (t *Tunnel) Close() error {
 	return nil
 }
 
+func (t *Tunnel) Statistics() Statistics {
+	return Statistics{
+		DownlinkPackets:            t.downlinkPackets.Load(),
+		DownlinkPacketsOverMTU:     t.downlinkPacketsOverMTU.Load(),
+		DownlinkReadBufferTooSmall: t.downlinkReadBufferTooSmall.Load(),
+		UplinkDatagramTooLarge:     t.uplinkDatagramTooLarge.Load(),
+		MaxDownlinkPacketBytes:     t.maxDownlinkPacketBytes.Load(),
+	}
+}
+
 func (t *Tunnel) uplink(source *os.File) {
 	buffer := make([]byte, t.mtu)
 	for {
@@ -235,24 +262,67 @@ func (t *Tunnel) uplink(source *os.File) {
 			return
 		}
 		if len(icmp) > 0 {
+			count := t.uplinkDatagramTooLarge.Add(1)
+			if shouldLogCounter(count) {
+				fmt.Printf(
+					"agent-masque: CONNECT-IP DatagramTooLarge count=%d packet_bytes=%d tun_mtu=%d\n",
+					count, len(packet), t.mtu,
+				)
+			}
 			t.writeTun(icmp)
 		}
 	}
 }
 
 func (t *Tunnel) downlink() {
-	buffer := make([]byte, t.mtu)
+	// CONNECT-IP carries a complete IP packet in each QUIC datagram. The receive buffer must
+	// therefore describe protocol capacity, not the local TUN MTU. A TUN-sized buffer used to
+	// silently truncate large packets in connect-ip-go and inject invalid IP packets.
+	buffer := make([]byte, connectIPReceiveBufferBytes)
 	for {
 		count, err := t.conn.ReadPacket(buffer)
 		if err != nil {
+			if errors.Is(err, io.ErrShortBuffer) {
+				shortCount := t.downlinkReadBufferTooSmall.Add(1)
+				if shouldLogCounter(shortCount) {
+					fmt.Printf(
+						"agent-masque: CONNECT-IP receive buffer too small count=%d buffer_bytes=%d\n",
+						shortCount, len(buffer),
+					)
+				}
+				continue
+			}
 			if !errors.Is(err, net.ErrClosed) {
 				fmt.Printf("agent-masque: CONNECT-IP downlink failed: %v\n", err)
 			}
 			_ = t.Close()
 			return
 		}
+		t.downlinkPackets.Add(1)
+		updateMaximum(&t.maxDownlinkPacketBytes, uint64(count))
+		if count > t.mtu {
+			overMTUCount := t.downlinkPacketsOverMTU.Add(1)
+			if shouldLogCounter(overMTUCount) {
+				fmt.Printf(
+					"agent-masque: CONNECT-IP downlink packet exceeds TUN MTU count=%d packet_bytes=%d tun_mtu=%d\n",
+					overMTUCount, count, t.mtu,
+				)
+			}
+		}
 		t.writeTun(buffer[:count])
 	}
+}
+
+func updateMaximum(target *atomic.Uint64, value uint64) {
+	for current := target.Load(); value > current; current = target.Load() {
+		if target.CompareAndSwap(current, value) {
+			return
+		}
+	}
+}
+
+func shouldLogCounter(count uint64) bool {
+	return count == 1 || count&(count-1) == 0
 }
 
 func (t *Tunnel) writeTun(packet []byte) {

@@ -18,9 +18,9 @@ from .models import (
     NetworkMessageType,
     NetworkAbility,
     OffloadingSession,
-    OffloadingSessionRole,
     OperationResult,
     ProcessedVideoEndpoint,
+    SandboxSpec,
     SdkInitResult,
     VideoUploadEndpoint,
 )
@@ -29,7 +29,7 @@ from .sdk import AgentSdk
 try:
     __version__ = version("agent-connect-sdk")
 except PackageNotFoundError:  # Source checkout without an installed distribution.
-    __version__ = "0.17.1"
+    __version__ = "0.17.5"
 
 __all__ = [
     "AgentSdk",
@@ -47,9 +47,9 @@ __all__ = [
     "NetworkMessageType",
     "NetworkAbility",
     "OffloadingSession",
-    "OffloadingSessionRole",
     "OperationResult",
     "ProcessedVideoEndpoint",
+    "SandboxSpec",
     "RemoteVideoStream",
     "SdkInitResult",
     "VideoUploadHandle",

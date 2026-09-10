@@ -4,9 +4,17 @@ import argparse
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from datetime import datetime
 from typing import Any
 
-from agent_sdk import AgentSdk, NetworkMessageAction, NetworkMessageType
+from agent_sdk import (
+    AgentSdk,
+    NetworkMessageAction,
+    NetworkMessageType,
+    OffloadingSession,
+    ProcessedVideoEndpoint,
+    SandboxSpec,
+)
 
 
 StepHook = Callable[[str, str], Awaitable[None]]
@@ -37,12 +45,10 @@ class GroupListener:
 
     async def on_group_message(self, group_id, sender_agent_id, payload):
         print(f"[callback] A2A {group_id=} {sender_agent_id=}: {payload}")
-        if payload.get("type") == "processed_video_invitation" and self.sdk is not None:
-            session = await self.sdk.accept_offloading_session(
-                sender_agent_id, group_id, payload
-            )
+        if payload.get("type") == "processed_video_session" and self.sdk is not None:
+            session = _offloading_session_from_message(payload)
             stream = await self.sdk.get_processed_video_stream(
-                session.session_id,
+                session,
                 timeout_seconds=self.processed_stream_timeout,
             )
             print("[callback] processed video stream:", session.session_id, stream)
@@ -125,6 +131,50 @@ def _message(value: str) -> Mapping[str, Any]:
     return parsed
 
 
+def _processed_video_message(session: OffloadingSession) -> Mapping[str, Any]:
+    endpoint = session.processed_stream
+    if endpoint is None:
+        raise RuntimeError("offloading session has no processed stream endpoint")
+    return {
+        "type": "processed_video_session",
+        "version": "1.0",
+        "session_id": session.session_id,
+        "state": session.state,
+        "expires_at": (
+            session.expires_at.isoformat() if session.expires_at is not None else None
+        ),
+        "processed_stream": {
+            "video_server_ip": endpoint.video_server_ip,
+            "offer_url": endpoint.offer_url,
+            "protocol": endpoint.protocol,
+            "signaling": endpoint.signaling,
+        },
+    }
+
+
+def _offloading_session_from_message(
+    payload: Mapping[str, Any],
+) -> OffloadingSession:
+    processed = payload.get("processed_stream")
+    if not isinstance(processed, Mapping):
+        raise ValueError("processed video session is missing processed_stream")
+    expires_at = payload.get("expires_at")
+    parsed_expiry = None
+    if isinstance(expires_at, str) and expires_at:
+        parsed_expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    return OffloadingSession(
+        session_id=str(payload["session_id"]),
+        state=str(payload.get("state", "ALLOCATED")),
+        expires_at=parsed_expiry,
+        processed_stream=ProcessedVideoEndpoint(
+            video_server_ip=str(processed["video_server_ip"]),
+            offer_url=str(processed["offer_url"]),
+            protocol=str(processed.get("protocol", "webrtc")),
+            signaling=str(processed.get("signaling", "non-trickle")),
+        ),
+    )
+
+
 async def _wait_for_group(sdk: AgentSdk, group_id: str, timeout: float):
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
@@ -180,7 +230,7 @@ async def run_full_flow(
         metadata={
             "region": args.region,
             "os": "Linux",
-            "version": "0.17.1",
+            "version": "0.17.5",
         },
     )
     print("[2 apply_identity]", profile.agent_id)
@@ -320,16 +370,38 @@ async def run_full_flow(
         "sdk.create_offloading_session",
         "POST /compute/v1/offloading-sessions 创建算力卸载会话；"
         f"workload_type={args.offloading_workload_type!r}，"
-        f"sandbox_id={args.sandbox_id!r}",
+        f"sandbox_spec={args.sandbox_vcpus} vCPU/{args.sandbox_memory_mb} MiB",
     )
     session = await sdk.create_offloading_session(
-        profile.agent_id,
         workload_type=args.offloading_workload_type,
-        group_id=group.group_id,
-        sandbox_id=args.sandbox_id,
+        sandbox_spec=SandboxSpec(
+            vcpus=args.sandbox_vcpus,
+            memory_mb=args.sandbox_memory_mb,
+        ),
         timeout_seconds=args.offloading_timeout,
     )
     print("[11 create_offloading_session]", session.session_id, session.state)
+
+    await _before_step(
+        before_step,
+        "sdk.send_message",
+        "应用选择把处理流 session 信息发送给目标 Agent；SDK 不自动分发，"
+        "消息中不包含 WebRTC ticket/token；"
+        f"group_id={group.group_id}，target_agent_id={target_agent_id}",
+    )
+    session_receipt = await sdk.send_message(
+        group.group_id,
+        target_agent_id,
+        _processed_video_message(session),
+        timeout_seconds=args.message_timeout,
+        message_type="processed_video_session",
+        task_id=args.task_id,
+    )
+    print(
+        "[12 send session]",
+        session_receipt.message_id,
+        session_receipt.delivered,
+    )
 
     await _before_step(
         before_step,
@@ -339,8 +411,7 @@ async def run_full_flow(
         f"@{args.video_fps}，bitrate={args.video_bitrate_kbps}kbps",
     )
     upload = await sdk.start_video_upload(
-        session.session_id,
-        target_agent_ids=[target_agent_id],
+        session,
         camera_id=args.camera_id,
         width=args.video_width,
         height=args.video_height,
@@ -465,7 +536,8 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--message-timeout", type=float, default=5.0)
     value.add_argument("--message-type", default="application/json")
     value.add_argument("--offloading-workload-type", default="video_rendering")
-    value.add_argument("--sandbox-id")
+    value.add_argument("--sandbox-vcpus", type=int, default=2)
+    value.add_argument("--sandbox-memory-mb", type=int, default=4096)
     value.add_argument("--offloading-timeout", type=float, default=30.0)
     value.add_argument("--camera-id", type=int, default=0)
     value.add_argument("--video-width", type=int, default=1280)

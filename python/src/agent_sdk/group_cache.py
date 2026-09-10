@@ -235,17 +235,26 @@ class GroupMemberCache:
 
     async def commit(
         self, candidate: GroupConfigSnapshot, *, local_agent_id: str
-    ) -> GroupConfigSnapshot:
+    ) -> bool:
         async with self._lock:
             current = self._snapshots.get(candidate.group_id)
-            if (
-                current is not None
-                and candidate.notification_timestamp <= current.notification_timestamp
-            ):
-                raise AgentSdkError(
-                    ErrorCode.GROUP_CONFIG_STALE,
-                    "group config is not newer than the committed snapshot",
-                )
+            if current is not None:
+                if candidate.notification_timestamp < current.notification_timestamp:
+                    raise AgentSdkError(
+                        ErrorCode.GROUP_CONFIG_STALE,
+                        "group config is older than the committed snapshot",
+                    )
+                if candidate.notification_timestamp == current.notification_timestamp:
+                    if (
+                        candidate.version == current.version
+                        and dict(candidate.members_by_agent_id)
+                        == dict(current.members_by_agent_id)
+                    ):
+                        return False
+                    raise AgentSdkError(
+                        ErrorCode.GROUP_CONFIG_STALE,
+                        "group config conflicts with the committed snapshot at the same timestamp",
+                    )
             generation = 1 if current is None else current.generation + 1
             committed = GroupConfigSnapshot.immutable(
                 group_id=candidate.group_id,
@@ -261,7 +270,7 @@ class GroupMemberCache:
             }
             await self._route_manager.replace_group_peers(candidate.group_id, peers)
             self._snapshots[candidate.group_id] = committed
-            return committed
+            return True
 
     async def resolve(self, group_id: str, agent_id: str) -> GroupMemberInfo:
         async with self._lock:

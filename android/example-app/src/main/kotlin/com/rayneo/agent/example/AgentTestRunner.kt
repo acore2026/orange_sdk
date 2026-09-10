@@ -7,7 +7,11 @@ import com.rayneo.agent.sdk.model.GroupConfigSnapshot
 import com.rayneo.agent.sdk.model.MessageReceipt
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import com.rayneo.agent.sdk.model.NetworkMessageType
+import com.rayneo.agent.sdk.model.OffloadingSession
 import com.rayneo.agent.sdk.model.OperationResult
+import com.rayneo.agent.sdk.model.ProcessedVideoEndpoint
+import com.rayneo.agent.sdk.model.SandboxSpec
+import com.rayneo.agent.sdk.model.SdkInitResult
 import com.rayneo.agent.sdk.transport.GroupMessageListener
 import com.rayneo.agent.sdk.transport.NetworkMessageListener
 import com.rayneo.agent.sdk.transport.VideoTrack
@@ -25,11 +29,17 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.webrtc.VideoSink
+import java.time.Instant
 
 enum class LabLogLevel { INFO, SUCCESS, WARNING, ERROR }
 
@@ -108,6 +118,8 @@ class AgentTestRunner(
     private val onManualMessageSession: (ManualMessageSession?) -> Unit,
     private val onResetAvailability: (Boolean) -> Unit = {},
     private val onVideoUploadAvailability: (Boolean) -> Unit = {},
+    private val processedVideoRenderSinks: () -> List<VideoSink> = { emptyList() },
+    private val onProcessedVideoStatus: (String, String) -> Unit = { _, _ -> },
 ) {
     private val mediaScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val retrySignal = Channel<Unit>(Channel.CONFLATED)
@@ -117,6 +129,8 @@ class AgentTestRunner(
     private var groupListener: AutoCloseable? = null
     @Volatile
     private var localAgentId: String? = null
+    @Volatile
+    private var initResult: SdkInitResult? = null
     @Volatile
     private var manualMessageSession: ManualMessageSession? = null
     @Volatile
@@ -138,7 +152,7 @@ class AgentTestRunner(
                 "MASQUE=${config.masqueServerUrl}",
         )
 
-        val initResult = retryableStep("INIT", "建立端侧链路") {
+        val initialized = retryableStep("INIT", "建立端侧链路") {
             sdk.initialize(
                 agentRuntimeIp = config.serverIp,
                 agentRuntimePort = config.runtimePort,
@@ -150,11 +164,12 @@ class AgentTestRunner(
                 computeControlPort = config.computeControlPort,
             )
         }
+        initResult = initialized
         onLog(
             LabLogLevel.SUCCESS,
             "INIT",
-            "系统选择MASQUE出口=${initResult.masqueOuterSourceIp}，" +
-                "Agent TUN=${initResult.agentTunCidr}，A2A=${initResult.agentTcpEndpoint}",
+            "系统选择MASQUE出口=${initialized.masqueOuterSourceIp}，" +
+                "Agent TUN=${initialized.agentTunCidr}，A2A=${initialized.agentTcpEndpoint}",
         )
         onResetAvailability(true)
 
@@ -174,7 +189,7 @@ class AgentTestRunner(
                     metadata = buildJsonObject {
                         put("region", "CN")
                         put("os", "Android")
-                        put("version", "0.2.7")
+                        put("version", "0.2.14")
                     },
                 )
             }
@@ -244,6 +259,7 @@ class AgentTestRunner(
         receivedVideoSinks.forEach { (track, sink) -> runCatching { track.removeSink(sink) } }
         receivedVideoSinks.clear()
         mediaScope.cancel()
+        onProcessedVideoStatus("视频已停止", "等待下一次处理流会话")
         manualMessageSession = null
         onManualMessageSession(null)
         retrySignal.close()
@@ -257,6 +273,34 @@ class AgentTestRunner(
 
     suspend fun deregisterAgentForStop(): OperationResult? =
         operationMutex.withLock { deregisterIdentityForStop(sdk, onLog) }
+
+    internal fun diagnosticLocalTcpEndpoint(): String? = initResult?.agentTcpEndpoint
+
+    internal fun diagnosticSummary(): String {
+        val initialized = initResult
+        val messaging = manualMessageSession
+        val upload = videoUploadHandle
+        val masqueStatistics = sdk.getMasqueTransportStatistics()
+        return buildString {
+            appendLine("lifecycle_state=${sdk.agentLifecycleState}")
+            appendLine("agent_id=${sdk.localProfile?.agentId ?: "<none>"}")
+            appendLine("init_complete=${initialized != null}")
+            appendLine("init_runtime_connected=${initialized?.runtimeConnected ?: false}")
+            appendLine("init_masque_connected=${initialized?.masqueConnected ?: false}")
+            appendLine("agent_tun_cidr=${initialized?.agentTunCidr ?: "<unavailable>"}")
+            appendLine("agent_tcp_endpoint=${initialized?.agentTcpEndpoint ?: "<unavailable>"}")
+            appendLine("agent_udp_endpoint=${initialized?.agentUdpEndpoint ?: "<unavailable>"}")
+            appendLine("masque_outer_source_ip=${initialized?.masqueOuterSourceIp ?: "<unavailable>"}")
+            appendLine("masque_downlink_packets=${masqueStatistics.downlinkPackets}")
+            appendLine("masque_downlink_packets_over_tun_mtu=${masqueStatistics.downlinkPacketsOverTunMtu}")
+            appendLine("masque_downlink_read_buffer_too_small=${masqueStatistics.downlinkReadBufferTooSmall}")
+            appendLine("masque_uplink_datagram_too_large=${masqueStatistics.uplinkDatagramTooLarge}")
+            appendLine("masque_max_downlink_packet_bytes=${masqueStatistics.maxDownlinkPacketBytes}")
+            appendLine("active_group_id=${messaging?.groupId ?: "<none>"}")
+            appendLine("message_target_agent_id=${messaging?.targetAgentId ?: "<none>"}")
+            append("video_upload_state=${upload?.state ?: "<none>"}")
+        }
+    }
 
     suspend fun sendManualMessage(content: String): MessageReceipt = sendMutex.withLock {
         operationMutex.withLock {
@@ -311,14 +355,12 @@ class AgentTestRunner(
         onLog(
             LabLogLevel.INFO,
             "COMPUTE CREATE",
-            "调用 createOffloadingSession，group_id=${route.groupId}，Mock=${config.computeControlIp}:${config.computeControlPort}",
+            "调用 createOffloadingSession，sandbox=2 vCPU/4096 MiB，Mock=${config.computeControlIp}:${config.computeControlPort}",
         )
         try {
             val session = sdk.createOffloadingSession(
-                agentId = route.localAgentId,
                 workloadType = "video_relay",
-                groupId = route.groupId,
-                sandboxId = "mock-video-sandbox",
+                sandboxSpec = SandboxSpec(vcpus = 2, memoryMb = 4096),
                 timeoutSeconds = 30.0,
             )
             onLog(
@@ -329,22 +371,30 @@ class AgentTestRunner(
             onLog(
                 LabLogLevel.INFO,
                 "VIDEO UPLOAD",
-                "调用 startVideoUpload，视频消费者=[${route.targetAgentId}]",
+                "应用通过 sendMessage 向 ${route.targetAgentName} 发送 session 信息，然后启动 B→Server 上传",
             )
+            val delivery = sdk.sendMessage(
+                route.groupId,
+                route.targetAgentId,
+                buildProcessedVideoSessionMessage(session),
+                messageType = "processed_video_session",
+                taskId = "offloading:${session.sessionId}",
+                timeoutSeconds = 10.0,
+            )
+            check(delivery.delivered) { "处理流 session 信息未送达 ${route.targetAgentName}" }
             sdk.startVideoUpload(
-                sessionId = session.sessionId,
-                targetAgentIds = listOf(route.targetAgentId),
+                session = session,
                 cameraId = "0",
-                width = 1280,
-                height = 720,
-                fps = 24,
-                bitrateKbps = 2500,
+                width = 640,
+                height = 480,
+                fps = 30,
+                bitrateKbps = 2400,
             ).also { handle ->
                 videoUploadHandle = handle
                 onLog(
                     LabLogLevel.SUCCESS,
                     "VIDEO UPLOAD",
-                    "服务端已拉到首帧，并已向 ${route.targetAgentName} 同步 ticket；track=${handle.trackId}",
+                    "服务端已拉到首帧；${route.targetAgentName} 的预建下行保持复用；track=${handle.trackId}",
                 )
                 onStatus(RunnerStatus("视频算力链路已启动", "B → Mock Video Server → ${route.targetAgentName}"))
             }
@@ -392,13 +442,14 @@ class AgentTestRunner(
                     "A2A RECEIVE",
                     "group_id=$groupId，from=$senderAgentId，payload=${compact(payload)}",
                 )
-                if (payload["type"]?.jsonPrimitive?.content == "processed_video_invitation") {
+                if (payload["type"]?.jsonPrimitive?.content == "processed_video_session") {
+                    onProcessedVideoStatus("正在连接处理流", "应用已收到 session 信息，正在完成 WebRTC 协商")
                     onLog(
                         LabLogLevel.INFO,
-                        "VIDEO INVITE",
-                        "已确认 P2P 邀请，后台调用 acceptOffloadingSession + getProcessedVideoStream",
+                        "VIDEO SESSION",
+                        "应用解析 P2P session 信息并调用 getProcessedVideoStream",
                     )
-                    mediaScope.launch { receiveProcessedVideo(groupId, senderAgentId, payload) }
+                    mediaScope.launch { receiveProcessedVideo(payload) }
                 } else {
                     onStatus(RunnerStatus("已收到 A2A 消息", "链路验证成功，SDK 继续运行"))
                 }
@@ -485,19 +536,17 @@ class AgentTestRunner(
     }
 
     private suspend fun receiveProcessedVideo(
-        groupId: String,
-        senderAgentId: String,
         invitation: JsonObject,
     ) {
         try {
             val track = operationMutex.withLock {
-                val session = sdk.acceptOffloadingSession(senderAgentId, groupId, invitation)
+                val session = parseProcessedVideoSession(invitation)
                 onLog(
                     LabLogLevel.SUCCESS,
-                    "VIDEO ACCEPT",
+                    "VIDEO SESSION",
                     "session_id=${session.sessionId}，video_server=${session.processedStream?.videoServerIp}",
                 )
-                sdk.getProcessedVideoStream(session.sessionId, timeoutSeconds = 20.0)
+                sdk.getProcessedVideoStream(session, timeoutSeconds = 20.0)
             }
             var frames = 0L
             val sink = VideoSink { frame ->
@@ -513,8 +562,24 @@ class AgentTestRunner(
                     }
                 }
             }
-            track.addSink(sink)
-            synchronized(receivedVideoSinks) { receivedVideoSinks += track to sink }
+            onProcessedVideoStatus("处理流已连接", "等待 Video Server 的第一帧")
+            val sinks = buildList {
+                addAll(processedVideoRenderSinks())
+                add(sink)
+            }
+            val attachedSinks = mutableListOf<VideoSink>()
+            try {
+                sinks.forEach { renderSink ->
+                    track.addSink(renderSink)
+                    attachedSinks += renderSink
+                }
+            } catch (error: Throwable) {
+                attachedSinks.forEach { attached -> runCatching { track.removeSink(attached) } }
+                throw error
+            }
+            synchronized(receivedVideoSinks) {
+                receivedVideoSinks += attachedSinks.map { renderSink -> track to renderSink }
+            }
             onLog(LabLogLevel.SUCCESS, "VIDEO STREAM", "getProcessedVideoStream 返回 track=${track.trackId}")
         } catch (error: CancellationException) {
             throw error
@@ -525,6 +590,10 @@ class AgentTestRunner(
                 "处理流接收失败：${error.message ?: error::class.java.simpleName}",
             )
             onStatus(RunnerStatus("处理流接收失败", error.message ?: error::class.java.simpleName))
+            onProcessedVideoStatus(
+                "处理流接收失败",
+                error.message ?: error::class.java.simpleName,
+            )
         }
     }
 
@@ -582,5 +651,69 @@ class AgentTestRunner(
         if (resetRequested) throw CancellationException("Agent reset requested")
     }
 
-    private fun compact(value: JsonObject): String = value.toString().take(800)
+    private fun compact(value: JsonObject): String = redactSensitiveJson(value).toString().take(800)
+
+    private fun buildProcessedVideoSessionMessage(
+        session: OffloadingSession,
+    ): JsonObject {
+        val endpoint = checkNotNull(session.processedStream) {
+            "createOffloadingSession 未返回 processed_stream"
+        }
+        return buildJsonObject {
+            put("type", "processed_video_session")
+            put("version", "1.0")
+            put("session_id", session.sessionId)
+            put("state", session.state)
+            session.expiresAt?.let { put("expires_at", it.toString()) }
+            put("processed_stream", buildJsonObject {
+                put("video_server_ip", endpoint.videoServerIp)
+                put("offer_url", endpoint.offerUrl)
+                put("protocol", endpoint.protocol)
+                put("signaling", endpoint.signaling)
+            })
+        }
+    }
+
+    private fun parseProcessedVideoSession(
+        payload: JsonObject,
+    ): OffloadingSession {
+        fun required(field: String): String =
+            payload[field]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                ?: error("session 信息缺少 $field")
+        check(required("type") == "processed_video_session") { "不支持的 session 消息类型" }
+        check(required("version") == "1.0") { "不支持的 session 消息版本" }
+        val endpointJson = payload["processed_stream"]?.jsonObject
+            ?: error("session 信息缺少 processed_stream")
+        fun endpointField(field: String): String =
+            endpointJson[field]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                ?: error("processed_stream 缺少 $field")
+        val expiresAt = payload["expires_at"]?.jsonPrimitive?.contentOrNull?.let(Instant::parse)
+        check(expiresAt == null || expiresAt.isAfter(Instant.now())) { "session 已过期" }
+        return OffloadingSession(
+            sessionId = required("session_id"),
+            state = payload["state"]?.jsonPrimitive?.contentOrNull ?: "ALLOCATED",
+            expiresAt = expiresAt,
+            processedStream = ProcessedVideoEndpoint(
+                videoServerIp = endpointField("video_server_ip"),
+                offerUrl = endpointField("offer_url"),
+                protocol = endpointJson["protocol"]?.jsonPrimitive?.contentOrNull ?: "webrtc",
+                signaling = endpointJson["signaling"]?.jsonPrimitive?.contentOrNull ?: "non-trickle",
+            ),
+        )
+    }
+
+    private fun redactSensitiveJson(value: JsonElement): JsonElement = when (value) {
+        is JsonObject -> JsonObject(
+            value.mapValues { (key, nested) ->
+                if (key in SENSITIVE_LOG_FIELDS) JsonPrimitive("<redacted>")
+                else redactSensitiveJson(nested)
+            },
+        )
+        is JsonArray -> JsonArray(value.map(::redactSensitiveJson))
+        else -> value
+    }
+
+    private companion object {
+        val SENSITIVE_LOG_FIELDS = emptySet<String>()
+    }
 }

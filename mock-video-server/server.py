@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fractions
 import logging
 import os
-import secrets
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -15,13 +16,80 @@ from typing import Any
 
 import numpy as np
 from aiohttp import web
-from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCPeerConnection, RTCRtpReceiver, RTCRtpSender, RTCSessionDescription
+from aiortc.codecs import CODECS
+from aiortc.codecs import h264 as aiortc_h264
 from aiortc.contrib.media import MediaRelay
 from aiortc.mediastreams import MediaStreamError, MediaStreamTrack
+from aiortc.rtcrtpparameters import RTCRtcpFeedback, RTCRtpCodecParameters
 from av import VideoFrame
 
 
 LOG = logging.getLogger("mock-video-server")
+
+H264_HIGH_PROFILE_LEVEL_IDS = ("64001f", "640c1f")
+H264_BASELINE_PROFILE_LEVEL_IDS = ("42e01f", "42001f")
+H264_PACKETIZATION_MODE = "1"
+H264_RTP_PAYLOAD_BYTES = int(os.getenv("MOCK_VIDEO_H264_RTP_PAYLOAD_BYTES", "1150"))
+
+if not 1100 <= H264_RTP_PAYLOAD_BYTES <= 1150:
+    raise RuntimeError("MOCK_VIDEO_H264_RTP_PAYLOAD_BYTES must be between 1100 and 1150")
+
+# aiortc uses this module-level limit when fragmenting H.264 NAL units into FU-A RTP
+# payloads. Keep the complete inner UDP/IP packet below the Android TUN MTU (1280),
+# including RTP extensions, SRTP authentication data and UDP/IP headers.
+aiortc_h264.PACKET_MAX = H264_RTP_PAYLOAD_BYTES
+
+
+def register_h264_high_profiles() -> None:
+    """Add High / Constrained High to aiortc's process-wide video capabilities."""
+    existing = {
+        str(codec.parameters.get("profile-level-id", "")).lower()
+        for codec in CODECS["video"]
+        if codec.mimeType.lower() == "video/h264"
+        and str(codec.parameters.get("packetization-mode", "0"))
+        == H264_PACKETIZATION_MODE
+    }
+    used_payload_types = {codec.payloadType for codec in CODECS["video"]}
+    next_payload_type = next(
+        payload_type
+        for payload_type in range(96, 127, 2)
+        if payload_type not in used_payload_types
+        and payload_type + 1 not in used_payload_types
+    )
+    for profile_level_id in H264_HIGH_PROFILE_LEVEL_IDS:
+        if profile_level_id in existing:
+            continue
+        feedback = [
+            RTCRtcpFeedback(type="nack"),
+            RTCRtcpFeedback(type="nack", parameter="pli"),
+            RTCRtcpFeedback(type="goog-remb"),
+        ]
+        CODECS["video"].extend(
+            [
+                RTCRtpCodecParameters(
+                    mimeType="video/H264",
+                    clockRate=90000,
+                    payloadType=next_payload_type,
+                    rtcpFeedback=feedback,
+                    parameters={
+                        "level-asymmetry-allowed": "1",
+                        "packetization-mode": H264_PACKETIZATION_MODE,
+                        "profile-level-id": profile_level_id,
+                    },
+                ),
+                RTCRtpCodecParameters(
+                    mimeType="video/rtx",
+                    clockRate=90000,
+                    payloadType=next_payload_type + 1,
+                    parameters={"apt": next_payload_type},
+                ),
+            ]
+        )
+        next_payload_type += 2
+
+
+register_h264_high_profiles()
 
 
 def utc_now() -> datetime:
@@ -54,74 +122,385 @@ async def api_error_middleware(
         )
 
 
-class ProcessedVideoTrack(MediaStreamTrack):
-    """Relay a source track and add a tiny deterministic marker as mock processing."""
+@dataclass
+class ConsumerConnection:
+    pc: RTCPeerConnection
+    state: str = "new"
+    codec: str = "<pending>"
+    frames_processed: int = 0
+    packets_sent: int = 0
+    bytes_sent: int = 0
+    placeholder_frames_sent: int = 0
+    first_frame_logged: bool = False
+    first_source_frame_logged: bool = False
+    sender: RTCRtpSender | None = None
+    keyframes_requested: int = 0
+    stats_task: asyncio.Task[None] | None = None
+
+
+async def refresh_consumer_stats(connection: ConsumerConnection) -> None:
+    """Capture monotonic outbound RTP counters before a connection disappears."""
+    try:
+        report = await connection.pc.getStats()
+    except Exception as error:
+        LOG.debug("consumer RTP stats unavailable: %s", error)
+        return
+    outbound = [
+        stat
+        for stat in report.values()
+        if getattr(stat, "type", "") == "outbound-rtp"
+        and getattr(stat, "kind", "") == "video"
+    ]
+    connection.packets_sent = sum(int(getattr(stat, "packetsSent", 0)) for stat in outbound)
+    connection.bytes_sent = sum(int(getattr(stat, "bytesSent", 0)) for stat in outbound)
+
+
+def selected_video_format(sdp: str) -> tuple[str, dict[str, str]]:
+    """Return the first negotiated base codec and FMTP parameters."""
+    video_payloads: list[str] = []
+    codec_by_payload: dict[str, str] = {}
+    fmtp_by_payload: dict[str, dict[str, str]] = {}
+    in_video_section = False
+    for raw_line in sdp.splitlines():
+        line = raw_line.strip()
+        if line.startswith("m="):
+            parts = line.split()
+            in_video_section = line.startswith("m=video ")
+            if in_video_section and len(parts) > 3:
+                video_payloads = parts[3:]
+            continue
+        if not in_video_section or not line.startswith("a=rtpmap:"):
+            if in_video_section and line.startswith("a=fmtp:"):
+                payload_and_fmtp = line[len("a=fmtp:"):].split(None, 1)
+                if len(payload_and_fmtp) == 2:
+                    fmtp_by_payload[payload_and_fmtp[0]] = {
+                        key.strip().lower(): value.strip().lower()
+                        for item in payload_and_fmtp[1].split(";")
+                        if "=" in item
+                        for key, value in [item.split("=", 1)]
+                    }
+            continue
+        payload_and_codec = line[len("a=rtpmap:"):].split(None, 1)
+        if len(payload_and_codec) == 2:
+            codec_by_payload[payload_and_codec[0]] = payload_and_codec[1]
+    for payload in video_payloads:
+        codec = codec_by_payload.get(payload)
+        if codec and not codec.lower().startswith("rtx/"):
+            return codec, fmtp_by_payload.get(payload, {})
+    return "<unknown>", {}
+
+
+def selected_video_codec(sdp: str) -> str:
+    return selected_video_format(sdp)[0]
+
+
+def require_h264_high_answer(sdp: str) -> str:
+    """Reject an answer which silently falls back from the source High profile."""
+    codec, parameters = selected_video_format(sdp)
+    profile_level_id = parameters.get("profile-level-id", "<missing>")
+    packetization_mode = parameters.get("packetization-mode", "0")
+    if (
+        codec.lower() != "h264/90000"
+        or profile_level_id not in H264_HIGH_PROFILE_LEVEL_IDS
+        or packetization_mode != H264_PACKETIZATION_MODE
+    ):
+        raise ApiError(
+            409,
+            "SOURCE_CODEC_MISMATCH",
+            "source must negotiate H264 High Profile with packetization-mode=1; "
+            f"got codec={codec} profile-level-id={profile_level_id} "
+            f"packetization-mode={packetization_mode}",
+        )
+    return f"{codec};profile-level-id={profile_level_id};packetization-mode={packetization_mode}"
+
+
+def prefer_h264_high(transceiver: Any) -> None:
+    """Require a packetization-mode=1 H264 High profile on the source leg."""
+    codecs = RTCRtpSender.getCapabilities("video").codecs
+    h264 = [
+        codec
+        for codec in codecs
+        if codec.mimeType.lower() == "video/h264"
+        and str(codec.parameters.get("profile-level-id", "")).lower()
+        in H264_HIGH_PROFILE_LEVEL_IDS
+        and str(codec.parameters.get("packetization-mode", "0"))
+        == H264_PACKETIZATION_MODE
+    ]
+    if len(h264) != len(H264_HIGH_PROFILE_LEVEL_IDS):
+        raise RuntimeError("H264 High Profile capabilities were not registered")
+    retransmission = [codec for codec in codecs if codec.mimeType.lower() == "video/rtx"]
+    transceiver.setCodecPreferences(h264 + retransmission)
+
+
+def prefer_h264_baseline(transceiver: Any) -> None:
+    """Keep the server-encoded consumer leg on aiortc's Baseline encoder."""
+    codecs = RTCRtpSender.getCapabilities("video").codecs
+    h264 = [
+        codec
+        for codec in codecs
+        if codec.mimeType.lower() == "video/h264"
+        and str(codec.parameters.get("profile-level-id", "")).lower()
+        in H264_BASELINE_PROFILE_LEVEL_IDS
+    ]
+    if not h264:
+        return
+    retransmission = [codec for codec in codecs if codec.mimeType.lower() == "video/rtx"]
+    fallback = [
+        codec
+        for codec in codecs
+        if codec.mimeType.lower() not in {"video/h264", "video/rtx"}
+    ]
+    transceiver.setCodecPreferences(h264 + retransmission + fallback)
+
+
+class SessionProcessedVideoTrack(MediaStreamTrack):
+    """A session-lifetime output track which switches from placeholder to latest source frame."""
 
     kind = "video"
 
-    def __init__(self, source: MediaStreamTrack) -> None:
+    def __init__(self, session_id: str, output_fps: float) -> None:
         super().__init__()
-        self._source = source
+        self._session_id = session_id
+        self._output_fps = max(float(output_fps), 1.0)
+        self._output_interval = 1.0 / self._output_fps
+        self._timestamp_step = max(1, round(90000 / self._output_fps))
+        self._timestamp = 0
+        self._next_output_at = 0.0
+        self._source_generation = 0
+        self._source_reader_task: asyncio.Task[None] | None = None
+        self._latest_source_image: np.ndarray[Any, Any] | None = None
+        self._source_frame_ready = asyncio.Event()
+        self._first_source_output_logged = False
         self._frame_number = 0
+        self.frames_processed = 0
+        self._placeholder = np.zeros((480, 640, 3), dtype=np.uint8)
+        self._placeholder[:, :] = (12, 12, 12)
+        self._placeholder[212:268, 72:568] = (30, 30, 30)
+        self._placeholder[232:248, 112:528] = (80, 80, 80)
 
-    async def recv(self) -> VideoFrame:
-        frame = await self._source.recv()
-        image = frame.to_ndarray(format="bgr24")
+    @property
+    def source_frame_available(self) -> bool:
+        return self._latest_source_image is not None
+
+    def set_source(self, source: MediaStreamTrack) -> None:
+        self._source_generation += 1
+        generation = self._source_generation
+        if self._source_reader_task is not None:
+            self._source_reader_task.cancel()
+        self._latest_source_image = None
+        self._source_frame_ready.clear()
+        self._first_source_output_logged = False
+        self._source_reader_task = asyncio.create_task(self._read_source(source, generation))
+
+    def clear_source(self) -> None:
+        self._source_generation += 1
+        if self._source_reader_task is not None:
+            self._source_reader_task.cancel()
+            self._source_reader_task = None
+        self._latest_source_image = None
+        self._source_frame_ready.clear()
+
+    async def wait_for_source_frame(self, timeout: float = 2.0) -> None:
+        await asyncio.wait_for(self._source_frame_ready.wait(), timeout=timeout)
+
+    async def _read_source(self, source: MediaStreamTrack, generation: int) -> None:
+        try:
+            while generation == self._source_generation:
+                frame = await source.recv()
+                frame_number = self._frame_number
+                image = await asyncio.to_thread(self._process_frame, frame, frame_number)
+                if generation != self._source_generation:
+                    return
+                self._frame_number += 1
+                self.frames_processed += 1
+                self._latest_source_image = image
+                if not self._source_frame_ready.is_set():
+                    self._source_frame_ready.set()
+                    LOG.info(
+                        "first processed source frame id=%s size=%sx%s",
+                        self._session_id,
+                        image.shape[1],
+                        image.shape[0],
+                    )
+        except asyncio.CancelledError:
+            raise
+        except MediaStreamError:
+            LOG.info("processed source ended id=%s", self._session_id)
+        except Exception:
+            LOG.exception("processed source reader failed id=%s", self._session_id)
+
+    @staticmethod
+    def _process_frame(frame: VideoFrame, frame_number: int) -> np.ndarray[Any, Any]:
+        target_width = 640
+        target_height = 480
+        scale = min(target_width / frame.width, target_height / frame.height)
+        resized_width = max(2, int(frame.width * scale) // 2 * 2)
+        resized_height = max(2, int(frame.height * scale) // 2 * 2)
+        resized = frame.reformat(
+            width=resized_width,
+            height=resized_height,
+            format="bgr24",
+        ).to_ndarray()
+        image = np.zeros((target_height, target_width, 3), dtype=np.uint8)
+        left = (target_width - resized_width) // 2
+        top = (target_height - resized_height) // 2
+        image[top:top + resized_height, left:left + resized_width] = resized
         height, width = image.shape[:2]
         marker_height = min(28, height)
         marker_width = min(96, width)
         image[:marker_height, :marker_width] = (210, 30, 210)
-        bar_width = min(marker_width, 4 + self._frame_number % max(marker_width, 1))
+        bar_width = min(marker_width, 4 + frame_number % max(marker_width, 1))
         image[max(marker_height - 5, 0):marker_height, :bar_width] = (30, 230, 30)
-        processed = VideoFrame.from_ndarray(image, format="bgr24")
-        processed.pts = frame.pts
-        processed.time_base = frame.time_base
-        self._frame_number += 1
-        return processed
+        return image
+
+    async def _next_timestamp(self) -> tuple[int, fractions.Fraction]:
+        now = time.perf_counter()
+        if self._next_output_at <= 0:
+            self._next_output_at = now
+        else:
+            self._next_output_at += self._output_interval
+            delay = self._next_output_at - now
+            if delay > 0:
+                await asyncio.sleep(delay)
+            elif delay < -(self._output_interval * 2):
+                self._next_output_at = time.perf_counter()
+        self._timestamp += self._timestamp_step
+        return self._timestamp, fractions.Fraction(1, 90000)
+
+    async def recv(self) -> VideoFrame:
+        pts, time_base = await self._next_timestamp()
+        image = self._latest_source_image
+        if image is not None and not self._first_source_output_logged:
+            self._first_source_output_logged = True
+            LOG.info("session output switched to source id=%s", self._session_id)
+        output = VideoFrame.from_ndarray(
+            image if image is not None else self._placeholder,
+            format="bgr24",
+        )
+        output.pts = pts
+        output.time_base = time_base
+        return output
+
+    async def close(self) -> None:
+        task = self._source_reader_task
+        self.clear_source()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+        self.stop()
 
 
-@dataclass
-class ConsumerGrant:
-    agent_id: str
-    ticket: str
-    peer_connections: set[RTCPeerConnection] = field(default_factory=set)
+class ConsumerVideoTrack(MediaStreamTrack):
+    """Count actual source frames while relaying the session-lifetime output track."""
+
+    kind = "video"
+
+    def __init__(
+        self,
+        source: MediaStreamTrack,
+        output: SessionProcessedVideoTrack,
+        session_id: str,
+        consumer_id: str,
+        connection: ConsumerConnection,
+    ) -> None:
+        super().__init__()
+        self._source = source
+        self._output = output
+        self._session_id = session_id
+        self._consumer_id = consumer_id
+        self._connection = connection
+
+    async def recv(self) -> VideoFrame:
+        frame = await self._source.recv()
+        is_source = self._output.source_frame_available
+        if is_source:
+            self._connection.frames_processed += 1
+        else:
+            self._connection.placeholder_frames_sent += 1
+        if not self._connection.first_frame_logged:
+            self._connection.first_frame_logged = True
+            LOG.info(
+                "first consumer frame id=%s connection=%s kind=%s codec=%s",
+                self._session_id,
+                self._consumer_id,
+                "source" if is_source else "placeholder",
+                self._connection.codec,
+            )
+        if is_source and not self._connection.first_source_frame_logged:
+            self._connection.first_source_frame_logged = True
+            LOG.info(
+                "first source frame sent id=%s agent=%s codec=%s frames_processed=%s",
+                self._session_id,
+                self._consumer_id,
+                self._connection.codec,
+                self._connection.frames_processed,
+            )
+        return frame
 
 
 @dataclass
 class VideoSession:
     session_id: str
-    sandbox_id: str
-    group_id: str
-    source_agent_id: str
     workload_type: str
-    producer_token: str
+    sandbox_vcpus: int
+    sandbox_memory_mb: int
     expires_at: datetime
+    output_fps: float = 30.0
     state: str = "ALLOCATED"
     producer_pc: RTCPeerConnection | None = None
     source_track: MediaStreamTrack | None = None
     relay: MediaRelay = field(default_factory=MediaRelay)
+    output_relay: MediaRelay = field(default_factory=MediaRelay)
+    output_track: SessionProcessedVideoTrack = field(init=False)
     source_ready: asyncio.Event = field(default_factory=asyncio.Event)
     source_probe_task: asyncio.Task[None] | None = None
-    consumers: dict[str, ConsumerGrant] = field(default_factory=dict)
+    source_keyframe_task: asyncio.Task[None] | None = None
+    source_codec: str = "<pending>"
+    source_keyframes_requested: int = 0
+    consumer_connections: list[ConsumerConnection] = field(default_factory=list)
     frames_seen: int = 0
+
+    def __post_init__(self) -> None:
+        self.output_track = SessionProcessedVideoTrack(self.session_id, self.output_fps)
 
     async def close(self) -> None:
         self.state = "STOPPED"
         if self.source_probe_task is not None:
             self.source_probe_task.cancel()
             await asyncio.gather(self.source_probe_task, return_exceptions=True)
-        peers = [grant.peer_connections for grant in self.consumers.values()]
-        peer_connections = set().union(*peers) if peers else set()
+        if self.source_keyframe_task is not None:
+            self.source_keyframe_task.cancel()
+            await asyncio.gather(self.source_keyframe_task, return_exceptions=True)
+        connections = list(self.consumer_connections)
+        await asyncio.gather(
+            *(refresh_consumer_stats(connection) for connection in connections),
+            return_exceptions=True,
+        )
+        for connection in connections:
+            if connection.stats_task is not None:
+                connection.stats_task.cancel()
+        await asyncio.gather(
+            *(connection.stats_task for connection in connections if connection.stats_task is not None),
+            return_exceptions=True,
+        )
+        peer_connections = {connection.pc for connection in connections}
         if self.producer_pc is not None:
             peer_connections.add(self.producer_pc)
         await asyncio.gather(*(pc.close() for pc in peer_connections), return_exceptions=True)
+        await self.output_track.close()
 
 
 class MockVideoServer:
-    def __init__(self, public_ip: str, port: int, source_wait_seconds: float = 12.0) -> None:
+    def __init__(
+        self,
+        public_ip: str,
+        port: int,
+        source_wait_seconds: float = 12.0,
+        output_fps: float | None = None,
+    ) -> None:
         self.public_ip = public_ip
         self.port = port
         self.source_wait_seconds = source_wait_seconds
+        self.output_fps = output_fps or float(os.getenv("MOCK_VIDEO_OUTPUT_FPS", "30"))
         self.sessions: dict[str, VideoSession] = {}
 
     @property
@@ -136,10 +515,6 @@ class MockVideoServer:
         app.router.add_get("/healthz", self.health)
         app.router.add_get("/debug/v1/sessions", self.list_sessions)
         app.router.add_post("/compute/v1/offloading-sessions", self.create_session)
-        app.router.add_post(
-            "/compute/v1/offloading-sessions/{session_id}/consumers",
-            self.create_consumers,
-        )
         app.router.add_post("/video/v1/sessions/{session_id}/source", self.source)
         app.router.add_post("/video/v1/sessions/{session_id}/source/stop", self.stop_source)
         app.router.add_post("/video/v1/sessions/{session_id}/processed", self.processed)
@@ -152,24 +527,59 @@ class MockVideoServer:
                 "status": "ok",
                 "service": "agent-sdk-mock-video-server",
                 "video_server_ip": self.public_ip,
+                "output_fps": self.output_fps,
+                "h264_rtp_payload_bytes": H264_RTP_PAYLOAD_BYTES,
                 "sessions": len(self.sessions),
             }
         )
 
     async def list_sessions(self, _: web.Request) -> web.Response:
+        connections = [
+            connection
+            for session in self.sessions.values()
+            for connection in session.consumer_connections
+        ]
+        await asyncio.gather(
+            *(refresh_consumer_stats(connection) for connection in connections),
+            return_exceptions=True,
+        )
         return web.json_response(
             {
                 "sessions": [
                     {
                         "session_id": session.session_id,
-                        "group_id": session.group_id,
-                        "source_agent_id": session.source_agent_id,
+                        "workload_type": session.workload_type,
+                        "sandbox_spec": {
+                            "vcpus": session.sandbox_vcpus,
+                            "memory_mb": session.sandbox_memory_mb,
+                        },
                         "state": session.state,
                         "frames_seen": session.frames_seen,
-                        "consumer_agents": sorted(session.consumers),
+                        "source_codec": session.source_codec,
+                        "source_keyframes_requested": session.source_keyframes_requested,
+                        "frames_processed": session.output_track.frames_processed,
+                        "output_fps": session.output_fps,
+                        "source_frame_available": session.output_track.source_frame_available,
                         "consumer_connections": sum(
-                            len(grant.peer_connections) for grant in session.consumers.values()
+                            connection.state not in {"failed", "closed"}
+                            for connection in session.consumer_connections
                         ),
+                        "consumers": {
+                            f"consumer-{index}": {
+                                "frames_processed": connection.frames_processed,
+                                "placeholder_frames_sent": connection.placeholder_frames_sent,
+                                "packets_sent": connection.packets_sent,
+                                "bytes_sent": connection.bytes_sent,
+                                "codec": connection.codec,
+                                "first_frame_sent": connection.first_frame_logged,
+                                "first_source_frame_sent": connection.first_source_frame_logged,
+                                "keyframes_requested": connection.keyframes_requested,
+                            }
+                            for index, connection in enumerate(
+                                session.consumer_connections,
+                                start=1,
+                            )
+                        },
                     }
                     for session in self.sessions.values()
                 ]
@@ -178,92 +588,87 @@ class MockVideoServer:
 
     async def create_session(self, request: web.Request) -> web.Response:
         body = await self._json(request)
-        agent_id = self._required_string(body, "agent_id")
-        group_id = self._required_string(body, "group_id")
         workload_type = self._required_string(body, "workload_type")
+        sandbox_spec = body.get("sandbox_spec")
+        if not isinstance(sandbox_spec, dict):
+            raise ApiError(400, "INVALID_ARGUMENT", "sandbox_spec must be an object")
+        vcpus = self._required_positive_int(sandbox_spec, "vcpus", "sandbox_spec")
+        memory_mb = self._required_positive_int(
+            sandbox_spec, "memory_mb", "sandbox_spec"
+        )
         session_id = f"mock-{uuid.uuid4()}"
-        sandbox_id = str(body.get("preferred_sandbox_id") or "mock-video-sandbox")
         session = VideoSession(
             session_id=session_id,
-            sandbox_id=sandbox_id,
-            group_id=group_id,
-            source_agent_id=agent_id,
             workload_type=workload_type,
-            producer_token=secrets.token_urlsafe(32),
+            sandbox_vcpus=vcpus,
+            sandbox_memory_mb=memory_mb,
             expires_at=utc_now() + timedelta(hours=2),
+            output_fps=self.output_fps,
         )
         self.sessions[session_id] = session
-        LOG.info("session allocated id=%s source=%s group=%s", session_id, agent_id, group_id)
+        LOG.info(
+            "session allocated id=%s workload=%s sandbox=%s-vCPU/%s-MiB",
+            session_id,
+            workload_type,
+            vcpus,
+            memory_mb,
+        )
         return web.json_response(
             {
                 "session_id": session_id,
-                "sandbox_id": sandbox_id,
-                "group_id": group_id,
-                "source_agent_id": agent_id,
-                "workload_type": workload_type,
                 "state": session.state,
                 "expires_at": rfc3339(session.expires_at),
                 "producer": {
                     "video_server_ip": self.public_ip,
                     "source_start_url": f"{self.base_url}/video/v1/sessions/{session_id}/source",
                     "source_stop_url": f"{self.base_url}/video/v1/sessions/{session_id}/source/stop",
-                    "access_token": session.producer_token,
+                },
+                "processed_stream": {
+                    "video_server_ip": self.public_ip,
+                    "offer_url": f"{self.base_url}/video/v1/sessions/{session_id}/processed",
+                    "protocol": "webrtc",
+                    "signaling": "non-trickle",
                 },
             },
             status=201,
         )
 
-    async def create_consumers(self, request: web.Request) -> web.Response:
-        session = self._session(request)
-        body = await self._json(request)
-        if body.get("agent_id") != session.source_agent_id:
-            raise ApiError(403, "SOURCE_AGENT_MISMATCH", "agent_id is not the session source")
-        if body.get("group_id") != session.group_id:
-            raise ApiError(409, "GROUP_MISMATCH", "group_id does not match the session")
-        targets = body.get("target_agent_ids")
-        if not isinstance(targets, list) or not targets or any(
-            not isinstance(value, str) or not value.strip() for value in targets
-        ):
-            raise ApiError(400, "INVALID_TARGETS", "target_agent_ids must be a non-empty string list")
-        if len(set(targets)) != len(targets):
-            raise ApiError(400, "INVALID_TARGETS", "target_agent_ids contains duplicates")
-        if session.state != "SOURCE_CONNECTED":
-            raise ApiError(409, "SOURCE_NOT_CONNECTED", "Video Server has not received a source frame")
-        response: dict[str, Any] = {}
-        for target in targets:
-            grant = ConsumerGrant(agent_id=target, ticket=secrets.token_urlsafe(32))
-            session.consumers[target] = grant
-            response[target] = {
-                "video_server_ip": self.public_ip,
-                "offer_url": f"{self.base_url}/video/v1/sessions/{session.session_id}/processed",
-                "access_ticket": grant.ticket,
-                "protocol": "webrtc",
-                "signaling": "non-trickle",
-            }
-        LOG.info("consumer grants id=%s targets=%s", session.session_id, targets)
-        return web.json_response({"session_id": session.session_id, "consumers": response})
-
     async def source(self, request: web.Request) -> web.Response:
         session = self._session(request)
-        self._require_bearer(request, session.producer_token)
         body = await self._json(request)
         sdp_type, sdp = self._sdp(body, "sdp_answer")
         if not sdp:
+            if session.source_keyframe_task is not None:
+                session.source_keyframe_task.cancel()
+                await asyncio.gather(session.source_keyframe_task, return_exceptions=True)
+                session.source_keyframe_task = None
             if session.producer_pc is not None:
                 await session.producer_pc.close()
             session.source_ready.clear()
             session.source_track = None
+            session.source_codec = "<pending>"
+            session.source_keyframes_requested = 0
+            session.output_track.clear_source()
             session.state = "WAITING_FOR_SOURCE"
             pc = RTCPeerConnection()
             session.producer_pc = pc
-            pc.addTransceiver("video", direction="recvonly")
+            source_transceiver = pc.addTransceiver("video", direction="recvonly")
+            prefer_h264_high(source_transceiver)
 
             @pc.on("track")
             def on_track(track: MediaStreamTrack) -> None:
                 if track.kind != "video":
                     return
                 session.source_track = track
-                session.source_probe_task = asyncio.create_task(self._probe_source(session, track))
+                session.output_track.set_source(
+                    session.relay.subscribe(track, buffered=False)
+                )
+                session.source_probe_task = asyncio.create_task(
+                    self._probe_source(
+                        session,
+                        session.relay.subscribe(track, buffered=False),
+                    )
+                )
                 LOG.info("source track negotiated id=%s track=%s", session.session_id, track.id)
 
             @pc.on("connectionstatechange")
@@ -271,6 +676,12 @@ class MockVideoServer:
                 LOG.info("source pc id=%s state=%s", session.session_id, pc.connectionState)
                 if pc.connectionState in {"failed", "closed"} and session.state != "STOPPED":
                     session.state = "FAILED"
+                    if session.source_keyframe_task is not None:
+                        session.source_keyframe_task.cancel()
+                elif pc.connectionState == "connected" and session.source_keyframe_task is None:
+                    session.source_keyframe_task = asyncio.create_task(
+                        self._request_source_keyframes(session, source_transceiver.receiver)
+                    )
 
             offer = await pc.createOffer()
             await pc.setLocalDescription(offer)
@@ -286,6 +697,12 @@ class MockVideoServer:
 
         if sdp_type != "answer" or session.producer_pc is None:
             raise ApiError(409, "SOURCE_SIGNALING_ORDER", "request a server offer before sending an answer")
+        session.source_codec = require_h264_high_answer(sdp)
+        LOG.info(
+            "source answer selected id=%s codec=%s",
+            session.session_id,
+            session.source_codec,
+        )
         await session.producer_pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type=sdp_type))
         try:
             await asyncio.wait_for(session.source_ready.wait(), timeout=self.source_wait_seconds)
@@ -303,63 +720,201 @@ class MockVideoServer:
 
     async def stop_source(self, request: web.Request) -> web.Response:
         session = self._session(request)
-        self._require_bearer(request, session.producer_token)
         await session.close()
         return web.json_response({"session_id": session.session_id, "state": session.state})
 
     async def processed(self, request: web.Request) -> web.Response:
         session = self._session(request)
-        if session.state != "SOURCE_CONNECTED" or session.source_track is None:
-            raise ApiError(409, "SOURCE_NOT_CONNECTED", "processed stream is not ready")
-        ticket = self._bearer(request)
-        grant = next((value for value in session.consumers.values() if value.ticket == ticket), None)
-        if grant is None:
-            raise ApiError(403, "INVALID_CONSUMER_TICKET", "consumer ticket is invalid")
+        if session.state in {"STOPPED", "FAILED"}:
+            raise ApiError(409, "SESSION_NOT_STREAMABLE", "processed stream is not available")
         body = await self._json(request)
         sdp_type, sdp = self._sdp(body, "sdp_offer")
         if sdp_type != "offer" or not sdp:
             raise ApiError(400, "INVALID_SDP", "consumer request must contain an SDP offer")
         pc = RTCPeerConnection()
-        grant.peer_connections.add(pc)
+        connection = ConsumerConnection(pc=pc)
+        session.consumer_connections.append(connection)
+        consumer_id = f"consumer-{len(session.consumer_connections)}"
 
         @pc.on("connectionstatechange")
         async def on_state_change() -> None:
+            connection.state = pc.connectionState
             LOG.info(
-                "consumer pc id=%s agent=%s state=%s",
+                "consumer pc id=%s connection=%s state=%s",
                 session.session_id,
-                grant.agent_id,
+                consumer_id,
                 pc.connectionState,
             )
             if pc.connectionState in {"failed", "closed"}:
-                grant.peer_connections.discard(pc)
+                await refresh_consumer_stats(connection)
+            elif pc.connectionState == "connected":
+                self._request_consumer_keyframe_if_ready(
+                    session,
+                    connection,
+                    consumer_id,
+                    reason="connected-and-source-ready",
+                )
 
         await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type=sdp_type))
-        relayed = session.relay.subscribe(session.source_track)
-        pc.addTrack(ProcessedVideoTrack(relayed))
+        relayed = session.output_relay.subscribe(session.output_track, buffered=False)
+        connection.sender = pc.addTrack(
+            ConsumerVideoTrack(
+                relayed,
+                session.output_track,
+                session.session_id,
+                consumer_id,
+                connection,
+            )
+        )
+        consumer_transceiver = next(
+            transceiver
+            for transceiver in pc.getTransceivers()
+            if transceiver.sender is connection.sender
+        )
+        prefer_h264_baseline(consumer_transceiver)
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         await self._wait_ice_gathering(pc)
         local = pc.localDescription
-        LOG.info("consumer connected id=%s agent=%s", session.session_id, grant.agent_id)
+        connection.codec = selected_video_codec(local.sdp)
+        connection.stats_task = asyncio.create_task(self._poll_consumer_stats(connection))
+        LOG.info(
+            "consumer answer ready id=%s connection=%s codec=%s",
+            session.session_id,
+            consumer_id,
+            connection.codec,
+        )
         return web.json_response(
             {
                 "session_id": session.session_id,
-                "consumer_agent_id": grant.agent_id,
-                "state": "STREAMING",
+                "consumer_id": consumer_id,
+                "state": "SOURCE_CONNECTED" if session.source_ready.is_set() else "SOURCE_PENDING",
                 "sdp_answer": {"type": local.type, "sdp": local.sdp},
             }
         )
 
+    async def _request_source_keyframes(
+        self,
+        session: VideoSession,
+        receiver: RTCRtpReceiver,
+    ) -> None:
+        """Request clean IDRs after DTLS so a lost startup keyframe is recoverable."""
+        send_pli = getattr(receiver, "_send_rtcp_pli", None)
+        if not callable(send_pli):
+            LOG.warning("source keyframe request unsupported id=%s", session.session_id)
+            return
+        try:
+            for index, delay_seconds in enumerate((0.0, 0.2, 0.5, 1.0, 2.0, 3.0), start=1):
+                if delay_seconds:
+                    await asyncio.sleep(delay_seconds)
+                pc = session.producer_pc
+                if pc is None or pc.connectionState != "connected" or session.source_ready.is_set():
+                    return
+                sources = receiver.getSynchronizationSources()
+                if not sources:
+                    continue
+                for source in sources:
+                    await send_pli(source.source)
+                    session.source_keyframes_requested += 1
+                    LOG.info(
+                        "source keyframe requested id=%s ssrc=%s reason=decode-startup-%s count=%s",
+                        session.session_id,
+                        source.source,
+                        index,
+                        session.source_keyframes_requested,
+                    )
+        except asyncio.CancelledError:
+            raise
+
+    def _request_consumer_keyframe(
+        self,
+        connection: ConsumerConnection,
+        session_id: str,
+        agent_id: str,
+        reason: str,
+    ) -> None:
+        sender = connection.sender
+        if sender is None:
+            return
+        # aiortc currently exposes keyframe requests as an internal sender operation. Keeping
+        # this compatibility check local makes a future public API migration straightforward.
+        request_keyframe = getattr(sender, "_send_keyframe", None)
+        if not callable(request_keyframe):
+            LOG.warning(
+                "consumer keyframe request unsupported id=%s connection=%s reason=%s",
+                session_id,
+                agent_id,
+                reason,
+            )
+            return
+        request_keyframe()
+        connection.keyframes_requested += 1
+        LOG.info(
+            "consumer keyframe requested id=%s connection=%s reason=%s count=%s",
+            session_id,
+            agent_id,
+            reason,
+            connection.keyframes_requested,
+        )
+
+    def _request_consumer_keyframe_if_ready(
+        self,
+        session: VideoSession,
+        connection: ConsumerConnection,
+        agent_id: str,
+        reason: str,
+    ) -> None:
+        # Exactly one manually requested startup keyframe is sufficient once both DTLS and the
+        # real source are ready. Requesting at answer-ready, connected and source-ready used to
+        # produce a nine-IDR burst, increasing queueing and fragmentation at the TUN boundary.
+        if (
+            connection.state != "connected"
+            or not session.source_ready.is_set()
+            or connection.keyframes_requested != 0
+        ):
+            return
+        self._request_consumer_keyframe(
+            connection,
+            session.session_id,
+            agent_id,
+            reason=reason,
+        )
+
+    async def _poll_consumer_stats(self, connection: ConsumerConnection) -> None:
+        try:
+            while connection.state not in {"failed", "closed"}:
+                await asyncio.sleep(1.0)
+                await refresh_consumer_stats(connection)
+        except asyncio.CancelledError:
+            await refresh_consumer_stats(connection)
+            raise
+
     async def _probe_source(self, session: VideoSession, track: MediaStreamTrack) -> None:
-        probe = session.relay.subscribe(track)
         try:
             while True:
-                await probe.recv()
+                await track.recv()
                 session.frames_seen += 1
                 if session.frames_seen == 1:
                     session.state = "SOURCE_CONNECTED"
                     session.source_ready.set()
                     LOG.info("first source frame id=%s", session.session_id)
+                    try:
+                        await session.output_track.wait_for_source_frame()
+                    except TimeoutError:
+                        LOG.warning(
+                            "processed source frame was not ready for keyframe id=%s",
+                            session.session_id,
+                        )
+                    for index, connection in enumerate(
+                        session.consumer_connections,
+                        start=1,
+                    ):
+                        self._request_consumer_keyframe_if_ready(
+                            session,
+                            connection,
+                            f"consumer-{index}",
+                            reason="source-and-connection-ready",
+                        )
         except (MediaStreamError, asyncio.CancelledError):
             if session.state not in {"STOPPED", "FAILED"}:
                 session.state = "SOURCE_ENDED"
@@ -402,15 +957,17 @@ class MockVideoServer:
             raise ApiError(400, "INVALID_ARGUMENT", f"{field_name} must be a non-empty string")
         return value
 
-    def _bearer(self, request: web.Request) -> str:
-        authorization = request.headers.get("Authorization", "")
-        if not authorization.startswith("Bearer ") or not authorization[7:].strip():
-            raise ApiError(401, "MISSING_BEARER", "Authorization Bearer credential is required")
-        return authorization[7:].strip()
-
-    def _require_bearer(self, request: web.Request, expected: str) -> None:
-        if not secrets.compare_digest(self._bearer(request), expected):
-            raise ApiError(403, "INVALID_PRODUCER_TOKEN", "producer token is invalid")
+    def _required_positive_int(
+        self,
+        body: dict[str, Any],
+        field_name: str,
+        prefix: str = "",
+    ) -> int:
+        value = body.get(field_name)
+        qualified = f"{prefix}.{field_name}" if prefix else field_name
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ApiError(400, "INVALID_ARGUMENT", f"{qualified} must be a positive integer")
+        return value
 
     def _sdp(self, body: dict[str, Any], nested_field: str) -> tuple[str, str]:
         nested = body.get(nested_field)

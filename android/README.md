@@ -8,11 +8,17 @@ The Android library mirrors the Python SDK's group-cache and endpoint rules:
 - `AgentVpnService` creates the Agent TUN without root.
 - `acf_group_config` is decoded into an immutable snapshot keyed by
   `group_id + agent_id`.
+- An identical `acf_group_config` replay with the same timestamp is ACKed without
+  route writes, generation changes, or an application callback. A notification
+  with a newer timestamp is committed and delivered to the application normally.
 - A2A HTTP calls the cached complete `service_endpoints` URL without rewriting
   scheme, authority, port, or path; `agent_ip` is used only for the VPN route.
 - Group changes rebuild VPN routes and atomically swap the TUN fd in the native
-  MASQUE core.
-- Runtime downlink uses a client WebSocket; A2A uses the Agent TUN HTTP listener.
+  MASQUE core. Every TUN replacement also recreates the local TCP/UDP ingress
+  server after the native packet pump has taken ownership of the new fd. Route-key
+  changes whose aggregate destination set is unchanged do not rebuild the TUN.
+- Runtime downlink uses a client WebSocket with Ping-based failure detection and bounded
+  exponential reconnect; A2A uses the Agent TUN HTTP listener.
 
 ## Build and test
 
@@ -314,12 +320,25 @@ Generic 与 RayNeo App 的“停止”按钮会先以 `reason=normal` 调用
 `deregisterIdentity`，等待成功或明确失败并记录日志后，再关闭 SDK、MASQUE、TUN
 和本地服务；它与上述 local-only Reset 语义互不混用。
 
+Generic 与 RayNeo 运行页也提供 `Dump 日志`。它会生成一个可分享的文本诊断包，包含
+完整 App 流程日志、当前 SDK/群组端点、设备版本、网络接口与 Android 路由、进程可见的
+`/proc/self/net` socket 表、本地 A2A TCP 自检、按关键标签过滤的 App/SDK logcat，以及
+进程通用日志尾部。MASQUE Token
+不会写入文件。RayNeo 页面只保留少量可见日志，但 Dump 独立保留最近 2000 条流程记录。
+Android 10 及以上还会把文件写入公共 `Download/AgentLinkDiagnostics`；设备没有分享 App
+时可直接通过 USB 文件传输或 ADB 取回。
+
 Core-network downlink frames use `kind + request_id + message_type +
 transaction_id + payload`. Each frame is handled in its own coroutine, so
 responses may be returned out of order and are correlated only by `request_id`.
 Invitation acceptance and group-configuration acknowledgement copy the
 downlink `payload.group_info.group_id` and `payload.group_id`, respectively,
 into the response payload alongside `result`, using `ACCEPT` and `ACK`.
+After the initial Upgrade succeeds, Android sends a WebSocket Ping every 20 seconds and
+reconnects unexpected failures/closures with delays capped at 30 seconds. Calling `close()`
+cancels pending reconnects. A frame that was never delivered while the socket was disconnected
+can only be recovered if AgentRuntime retains or retries it; client reconnect alone cannot replay
+an unseen invitation.
 The local HTTP/1.1 listener now exposes only `/A2A/message` inside the CONNECT-IP
 path; the former Runtime callback paths are not available.
 
@@ -346,45 +365,70 @@ sdk.sendMessage(
 The wire body contains `src_agent_id`, `dst_agent_id`, `type`, `task_id`, and
 `payload`; the receiver returns `{"status":"OK"}` after validation.
 
-Camera/WebRTC calls use the `MediaOffloadAdapter` SPI. Source Agent B creates an
-offloading session with its committed `groupId`, then calls `startVideoUpload`
-with every Agent that should receive the processed stream:
+Camera/WebRTC calls use the `MediaOffloadAdapter` SPI. Source Agent C requests a
+network-assigned Sandbox by resource specification, then calls `startVideoUpload`.
+The upload call only starts media; it does not choose consumers or send A2A
+messages:
 
 ```kotlin
 val session = sdk.createOffloadingSession(
-    agentId = localAgentId,
     workloadType = "video_rendering",
-    groupId = groupId,
+    sandboxSpec = SandboxSpec(vcpus = 2, memoryMb = 4096),
 )
 val upload = sdk.startVideoUpload(
-    sessionId = session.sessionId,
-    targetAgentIds = listOf(agentAId, agentCId),
+    session = session,
     cameraId = "0",
-    width = 1280,
-    height = 720,
+    width = 640,
+    height = 480,
     fps = 30,
-    bitrateKbps = 2500,
+    bitrateKbps = 2400,
 )
 ```
 
-The media adapter must return from `startVideoUpload` only after the Video
-Server is pulling B's source track. The SDK then requests a separate processed
-stream ticket for each target from
-`POST /compute/v1/offloading-sessions/{session_id}/consumers` and sends a
-`processed_video_invitation` over the existing A2A group route. The request
-contains `group_id` and `target_agent_ids`; the response `consumers` object is
-keyed by Agent ID. A receiver imports the invitation before asking its adapter
-for the processed WebRTC track:
+The public creation call contains no `agentId`, `groupId`, or `sandboxId`.
+The allocation response contains both producer and processed-stream endpoints,
+and `OffloadingSession` contains no local Agent/group/Sandbox identity fields.
+The same Agent may therefore upload and consume its own processed stream:
 
 ```kotlin
-val consumer = sdk.acceptOffloadingSession(senderAgentId, groupId, payload)
-val track = sdk.getProcessedVideoStream(consumer.sessionId)
+val track = sdk.getProcessedVideoStream(session)
 ```
 
-Producer tokens are never copied into P2P messages. Consumer tickets are scoped
-to one target Agent. The application supplies an adapter backed by its chosen
-Android WebRTC distribution; unit tests use a deterministic fake so no camera
-or emulator is required.
+To let receiver E consume a stream produced by C, the application may serialize
+the necessary session fields and send them with the existing `sendMessage` API.
+It may also choose not to send them. E parses that application message into an
+`OffloadingSession` and calls `getProcessedVideoStream(session)`; this is an app
+protocol and does not add an SDK accept API. The Video Server sends a 30 fps
+placeholder until the producer's first processed source frame is ready, then switches the
+same monotonic-RTP track without another SDP exchange.
+
+Both `startVideoUpload(session, ...)` and `getProcessedVideoStream(session, ...)`
+read the Video Server IP, port/URL, and session ID from their session argument.
+The SDK contains no fixed Video Server address and no A/B role dependency. All
+required producer and processed-stream fields originate in the
+`createOffloadingSession` result and can be carried between arbitrary Agents.
+
+When the Video Server creates the source Offer, the Android producer is the
+Answerer. It must apply that remote Offer first, bind the camera Track to the
+video transceiver created for the offered MID, set it to `SEND_ONLY`, and only
+then create the Answer. Pre-creating an independent source transceiver can
+produce an ICE-connected session whose negotiated video section is inactive.
+
+The App uses `io.github.webrtc-sdk:android:150.7871.01`. Its source encoder
+factory supplements the upstream component-name gate with Android's actual
+`MediaCodecInfo.profileLevels`: it advertises H.264 High `64001f` only when a
+hardware encoder reports `AVCProfileHigh` Level 3.1 or newer, explicitly starts
+that encoder in High mode, and checks the profile-level-id in the first encoded
+SPS. The B flow log therefore contains the selected encoder and a
+`H264 High SPS 已校验` event. A device without that capability fails before SDP
+or camera startup instead of silently negotiating Baseline.
+
+WebRTC endpoints and signaling carry no business token, ticket, Bearer header,
+or proof. Agent identity is authenticated by the core-network session; ICE,
+DTLS, and SRTP remain enabled as intrinsic WebRTC protocol security. The
+application supplies an adapter backed by its chosen Android WebRTC
+distribution; unit tests use a deterministic fake so no camera or emulator is
+required.
 
 ### N6 / DN Mock 算力视频联调
 
@@ -397,12 +441,24 @@ or emulator is required.
 
 1. 启动 A（手机或 RayNeo）和 Generic App 角色 B，等双方日志显示群组已就绪。
 2. 在 B 点击“开始视频算力测试”，首次使用允许摄像头权限。
-3. B 日志依次出现 `COMPUTE CREATE`、`SOURCE_CONNECTED`、`VIDEO UPLOAD`；Mock
-   确认第一帧后才分发消费者 Ticket。
-4. A 无需点击按钮，会自动处理 `processed_video_invitation`。出现
-   `VIDEO STREAM` 和 `VIDEO FRAME frames=1` 表示处理后 WebRTC 下行成功。
-5. 在 DN 查看 `curl http://172.30.0.10:28500/debug/v1/sessions`，可以核对源帧数、
-   目标 Agent 和消费者连接数。
+3. B 日志出现 `COMPUTE CREATE` 后，应用先用 `sendMessage` 发送无凭据的 session
+   信息，再启动上传；A 可以在 B 首帧到达前完成下行 WebRTC，并先看到占位流。
+4. A 无需点击按钮，会自动处理应用定义的 `processed_video_session`。出现
+   `VIDEO STREAM` 和 `VIDEO FRAME frames=1` 后，“PROCESSED VIDEO”预览窗会直接
+   显示处理后画面；右上角 `LIVE` 来自实际绘制首帧回调。RayNeo 和非 Huawei
+   Generic 使用共享 EGL 上下文的 `TextureView` + WebRTC `EglRenderer`，解码纹理直接送入
+   独立 GL 渲染线程，不再经过 I420/JPEG/Bitmap；RayNeo 镜像界面继续使用
+   `SurfaceViewRenderer`，但与解码器共享同一个 EGL 根上下文。
+5. 在 DN 查看 `curl http://172.30.0.10:28500/debug/v1/sessions`，可以按 consumer
+   核对 `frames_processed`、`packets_sent`、`bytes_sent`、`codec`、首帧状态和
+   `keyframes_requested`；Server 会在 Answer 就绪、consumer 建连和占位流切换到
+   source 时主动补关键帧，并优先协商 H264。
+6. A 的 Dump 包含 `[WEBRTC INBOUND RTP]`，其中
+   `packetsReceived/bytesReceived/framesDecoded/framesDropped` 是 libwebrtc 单调计数；
+   `decoded_sink_callbacks` 用于确认解码后的 Java `VideoSink` 回调是否真正执行。
+7. A 的 Dump 还包含 `[VIDEO PREVIEW RENDERER]`，记录实际 renderer、是否已显示首帧
+   及最近分辨率；Huawei 兼容路径还会记录提交/显示/限速计数与转换错误，可直接区分
+   解码回调与页面显示状态。
 
 App 使用可选初始化参数指向 Mock；不传时生产默认行为不变，算力请求仍发往
 AgentRuntime：

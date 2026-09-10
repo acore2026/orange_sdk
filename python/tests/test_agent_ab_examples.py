@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from agent_sdk import AgentLifecycleState, NetworkMessageAction, NetworkMessageType
 
 
@@ -44,6 +46,14 @@ async def test_agent_a_discovers_b_groups_and_sends_from_group_cache():
     args = _base_arguments(module)
     assert args.prompt is False
     assert args.dnn == "internet"
+    assert args.fresh_registration is False
+    args.fresh_registration = True
+    args.deregister_on_exit = True
+    previous_profile = SimpleNamespace(
+        agent_id="did:example:a-old",
+        agent_name="Agent-A",
+        identity_vc={"id": "vc0-a-old"},
+    )
     profile = SimpleNamespace(
         agent_id="did:example:a",
         agent_name="Agent-A",
@@ -68,8 +78,8 @@ async def test_agent_a_discovers_b_groups_and_sends_from_group_cache():
         members_by_agent_id={target.agent_id: member}, generation=1
     )
     sdk = SimpleNamespace(
-        agent_lifecycle_state=AgentLifecycleState.NO_IDENTITY,
-        local_profile=None,
+        agent_lifecycle_state=AgentLifecycleState.CARD_PUBLISHED,
+        local_profile=previous_profile,
         register_network_message_listener=MagicMock(return_value=lambda: None),
         register_group_message_listener=MagicMock(return_value=lambda: None),
         init=AsyncMock(
@@ -82,6 +92,9 @@ async def test_agent_a_discovers_b_groups_and_sends_from_group_cache():
         apply_identity=AsyncMock(return_value=profile),
         get_network_ability=AsyncMock(return_value=ability),
         register_capabilities=AsyncMock(
+            return_value=SimpleNamespace(success=True, message="")
+        ),
+        deregister_identity=AsyncMock(
             return_value=SimpleNamespace(success=True, message="")
         ),
         discover_agents=AsyncMock(return_value=[target]),
@@ -117,6 +130,18 @@ async def test_agent_a_discovers_b_groups_and_sends_from_group_cache():
         "group-a-b",
         "did:example:b",
     )
+    assert sdk.deregister_identity.await_args_list[0].args == (
+        "did:example:a-old",
+    )
+    assert sdk.deregister_identity.await_args_list[0].kwargs == {
+        "reason": "replaced"
+    }
+    assert sdk.deregister_identity.await_args_list[1].args == (
+        "did:example:a",
+    )
+    assert sdk.deregister_identity.await_args_list[1].kwargs == {
+        "reason": "retired"
+    }
     sdk.close.assert_awaited_once()
 
 
@@ -124,7 +149,9 @@ async def test_agent_b_publishes_capability_and_can_exit_after_message_event():
     module = _load_example("agent_b_test")
     args = _base_arguments(module)
     assert args.prompt is False
+    assert args.fresh_registration is False
     args.exit_after_message = True
+    args.deregister_on_exit = True
     profile = SimpleNamespace(
         agent_id="did:example:b",
         agent_name="Agent-B",
@@ -152,6 +179,9 @@ async def test_agent_b_publishes_capability_and_can_exit_after_message_event():
         register_capabilities=AsyncMock(
             return_value=SimpleNamespace(success=True, message="")
         ),
+        deregister_identity=AsyncMock(
+            return_value=SimpleNamespace(success=True, message="")
+        ),
         close=AsyncMock(),
     )
     stop_event = asyncio.Event()
@@ -172,6 +202,9 @@ async def test_agent_b_publishes_capability_and_can_exit_after_message_event():
     assert (
         sdk.register_capabilities.await_args.kwargs["test_vc_private_key_path"]
         is None
+    )
+    sdk.deregister_identity.assert_awaited_once_with(
+        "did:example:b", reason="retired"
     )
     sdk.close.assert_awaited_once()
 
@@ -210,6 +243,103 @@ async def test_agent_b_reuses_published_profile_without_registering_again():
     assert result["agent_id"] == profile.agent_id
     sdk.apply_identity.assert_not_awaited()
     sdk.get_network_ability.assert_not_awaited()
+    sdk.register_capabilities.assert_not_awaited()
+    sdk.close.assert_awaited_once()
+
+
+async def test_agent_b_fresh_registration_replaces_persisted_profile():
+    module = _load_example("agent_b_test")
+    args = _base_arguments(module)
+    args.exit_after_message = True
+    args.fresh_registration = True
+    previous_profile = SimpleNamespace(
+        agent_id="did:example:b-old",
+        agent_name="Agent-B",
+        identity_vc={"id": "vc0-b-old"},
+    )
+    profile = SimpleNamespace(
+        agent_id="did:example:b-new",
+        agent_name="Agent-B",
+        identity_vc={"id": "vc0-b-new"},
+    )
+    ability = SimpleNamespace(
+        abilities=("agent_discovery",),
+        ability_vc={"id": "vc1-b-new"},
+        valid_until=None,
+    )
+    sdk = SimpleNamespace(
+        agent_lifecycle_state=AgentLifecycleState.CARD_PUBLISHED,
+        local_profile=previous_profile,
+        register_network_message_listener=MagicMock(return_value=lambda: None),
+        register_group_message_listener=MagicMock(return_value=lambda: None),
+        init=AsyncMock(
+            return_value=SimpleNamespace(
+                agent_tun_cidr="10.60.0.3/32",
+                agent_tcp_endpoint="10.60.0.3:4001",
+                masque_proxy_endpoint=args.masque_url,
+            )
+        ),
+        deregister_identity=AsyncMock(
+            return_value=SimpleNamespace(success=True, message="")
+        ),
+        apply_identity=AsyncMock(return_value=profile),
+        get_network_ability=AsyncMock(return_value=ability),
+        register_capabilities=AsyncMock(
+            return_value=SimpleNamespace(success=True, message="")
+        ),
+        close=AsyncMock(),
+    )
+    stop_event = asyncio.Event()
+    stop_event.set()
+
+    result = await module.run_agent_b(args, sdk=sdk, stop_event=stop_event)
+
+    assert result["agent_id"] == profile.agent_id
+    sdk.deregister_identity.assert_awaited_once_with(
+        previous_profile.agent_id, reason="replaced"
+    )
+    sdk.apply_identity.assert_awaited_once()
+    sdk.get_network_ability.assert_awaited_once_with(profile.agent_id)
+    sdk.register_capabilities.assert_awaited_once()
+    sdk.close.assert_awaited_once()
+
+
+async def test_agent_b_fresh_registration_fails_closed_when_cleanup_is_rejected():
+    module = _load_example("agent_b_test")
+    args = _base_arguments(module)
+    args.fresh_registration = True
+    previous_profile = SimpleNamespace(
+        agent_id="did:example:b-old",
+        agent_name="Agent-B",
+        identity_vc={"id": "vc0-b-old"},
+    )
+    sdk = SimpleNamespace(
+        agent_lifecycle_state=AgentLifecycleState.CARD_PUBLISHED,
+        local_profile=previous_profile,
+        register_network_message_listener=MagicMock(return_value=lambda: None),
+        register_group_message_listener=MagicMock(return_value=lambda: None),
+        init=AsyncMock(
+            return_value=SimpleNamespace(
+                agent_tun_cidr="10.60.0.3/32",
+                agent_tcp_endpoint="10.60.0.3:4001",
+                masque_proxy_endpoint=args.masque_url,
+            )
+        ),
+        deregister_identity=AsyncMock(
+            return_value=SimpleNamespace(
+                success=False, message="network rejected cleanup"
+            )
+        ),
+        apply_identity=AsyncMock(),
+        get_network_ability=AsyncMock(),
+        register_capabilities=AsyncMock(),
+        close=AsyncMock(),
+    )
+
+    with pytest.raises(RuntimeError, match="network rejected cleanup"):
+        await module.run_agent_b(args, sdk=sdk)
+
+    sdk.apply_identity.assert_not_awaited()
     sdk.register_capabilities.assert_not_awaited()
     sdk.close.assert_awaited_once()
 

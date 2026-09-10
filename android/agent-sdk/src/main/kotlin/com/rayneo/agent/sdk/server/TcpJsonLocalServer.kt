@@ -1,5 +1,6 @@
 package com.rayneo.agent.sdk.server
 
+import android.util.Log
 import com.rayneo.agent.sdk.AgentSdkException
 import com.rayneo.agent.sdk.ErrorCode
 import com.rayneo.agent.sdk.transport.LocalServer
@@ -8,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -51,10 +53,19 @@ class TcpJsonLocalServer(
             }
 
             udpSockets += DatagramSocket(null).apply {
-                reuseAddress = false
+                reuseAddress = true
                 bind(InetSocketAddress(InetAddress.getByName(agentIp), udpPort))
             }
+            Log.i(
+                TAG,
+                "Local ingress listeners started tcp=$agentIp:$tcpPort udp=$agentIp:$udpPort",
+            )
         } catch (error: Exception) {
+            Log.e(
+                TAG,
+                "Local ingress listener bind failed tcp=$agentIp:$tcpPort udp=$agentIp:$udpPort",
+                error,
+            )
             close()
             throw AgentSdkException(
                 ErrorCode.LOCAL_PORT_IN_USE,
@@ -66,7 +77,7 @@ class TcpJsonLocalServer(
 
     private fun bindTcp(address: String, port: Int): ServerSocket =
         ServerSocket().apply {
-            reuseAddress = false
+            reuseAddress = true
             bind(InetSocketAddress(InetAddress.getByName(address), port))
         }
 
@@ -77,9 +88,19 @@ class TcpJsonLocalServer(
         while (isActive && !server.isClosed) {
             val socket = try {
                 server.accept()
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                if (!server.isClosed && isActive) {
+                    Log.e(TAG, "Local TCP accept loop failed endpoint=${server.localSocketAddress}", error)
+                } else {
+                    Log.i(TAG, "Local TCP accept loop stopped endpoint=${server.localSocketAddress}")
+                }
                 break
             }
+            Log.i(
+                TAG,
+                "Local TCP connection accepted local=${socket.localSocketAddress} " +
+                    "remote=${socket.remoteSocketAddress}",
+            )
             launch { handleSocket(socket, handler) }
         }
     }
@@ -98,13 +119,31 @@ class TcpJsonLocalServer(
                 val bytes = readExactly(socket.getInputStream(), contentLength)
                 val payload = json.parseToJsonElement(bytes.decodeToString()) as? JsonObject
                     ?: throw IllegalArgumentException("JSON object required")
+                Log.i(
+                    TAG,
+                    "Local TCP request path=$path bytes=$contentLength " +
+                        "remote=${socket.remoteSocketAddress}",
+                )
                 writeResponse(output, 200, handler(path, payload))
+                Log.i(TAG, "Local TCP response status=200 remote=${socket.remoteSocketAddress}")
             } catch (error: AgentSdkException) {
+                Log.w(
+                    TAG,
+                    "Local TCP request rejected code=${error.code} " +
+                        "remote=${socket.remoteSocketAddress}",
+                    error,
+                )
                 writeResponse(output, 400, buildJsonObject {
                     put("error", error.code.name)
                     put("message", error.message ?: "SDK error")
                 })
             } catch (error: Exception) {
+                Log.w(
+                    TAG,
+                    "Local TCP bad request remote=${socket.remoteSocketAddress}: " +
+                        "${error::class.java.simpleName}: ${error.message ?: "no message"}",
+                    error,
+                )
                 writeResponse(output, 400, buildJsonObject {
                     put("error", "BAD_REQUEST")
                     put("message", error.message ?: "Bad request")
@@ -168,16 +207,24 @@ class TcpJsonLocalServer(
     }
 
     override suspend fun close() {
+        if (tcpSockets.isNotEmpty() || udpSockets.isNotEmpty()) {
+            Log.i(
+                TAG,
+                "Closing local ingress listeners tcp=${tcpSockets.map { it.localSocketAddress }} " +
+                    "udp=${udpSockets.map { it.localSocketAddress }}",
+            )
+        }
         tcpSockets.forEach { runCatching { it.close() } }
         udpSockets.forEach { runCatching { it.close() } }
         tcpSockets.clear()
         udpSockets.clear()
-        jobs.forEach { it.cancel() }
+        jobs.forEach { it.cancelAndJoin() }
         jobs.clear()
         scope.cancel()
     }
 
     private companion object {
+        const val TAG = "AgentSdkLocalServer"
         const val MAX_HEADER_BYTES = 16 * 1024
         const val MAX_BODY_BYTES = 1024 * 1024
     }

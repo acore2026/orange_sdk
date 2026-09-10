@@ -22,6 +22,14 @@ var (
 	handles        = map[int64]*core.Tunnel{}
 )
 
+const (
+	statDownlinkPackets = iota + 1
+	statDownlinkPacketsOverMTU
+	statDownlinkReadBufferTooSmall
+	statUplinkDatagramTooLarge
+	statMaxDownlinkPacketBytes
+)
+
 //export MasqueStart
 func MasqueStart(tunFD C.int, udpFD C.int, serverURL, authorization, agentTunCIDR, identityDirectory *C.char, mtu C.int) C.longlong {
 	configuration := core.Configuration{
@@ -56,6 +64,31 @@ func MasqueReplaceTun(handle C.longlong, tunFD C.int) C.int {
 		return 0
 	}
 	return 1
+}
+
+//export MasqueGetStat
+func MasqueGetStat(handle C.longlong, statistic C.int) C.ulonglong {
+	handlesMu.Lock()
+	tunnel := handles[int64(handle)]
+	handlesMu.Unlock()
+	if tunnel == nil {
+		return 0
+	}
+	stats := tunnel.Statistics()
+	var value uint64
+	switch int(statistic) {
+	case statDownlinkPackets:
+		value = stats.DownlinkPackets
+	case statDownlinkPacketsOverMTU:
+		value = stats.DownlinkPacketsOverMTU
+	case statDownlinkReadBufferTooSmall:
+		value = stats.DownlinkReadBufferTooSmall
+	case statUplinkDatagramTooLarge:
+		value = stats.UplinkDatagramTooLarge
+	case statMaxDownlinkPacketBytes:
+		value = stats.MaxDownlinkPacketBytes
+	}
+	return C.ulonglong(value)
 }
 
 //export MasqueStop

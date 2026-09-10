@@ -19,6 +19,7 @@ from agent_sdk import (
     AgentSdk,
     NetworkMessageAction,
     NetworkMessageType,
+    SandboxSpec,
 )
 from agent_sdk.routes import MemoryRouteBackend
 from agent_sdk.security import (
@@ -165,34 +166,23 @@ class DemoRuntime:
         if path == "/compute/v1/offloading-sessions":
             return {
                 "session_id": "session-demo",
-                "sandbox_id": "sandbox-demo",
                 "state": "ALLOCATED",
-                "group_id": "g-demo",
-                "source_agent_id": LOCAL_AGENT_ID,
                 "producer": {
                     "video_server_ip": "8.8.8.9",
                     "source_start_url": "https://8.8.8.9:28500/v1/source-pulls",
                     "source_stop_url": (
                         "https://8.8.8.9:28500/v1/source-pulls/session-demo"
                     ),
-                    "access_token": "demo-producer-token",
+                },
+                "processed_stream": {
+                    "video_server_ip": "8.8.8.9",
+                    "offer_url": "https://8.8.8.9:28500/v1/processed/offer",
+                    "protocol": "webrtc",
+                    "signaling": "non-trickle",
                 },
                 "expires_at": (
                     datetime.now(timezone.utc) + timedelta(minutes=30)
                 ).isoformat().replace("+00:00", "Z"),
-            }
-        if path == "/compute/v1/offloading-sessions/session-demo/consumers":
-            return {
-                "consumers": {
-                    target: {
-                        "video_server_ip": "8.8.8.9",
-                        "offer_url": "https://8.8.8.9:28500/v1/processed/offer",
-                        "access_ticket": f"demo-consumer-ticket-{index}",
-                        "protocol": "webrtc",
-                        "signaling": "non-trickle",
-                    }
-                    for index, target in enumerate(body["target_agent_ids"], 1)
-                }
             }
         return {"success": True, "operation_id": "operation-demo"}
 
@@ -359,7 +349,7 @@ async def run_demo(
             owner="demo-owner",
             name="Agent A",
             description="wheel installation self-check",
-            metadata={"region": "CN", "os": "Linux", "version": "0.17.1"},
+            metadata={"region": "CN", "os": "Linux", "version": "0.17.5"},
         )
         show("2 apply_identity", profile.agent_id)
 
@@ -422,14 +412,28 @@ async def run_demo(
         show("10 receive message", group_listener.received[-1][2])
 
         session = await sdk.create_offloading_session(
-            profile.agent_id,
             workload_type="video_rendering",
-            group_id=group.group_id,
-            sandbox_id="sandbox-demo",
+            sandbox_spec=SandboxSpec(vcpus=2, memory_mb=4096),
+        )
+        assert session.processed_stream is not None
+        await sdk.send_message(
+            group.group_id,
+            discovered[0].agent_id,
+            {
+                "type": "processed_video_session",
+                "session_id": session.session_id,
+                "processed_stream": {
+                    "video_server_ip": session.processed_stream.video_server_ip,
+                    "offer_url": session.processed_stream.offer_url,
+                    "protocol": session.processed_stream.protocol,
+                    "signaling": session.processed_stream.signaling,
+                },
+            },
+            message_type="processed_video_session",
+            task_id="task-demo",
         )
         upload = await sdk.start_video_upload(
-            session.session_id,
-            target_agent_ids=[discovered[0].agent_id],
+            session,
             width=1280,
             height=720,
             fps=30,
@@ -437,31 +441,7 @@ async def run_demo(
         )
         await upload.pause()
         await upload.resume()
-        consumer_session = await sdk.accept_offloading_session(
-            discovered[0].agent_id,
-            group.group_id,
-            {
-                "type": "processed_video_invitation",
-                "version": "1.0",
-                "session_id": "session-consumer-demo",
-                "group_id": group.group_id,
-                "source_agent_id": discovered[0].agent_id,
-                "consumer_agent_id": profile.agent_id,
-                "sandbox_id": "sandbox-demo",
-                "state": "SOURCE_CONNECTED",
-                "expires_at": (
-                    datetime.now(timezone.utc) + timedelta(minutes=30)
-                ).isoformat().replace("+00:00", "Z"),
-                "processed_stream": {
-                    "video_server_ip": "8.8.8.9",
-                    "offer_url": "https://8.8.8.9:28500/v1/processed/offer",
-                    "access_ticket": "demo-consumer-ticket-local",
-                    "protocol": "webrtc",
-                    "signaling": "non-trickle",
-                },
-            },
-        )
-        stream = await sdk.get_processed_video_stream(consumer_session.session_id)
+        stream = await sdk.get_processed_video_stream(session)
         frame = await stream.recv()
         await upload.stop()
         show("11 media offload", f"{session.state}, frame={frame!r}")
@@ -480,7 +460,7 @@ async def run_demo(
             "media_state": upload.state,
         }
         assert summary == {
-            "runtime_request_count": 9,
+            "runtime_request_count": 8,
             "group_id": "g-demo",
             "peer_endpoint": "http://agent-b:4001/A2A/message",
             "installed_route": True,

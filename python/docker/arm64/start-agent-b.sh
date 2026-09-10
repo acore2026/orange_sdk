@@ -1,0 +1,81 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "--help" ]; then
+    exec python /opt/agent-sdk/examples/agent_b_test.py --help
+fi
+if [ "$#" -ne 0 ]; then
+    printf '%s\n' 'start-agent-b.sh accepts configuration through environment variables only' >&2
+    exit 2
+fi
+
+require_value() {
+    value_name="$1"
+    value="$2"
+    if [ -z "${value}" ]; then
+        printf 'required environment variable is empty: %s\n' "${value_name}" >&2
+        exit 2
+    fi
+}
+
+is_true() {
+    case "$1" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+require_value AGENT_RUNTIME_IP "${AGENT_RUNTIME_IP:-}"
+require_value LOCAL_VLAN_IP "${LOCAL_VLAN_IP:-}"
+require_value MASQUE_URL "${MASQUE_URL:-}"
+
+if [ ! -c /dev/net/tun ]; then
+    printf '%s\n' '/dev/net/tun is unavailable; start the container with --device /dev/net/tun' >&2
+    exit 1
+fi
+
+if ! ip -o addr show | awk '{print $4}' | cut -d/ -f1 | grep -Fqx "${LOCAL_VLAN_IP}"; then
+    printf 'LOCAL_VLAN_IP is not assigned inside this network namespace: %s\n' "${LOCAL_VLAN_IP}" >&2
+    printf '%s\n' 'Pass the IPv4 address assigned to this container network namespace.' >&2
+    exit 1
+fi
+
+AGENT_LOG_FILE="${AGENT_LOG_FILE:-/var/log/agent-sdk/agent-b.log}"
+mkdir -p "$(dirname -- "${AGENT_LOG_FILE}")" "${XDG_STATE_HOME:-/var/lib/agent-sdk}"
+
+set -- \
+    --runtime-ip "${AGENT_RUNTIME_IP}" \
+    --runtime-port "${AGENT_RUNTIME_PORT:-8080}" \
+    --local-vlan-ip "${LOCAL_VLAN_IP}" \
+    --tcp-port "${AGENT_TCP_PORT:-4001}" \
+    --udp-port "${AGENT_UDP_PORT:-28443}" \
+    --masque-url "${MASQUE_URL}" \
+    --tun-name "${AGENT_TUN_NAME:-agent_tun_b}" \
+    --tun-mtu "${AGENT_TUN_MTU:-1280}" \
+    --agent-name "${AGENT_NAME:-Agent-B}" \
+    --owner "${AGENT_OWNER:-ab-test-owner-b}" \
+    --description "${AGENT_DESCRIPTION:-Agent B capability provider test}" \
+    --region "${AGENT_REGION:-CN}" \
+    --capability "${AGENT_CAPABILITY:-text}" \
+    --priority "${AGENT_PRIORITY:-1}" \
+    --wait-timeout "${AGENT_WAIT_TIMEOUT:-0}" \
+    --log-file "${AGENT_LOG_FILE}" \
+    --log-level "${AGENT_LOG_LEVEL:-INFO}"
+
+if [ -n "${MASQUE_TOKEN:-}" ]; then
+    set -- "$@" --masque-token "${MASQUE_TOKEN}"
+fi
+if [ -n "${AGENT_THIRD_PARTY_PRIVATE_KEY:-}" ]; then
+    set -- "$@" --third-party-private-key "${AGENT_THIRD_PARTY_PRIVATE_KEY}"
+fi
+if is_true "${AGENT_EXIT_AFTER_MESSAGE:-false}"; then
+    set -- "$@" --exit-after-message
+fi
+if is_true "${AGENT_FRESH_REGISTRATION:-true}"; then
+    set -- "$@" --fresh-registration
+fi
+if is_true "${AGENT_DEREGISTER_ON_EXIT:-true}"; then
+    set -- "$@" --deregister-on-exit
+fi
+
+exec python /opt/agent-sdk/examples/agent_b_test.py "$@"

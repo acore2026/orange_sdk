@@ -284,7 +284,14 @@ start:
 		log.Printf("dropping proxied packet: %s", err)
 		goto start
 	}
-	return copy(b, data[n:]), nil
+	return copyPacket(b, data[n:])
+}
+
+func copyPacket(destination, packet []byte) (int, error) {
+	if len(packet) > len(destination) {
+		return 0, io.ErrShortBuffer
+	}
+	return copy(destination, packet), nil
 }
 
 func (c *Conn) handleIncomingProxiedPacket(data []byte) error {

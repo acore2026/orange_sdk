@@ -14,5 +14,7 @@ class NativeMasqueTransportThreadingTest {
         assertTrue(source.contains("withContext(Dispatchers.IO)"))
         assertTrue(source.contains("withContext(NonCancellable + Dispatchers.IO)"))
         assertTrue(source.contains("bridge.nativeStop(startedHandle)"))
+        assertTrue(source.contains("nativeGetStat"))
+        assertTrue(source.contains("lastStatistics = bridge.statistics(currentHandle)"))
     }
 }

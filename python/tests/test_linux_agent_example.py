@@ -133,7 +133,17 @@ async def test_linux_agent_full_flow_executes_every_business_api():
             return_value=SimpleNamespace(message_id="message-1", delivered=True)
         ),
         create_offloading_session=AsyncMock(
-            return_value=SimpleNamespace(session_id="session-1", state="CONNECTED")
+            return_value=SimpleNamespace(
+                session_id="session-1",
+                state="ALLOCATED",
+                expires_at=None,
+                processed_stream=SimpleNamespace(
+                    video_server_ip="172.30.0.10",
+                    offer_url="http://172.30.0.10:28500/processed",
+                    protocol="webrtc",
+                    signaling="non-trickle",
+                ),
+            )
         ),
         start_video_upload=AsyncMock(return_value=upload),
         get_processed_video_stream=AsyncMock(return_value=stream),
@@ -158,10 +168,22 @@ async def test_linux_agent_full_flow_executes_every_business_api():
         sdk.create_offloading_session.await_args.kwargs["workload_type"]
         == "video_rendering"
     )
-    assert sdk.create_offloading_session.await_args.kwargs["group_id"] == "g1"
-    assert sdk.start_video_upload.await_args.kwargs["target_agent_ids"] == [
-        target.agent_id
-    ]
+    sandbox_spec = sdk.create_offloading_session.await_args.kwargs["sandbox_spec"]
+    assert sandbox_spec.vcpus == 2
+    assert sandbox_spec.memory_mb == 4096
+    assert "agent_id" not in sdk.create_offloading_session.await_args.kwargs
+    assert "group_id" not in sdk.create_offloading_session.await_args.kwargs
+    assert "sandbox_id" not in sdk.create_offloading_session.await_args.kwargs
+    assert "target_agent_ids" not in sdk.start_video_upload.await_args.kwargs
+    assert sdk.send_message.await_count == 2
+    session_message = sdk.send_message.await_args_list[1].args[2]
+    assert session_message["type"] == "processed_video_session"
+    assert "consumer_agent_id" not in session_message
+    assert "source_agent_id" not in session_message
+    assert "group_id" not in session_message
+    assert "sandbox_id" not in session_message
+    assert "access_ticket" not in str(session_message)
+    assert "access_token" not in str(session_message)
     for method_name in (
         "init",
         "apply_identity",
@@ -192,6 +214,7 @@ async def test_linux_agent_full_flow_executes_every_business_api():
         "sdk.get_group_snapshot",
         "sdk.send_message",
         "sdk.create_offloading_session",
+        "sdk.send_message",
         "sdk.start_video_upload",
         "upload.pause",
         "upload.resume",

@@ -13,6 +13,8 @@ services:
       UE_INTERNET_CIDR: "10.60.0.0/16"
       UE_ACN_CIDR: "10.61.0.0/16"
       LOG_LEVEL: "INFO"
+      MOCK_VIDEO_OUTPUT_FPS: "30"
+      MOCK_VIDEO_H264_RTP_PAYLOAD_BYTES: "1150"
     networks:
       n6:
         ipv4_address: 172.30.0.10

@@ -144,6 +144,74 @@ class OkHttpRuntimeTransportTest {
         }
     }
 
+    @Test
+    fun `downlink websocket reconnects after an unexpected server close`() = runTest {
+        val server = MockWebServer()
+        val firstOpened = CompletableDeferred<WebSocket>()
+        val secondOpened = LinkedBlockingQueue<WebSocket>()
+        val responses = LinkedBlockingQueue<String>()
+        server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                firstOpened.complete(webSocket)
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                webSocket.close(code, reason)
+            }
+        }))
+        server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                secondOpened.put(webSocket)
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                responses.put(text)
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                webSocket.close(code, reason)
+            }
+        }))
+        server.start()
+        val transport = OkHttpRuntimeTransport(
+            server.hostName,
+            server.port,
+            reconnectInitialDelayMillis = 10,
+            reconnectMaxDelayMillis = 20,
+        )
+        try {
+            transport.startDownlink { _, _, _ -> NetworkMessageAction.ACK }
+            firstOpened.await().close(1011, "simulated runtime restart")
+            val reconnected = checkNotNull(secondOpened.poll(2, TimeUnit.SECONDS)) {
+                "downlink WebSocket did not reconnect"
+            }
+
+            reconnected.send(downlinkRequest(
+                requestId = "delivery-after-reconnect",
+                messageType = "ACN_AGENT_GROUPING_NOTIFICATION",
+                transactionId = 51,
+                groupId = "group-after-reconnect",
+                sequence = 3,
+            ))
+            assertEquals(
+                buildJsonObject {
+                    put("kind", "response")
+                    put("request_id", "delivery-after-reconnect")
+                    put("payload", buildJsonObject {
+                        put("group_id", "group-after-reconnect")
+                        put("result", "ACK")
+                    })
+                },
+                Json.parseToJsonElement(responses.poll(2, TimeUnit.SECONDS)),
+            )
+            assertEquals(DOWNLINK_WEBSOCKET_PATH, server.takeRequest(2, TimeUnit.SECONDS)?.path)
+            assertEquals(DOWNLINK_WEBSOCKET_PATH, server.takeRequest(2, TimeUnit.SECONDS)?.path)
+        } finally {
+            transport.close()
+            server.shutdown()
+        }
+    }
+
     private fun downlinkRequest(
         requestId: String,
         messageType: String,

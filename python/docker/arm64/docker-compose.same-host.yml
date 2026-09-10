@@ -1,0 +1,73 @@
+name: agent-sdk-ab
+
+services:
+  agent-a:
+    image: "${AGENT_IMAGE:-agent-connect-sdk:0.17.5-arm64}"
+    container_name: agent-sdk-a
+    command: ["start-agent-a.sh"]
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      AGENT_RUNTIME_IP: "${AGENT_A_RUNTIME_IP:-172.29.100.1}"
+      AGENT_RUNTIME_PORT: "${AGENT_A_RUNTIME_PORT:-8088}"
+      LOCAL_VLAN_IP: "${AGENT_A_CONTAINER_IP:-172.29.100.2}"
+      MASQUE_URL: "${AGENT_A_MASQUE_URL:-https://172.29.100.1:8443/.well-known/masque/ip}"
+      MASQUE_TOKEN: "${AGENT_A_MASQUE_TOKEN:-}"
+      AGENT_TUN_NAME: "${AGENT_A_TUN_NAME:-agent_tun0}"
+      AGENT_TUN_MTU: "${AGENT_TUN_MTU:-1280}"
+      AGENT_LOG_FILE: /var/log/agent-sdk/agent-a.log
+      AGENT_TARGET_CAPABILITY: "${AGENT_TARGET_CAPABILITY:-text}"
+      AGENT_FRESH_REGISTRATION: "${AGENT_FRESH_REGISTRATION:-true}"
+      AGENT_DEREGISTER_ON_EXIT: "${AGENT_DEREGISTER_ON_EXIT:-true}"
+    networks:
+      agent-access:
+        ipv4_address: "${AGENT_A_CONTAINER_IP:-172.29.100.2}"
+    volumes:
+      - agent-a-state:/var/lib/agent-sdk
+      - agent-a-logs:/var/log/agent-sdk
+    stop_grace_period: 15s
+
+  agent-b:
+    image: "${AGENT_IMAGE:-agent-connect-sdk:0.17.5-arm64}"
+    container_name: agent-sdk-b
+    command: ["start-agent-b.sh"]
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      AGENT_RUNTIME_IP: "${AGENT_B_RUNTIME_IP:-172.29.100.1}"
+      AGENT_RUNTIME_PORT: "${AGENT_B_RUNTIME_PORT:-8089}"
+      LOCAL_VLAN_IP: "${AGENT_B_CONTAINER_IP:-172.29.100.3}"
+      MASQUE_URL: "${AGENT_B_MASQUE_URL:-https://172.29.100.1:8444/.well-known/masque/ip}"
+      MASQUE_TOKEN: "${AGENT_B_MASQUE_TOKEN:-}"
+      AGENT_TUN_NAME: "${AGENT_B_TUN_NAME:-agent_tun0}"
+      AGENT_TUN_MTU: "${AGENT_TUN_MTU:-1280}"
+      AGENT_LOG_FILE: /var/log/agent-sdk/agent-b.log
+      AGENT_CAPABILITY: "${AGENT_CAPABILITY:-text}"
+      AGENT_FRESH_REGISTRATION: "${AGENT_FRESH_REGISTRATION:-true}"
+      AGENT_DEREGISTER_ON_EXIT: "${AGENT_DEREGISTER_ON_EXIT:-true}"
+    networks:
+      agent-access:
+        ipv4_address: "${AGENT_B_CONTAINER_IP:-172.29.100.3}"
+    volumes:
+      - agent-b-state:/var/lib/agent-sdk
+      - agent-b-logs:/var/log/agent-sdk
+    stop_grace_period: 15s
+
+networks:
+  agent-access:
+    name: "${AGENT_ACCESS_NETWORK:-agent-sdk-access}"
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "${AGENT_ACCESS_SUBNET:-172.29.100.0/24}"
+          gateway: "${AGENT_ACCESS_GATEWAY:-172.29.100.1}"
+
+volumes:
+  agent-a-state:
+  agent-a-logs:
+  agent-b-state:
+  agent-b-logs:

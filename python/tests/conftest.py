@@ -129,10 +129,7 @@ class FakeRuntime:
         if path == "/compute/v1/offloading-sessions":
             return {
                 "session_id": "session-1",
-                "sandbox_id": "sandbox-edge-1",
                 "state": "ALLOCATED",
-                "group_id": "g1",
-                "source_agent_id": LOCAL_ID,
                 "expires_at": "2027-08-18T12:00:00Z",
                 "producer": {
                     "video_server_ip": "8.8.8.9",
@@ -140,21 +137,13 @@ class FakeRuntime:
                     "source_stop_url": (
                         "https://8.8.8.9:28500/v1/source-pulls/session-1"
                     ),
-                    "access_token": "producer-token",
                 },
-            }
-        if path == "/compute/v1/offloading-sessions/session-1/consumers":
-            return {
-                "consumers": {
-                    target: {
-                        "video_server_ip": "8.8.8.9",
-                        "offer_url": "https://8.8.8.9:28500/v1/processed/offer",
-                        "access_ticket": f"consumer-ticket-{index}",
-                        "protocol": "webrtc",
-                        "signaling": "non-trickle",
-                    }
-                    for index, target in enumerate(body["target_agent_ids"], 1)
-                }
+                "processed_stream": {
+                    "video_server_ip": "8.8.8.9",
+                    "offer_url": "https://8.8.8.9:28500/v1/processed/offer",
+                    "protocol": "webrtc",
+                    "signaling": "non-trickle",
+                },
             }
         return {"success": True, "operation_id": "op-1"}
 

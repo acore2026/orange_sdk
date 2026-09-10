@@ -49,6 +49,7 @@ interface TunnelController {
     suspend fun replaceGroupPeers(groupId: String, peerIps: Set<String>)
     fun currentAllowedPeerIps(): Set<String>
     fun setTunFdSwapper(swapper: suspend (Int) -> Unit)
+    fun setTunReplacedListener(listener: suspend () -> Unit) = Unit
     suspend fun close()
 }
 
@@ -69,8 +70,17 @@ interface MasqueTransport {
     val connected: Boolean
     suspend fun start(tunFd: Int, configuration: MasqueConfiguration)
     suspend fun replaceTunFd(tunFd: Int)
+    fun statistics(): MasqueTransportStatistics = MasqueTransportStatistics()
     suspend fun close()
 }
+
+data class MasqueTransportStatistics(
+    val downlinkPackets: Long = 0,
+    val downlinkPacketsOverTunMtu: Long = 0,
+    val downlinkReadBufferTooSmall: Long = 0,
+    val uplinkDatagramTooLarge: Long = 0,
+    val maxDownlinkPacketBytes: Long = 0,
+)
 
 interface LocalServer {
     suspend fun start(

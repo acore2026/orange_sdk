@@ -4,6 +4,7 @@ import com.rayneo.agent.sdk.AgentSdkException
 import com.rayneo.agent.sdk.ErrorCode
 import com.rayneo.agent.sdk.transport.MasqueConfiguration
 import com.rayneo.agent.sdk.transport.MasqueTransport
+import com.rayneo.agent.sdk.transport.MasqueTransportStatistics
 import com.rayneo.agent.sdk.vpn.AgentVpnService
 import androidx.annotation.Keep
 import kotlinx.coroutines.CancellationException
@@ -18,6 +19,11 @@ class NativeMasqueBridge(
         private val libraryLoadError = runCatching {
             System.loadLibrary("masque_core")
         }.exceptionOrNull()
+        private const val STAT_DOWNLINK_PACKETS = 1
+        private const val STAT_DOWNLINK_PACKETS_OVER_TUN_MTU = 2
+        private const val STAT_DOWNLINK_READ_BUFFER_TOO_SMALL = 3
+        private const val STAT_UPLINK_DATAGRAM_TOO_LARGE = 4
+        private const val STAT_MAX_DOWNLINK_PACKET_BYTES = 5
     }
 
     external fun nativeStart(
@@ -31,6 +37,7 @@ class NativeMasqueBridge(
     ): Long
 
     external fun nativeReplaceTunFd(handle: Long, tunFd: Int): Boolean
+    external fun nativeGetStat(handle: Long, statistic: Int): Long
     external fun nativeStop(handle: Long)
 
     fun start(
@@ -62,16 +69,29 @@ class NativeMasqueBridge(
 
     @Keep
     fun protectQuicSocket(socketFd: Int): Boolean = vpnService.protectQuicSocket(socketFd)
+
+    fun statistics(handle: Long): MasqueTransportStatistics = MasqueTransportStatistics(
+        downlinkPackets = nativeGetStat(handle, STAT_DOWNLINK_PACKETS),
+        downlinkPacketsOverTunMtu = nativeGetStat(handle, STAT_DOWNLINK_PACKETS_OVER_TUN_MTU),
+        downlinkReadBufferTooSmall = nativeGetStat(handle, STAT_DOWNLINK_READ_BUFFER_TOO_SMALL),
+        uplinkDatagramTooLarge = nativeGetStat(handle, STAT_UPLINK_DATAGRAM_TOO_LARGE),
+        maxDownlinkPacketBytes = nativeGetStat(handle, STAT_MAX_DOWNLINK_PACKET_BYTES),
+    )
+
 }
 
 class NativeMasqueTransport(
     private val bridge: NativeMasqueBridge,
 ) : MasqueTransport {
+    @Volatile
     private var handle: Long = 0
+    @Volatile
+    private var lastStatistics = MasqueTransportStatistics()
     override var connected: Boolean = false
         private set
 
     override suspend fun start(tunFd: Int, configuration: MasqueConfiguration) {
+        lastStatistics = MasqueTransportStatistics()
         var startedHandle = 0L
         try {
             withContext(Dispatchers.IO) {
@@ -119,8 +139,17 @@ class NativeMasqueTransport(
         }
     }
 
+    override fun statistics(): MasqueTransportStatistics {
+        val currentHandle = handle
+        if (currentHandle == 0L) return lastStatistics
+        return bridge.statistics(currentHandle).also { lastStatistics = it }
+    }
+
     override suspend fun close() {
         val currentHandle = handle
+        if (currentHandle != 0L) {
+            lastStatistics = bridge.statistics(currentHandle)
+        }
         handle = 0
         connected = false
         if (currentHandle != 0L) {
