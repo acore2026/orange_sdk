@@ -78,6 +78,7 @@ class MainActivity : Activity() {
     private var stopButton: TextView? = null
     private var logOutput: TextView? = null
     private var logScroll: ScrollView? = null
+    private var controlScroll: ScrollView? = null
     private var manualMessagePanel: View? = null
     private var manualRouteLabel: TextView? = null
     private var manualMessageInput: EditText? = null
@@ -134,6 +135,8 @@ class MainActivity : Activity() {
         computeVideoAvailable = false
         computeVideoStarting = false
         pendingVideoStart = false
+        controlScroll = null
+        logScroll = null
         resetButton = null
         resetAvailable = false
         resetArmed = false
@@ -403,7 +406,10 @@ class MainActivity : Activity() {
             })
         })
 
-        root.addView(LinearLayout(this).apply {
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        controls.addView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(14), dp(16), dp(14))
             background = rounded(Palette.INK_SURFACE, 14f, Palette.INK_LINE)
@@ -425,21 +431,36 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(18) })
 
         if (config.role == TestRole.A) {
-            root.addView(processedVideoPreview(), LinearLayout.LayoutParams(
+            controls.addView(processedVideoPreview(), LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(12) })
         }
 
-        root.addView(manualMessageComposer(config), LinearLayout.LayoutParams(
+        controls.addView(manualMessageComposer(config), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(12) })
 
-        root.addView(computeVideoControls(), LinearLayout.LayoutParams(
+        controls.addView(computeVideoControls(), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(12) })
+
+        controlScroll = ScrollView(this).apply {
+            isFillViewport = true
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            addView(controls, ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+        }.also {
+            root.addView(it, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1.15f,
+            ))
+        }
 
         logOutput = TextView(this).apply {
             setTextColor(Palette.LOG_TEXT)
@@ -459,8 +480,8 @@ class MainActivity : Activity() {
         root.addView(logScroll, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             0,
-            1f,
-        ))
+            .85f,
+        ).apply { topMargin = dp(8) })
 
         root.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -739,8 +760,12 @@ class MainActivity : Activity() {
     private fun setComputeActionAvailable(available: Boolean) {
         runOnUiThread {
             computeVideoAvailable = available
+            val reveal = available && computeVideoPanel?.visibility != View.VISIBLE
             computeVideoPanel?.visibility = if (available || computeVideoStarting) View.VISIBLE else View.GONE
             updateComputeVideoButton()
+            if (reveal) {
+                controlScroll?.post { controlScroll?.fullScroll(View.FOCUS_DOWN) }
+            }
         }
     }
 
@@ -824,6 +849,7 @@ class MainActivity : Activity() {
             computeVideoAvailable = true
             computeVideoPanel?.visibility = View.VISIBLE
             updateComputeVideoButton()
+            controlScroll?.post { controlScroll?.fullScroll(View.FOCUS_DOWN) }
             startComputeVideo()
         }
     }
