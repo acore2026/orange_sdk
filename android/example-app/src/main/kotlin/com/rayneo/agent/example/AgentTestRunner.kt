@@ -191,7 +191,7 @@ class AgentTestRunner(
                     metadata = buildJsonObject {
                         put("region", "CN")
                         put("os", "Android")
-                        put("version", "0.2.28")
+                        put("version", "0.2.29")
                     },
                 )
             }
@@ -447,7 +447,7 @@ class AgentTestRunner(
             height = 480,
             fps = 30,
             bitrateKbps = 2400,
-            timeoutSeconds = 30.0,
+            timeoutSeconds = 120.0,
         ).also { handle ->
             onLog(
                 LabLogLevel.SUCCESS,
@@ -620,7 +620,7 @@ class AgentTestRunner(
 
     private suspend fun connectProcessedVideo(sessionId: String) {
         try {
-            val stream = sdk.getProcessedVideoStream(sessionId, timeoutSeconds = 30.0)
+            val stream = sdk.getProcessedVideoStream(sessionId, timeoutSeconds = 120.0)
             processedVideoStream = stream
             val track = stream.track
             var frames = 0L

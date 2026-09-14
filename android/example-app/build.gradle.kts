@@ -11,8 +11,8 @@ android {
         applicationId = "com.rayneo.agent.example"
         minSdk = 26
         targetSdk = 34
-        versionCode = 30
-        versionName = "0.2.28"
+        versionCode = 31
+        versionName = "0.2.29"
     }
 
     flavorDimensions += "deployment"

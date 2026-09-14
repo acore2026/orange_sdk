@@ -51,6 +51,7 @@ def test_agent_b_defaults_to_the_bundled_local_video():
     assert args.video_source == "file"
     assert args.loop_video is True
     assert args.capability == "dog-vision"
+    assert args.media_timeout == 120.0
     assert "local_vlan_ip" not in vars(args)
     assert Path(args.video_file).resolve().is_file()
 
@@ -61,6 +62,7 @@ def test_linux_ab_defaults_use_the_android_dog_vision_capability():
 
     assert agent_a.target_capability == "dog-vision"
     assert agent_a.compute_capability_id == "dog-vision"
+    assert agent_a.media_timeout == 120.0
     assert agent_b.capability == "dog-vision"
 
 
@@ -208,7 +210,7 @@ async def test_agent_a_runs_acn_and_computing_consumer_flow():
     assert query_request.request_type is ComputeRequestType.QUERY
     assert query_request.compute_service_session_id == "compute-session-1"
     sdk.get_processed_video_stream.assert_awaited_once_with(
-        "compute-session-1", timeout_seconds=30.0
+        "compute-session-1", timeout_seconds=120.0
     )
     stream.recv.assert_awaited_once()
     stream.close.assert_awaited_once()
@@ -608,7 +610,7 @@ async def test_agent_b_queues_session_then_starts_video_outside_callback():
         height=720,
         fps=30,
         bitrate_kbps=2500,
-        timeout_seconds=30.0,
+        timeout_seconds=120.0,
     )
     upload.stop.assert_not_awaited()
     sdk.close.assert_awaited_once()

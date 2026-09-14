@@ -966,7 +966,7 @@ class AgentSdk internal constructor(
         height: Int = 1080,
         fps: Int = 30,
         bitrateKbps: Int = 4000,
-        timeoutSeconds: Double = 15.0,
+        timeoutSeconds: Double = 120.0,
     ): VideoUploadHandle {
         if (timeoutSeconds <= 0.0) {
             throw AgentSdkException(
@@ -1091,7 +1091,7 @@ class AgentSdk internal constructor(
 
     suspend fun getProcessedVideoStream(
         computeServiceSessionId: String,
-        timeoutSeconds: Double = 15.0,
+        timeoutSeconds: Double = 120.0,
     ): ProcessedVideoStream {
         if (timeoutSeconds <= 0.0) {
             throw AgentSdkException(

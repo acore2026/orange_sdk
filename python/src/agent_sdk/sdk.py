@@ -1574,7 +1574,7 @@ class AgentSdk:
         height: int = 1080,
         fps: int = 30,
         bitrate_kbps: int = 4000,
-        timeout_seconds: float = 15.0,
+        timeout_seconds: float = 120.0,
     ) -> VideoUploadHandle:
         if timeout_seconds <= 0:
             raise AgentSdkError(
@@ -1704,7 +1704,7 @@ class AgentSdk:
     async def get_processed_video_stream(
         self,
         compute_service_session_id: str,
-        timeout_seconds: float = 15.0,
+        timeout_seconds: float = 120.0,
     ) -> RemoteVideoStream:
         if timeout_seconds <= 0:
             raise AgentSdkError(

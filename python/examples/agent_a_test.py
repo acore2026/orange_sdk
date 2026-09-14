@@ -773,7 +773,12 @@ def parser() -> argparse.ArgumentParser:
         default="release",
         help="action sent after the requested number of processed frames",
     )
-    value.add_argument("--media-timeout", type=float, default=30.0)
+    value.add_argument(
+        "--media-timeout",
+        type=float,
+        default=120.0,
+        help="seconds to wait for asynchronous C-02 and WebRTC negotiation",
+    )
     value.add_argument(
         "--frame-count",
         type=_non_negative_int,

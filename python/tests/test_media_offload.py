@@ -231,7 +231,7 @@ async def test_c02_is_accepted_internally_and_consumer_media_uses_cached_endpoin
     assert (method, url, timeout, source_ipv4) == (
         "POST",
         "http://8.8.8.9:8788/v1/media-connections",
-        15.0,
+        120.0,
         "8.8.8.7",
     )
     assert body["computing_context"] == {

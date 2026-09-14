@@ -2,6 +2,26 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-14 — 延长异步算网配置等待时间
+
+### 修改原因
+
+- CREATE 的 `ACCEPTED` 响应早于参与端确认、资源激活和 C-02 下发；Linux B 原先收到
+  session ID 后只等待 30 秒，可能在网侧仍处于最长 60 秒参与端等待和 30 秒资源激活时
+  主动关闭 SDK，导致后续 producer C-02 无法投递。
+
+### 修改方式
+
+- Python/Android SDK 的视频上传和处理流接口默认等待时间统一为 120 秒；Android A/B
+  测试流程和 Linux A/B 脚本显式采用相同值。
+- ARM 启动脚本、Compose、环境变量示例及 Python 接口说明同步更新；Android App 升级为
+  `0.2.29`，便于确认设备已安装本次修复。
+
+### 验证内容
+
+- Python 全量测试、Android SDK/App 测试、两种 Android debug APK 构建、Shell 语法和
+  Docker Compose 配置检查通过。
+
 ## 2026-09-14 — Linux 初始化移除必填物理网卡 IP
 
 ### 修改原因

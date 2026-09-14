@@ -80,7 +80,7 @@ set -- \
     --video-height "${AGENT_VIDEO_HEIGHT:-720}" \
     --video-fps "${AGENT_VIDEO_FPS:-30}" \
     --video-bitrate-kbps "${AGENT_VIDEO_BITRATE_KBPS:-2500}" \
-    --media-timeout "${AGENT_MEDIA_TIMEOUT:-30}" \
+    --media-timeout "${AGENT_MEDIA_TIMEOUT:-120}" \
     --session-close-timeout "${AGENT_SESSION_CLOSE_TIMEOUT:-60}" \
     --max-sessions "${AGENT_MAX_SESSIONS:-1}" \
     --log-file "${AGENT_LOG_FILE}" \

@@ -560,7 +560,12 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--video-height", type=int, default=720)
     value.add_argument("--video-fps", type=int, default=30)
     value.add_argument("--video-bitrate-kbps", type=int, default=2500)
-    value.add_argument("--media-timeout", type=float, default=30.0)
+    value.add_argument(
+        "--media-timeout",
+        type=float,
+        default=120.0,
+        help="seconds to wait for asynchronous C-02 and WebRTC negotiation",
+    )
     value.add_argument(
         "--session-close-timeout",
         type=float,

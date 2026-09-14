@@ -71,7 +71,7 @@ set -- \
     --compute-memory-mib "${AGENT_COMPUTE_MEMORY_MIB:-4096}" \
     --compute-timeout "${AGENT_COMPUTE_TIMEOUT:-30}" \
     --terminal-action "${AGENT_COMPUTE_TERMINAL_ACTION:-release}" \
-    --media-timeout "${AGENT_MEDIA_TIMEOUT:-30}" \
+    --media-timeout "${AGENT_MEDIA_TIMEOUT:-120}" \
     --frame-count "${AGENT_PROCESSED_FRAME_COUNT:-1}" \
     --frame-timeout "${AGENT_PROCESSED_FRAME_TIMEOUT:-30}" \
     --log-file "${AGENT_LOG_FILE}" \

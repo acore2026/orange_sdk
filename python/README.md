@@ -658,7 +658,7 @@ C-03。C-04 按 `status_revision` 去重。C-05 会停止该会话的媒体对�
 `service_endpoint + media_connections_path` 生成完整内部 URL。consumer 使用：
 
 ```python
-stream = await sdk.get_processed_video_stream(session_id, timeout_seconds=15.0)
+stream = await sdk.get_processed_video_stream(session_id, timeout_seconds=120.0)
 frame = await stream.recv()
 # 不再使用时释放本地 PeerConnection，并自动 DELETE Sandbox 媒体资源
 await stream.close()
@@ -674,7 +674,7 @@ upload = await sdk.start_video_upload(
     height=720,
     fps=30,
     bitrate_kbps=2500,
-    timeout_seconds=15.0,
+    timeout_seconds=120.0,
 )
 ```
 
@@ -1204,8 +1204,8 @@ ss -lunp | grep <MASQUE端口>
 | `query_computing_session(request, ...)` | 按会话 ID 或原 CREATE request ID 查询状态 | `ComputeSessionStatus` |
 | `cancel_computing_session(request, ...)` | 按会话 ID 或原 CREATE request ID 取消请求 | `ComputeSessionStatus` |
 | `release_computing_session(request, ...)` | 释放指定正式算力会话 | `ComputeSessionStatus` |
-| `start_video_upload(compute_service_session_id, ..., timeout_seconds=15)` | producer 等待 C-02，创建完整 sendonly Offer，内部完成 Sandbox 协商；`stop()` 自动 DELETE 媒体资源 | `VideoUploadHandle` |
-| `get_processed_video_stream(compute_service_session_id, timeout_seconds=15)` | consumer 等待 C-02，创建完整 recvonly Offer，内部完成 Sandbox 协商；`close()` 自动 DELETE 媒体资源 | `RemoteVideoStream` |
+| `start_video_upload(compute_service_session_id, ..., timeout_seconds=120)` | producer 等待异步 C-02，创建完整 sendonly Offer，内部完成 Sandbox 协商；`stop()` 自动 DELETE 媒体资源 | `VideoUploadHandle` |
+| `get_processed_video_stream(compute_service_session_id, timeout_seconds=120)` | consumer 等待异步 C-02，创建完整 recvonly Offer，内部完成 Sandbox 协商；`close()` 自动 DELETE 媒体资源 | `RemoteVideoStream` |
 | `update_recognition_target(compute_service_session_id, request_id, text, language=None, ...)` | consumer 使用 C-02 路径替换当前持续识别目标 | `RecognitionTargetStatus` |
 | `get_recognition_target(compute_service_session_id, ...)` | consumer 读取当前已应用的识别目标 | `RecognitionTargetStatus` |
 | `create_control_action(compute_service_session_id, request, ...)` | consumer 提交文本或结构化运行期动作 | `ControlActionStatus` |
