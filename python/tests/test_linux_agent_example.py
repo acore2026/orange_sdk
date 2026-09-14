@@ -55,8 +55,6 @@ def test_linux_agent_parser_accepts_full_flow_values():
         [
             "--runtime-ip",
             "192.168.3.10",
-            "--local-vlan-ip",
-            "192.168.1.10",
             "--agent-name",
             "Agent A",
             "--owner",
@@ -89,8 +87,6 @@ async def test_linux_agent_full_flow_executes_every_business_api():
         [
             "--runtime-ip",
             "192.168.3.10",
-            "--local-vlan-ip",
-            "192.168.1.10",
             "--agent-name",
             "Agent A",
             "--owner",

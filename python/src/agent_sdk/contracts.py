@@ -105,7 +105,6 @@ class LocalServer(Protocol):
     async def start(
         self,
         *,
-        physical_ip: str,
         agent_ip: str,
         tcp_port: int,
         udp_port: int,

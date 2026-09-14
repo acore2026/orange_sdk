@@ -11,7 +11,6 @@ from .errors import AgentSdkError, ErrorCode
 class SdkConfig:
     agent_runtime_ip: str
     agent_runtime_port: int
-    local_vlan_ip: str
     local_tcp_port: int
     local_udp_port: int
     agent_tun_cidr: str
@@ -45,7 +44,6 @@ class SdkConfig:
         *,
         agent_runtime_ip: str,
         agent_runtime_port: int,
-        local_vlan_ip: str,
         local_tcp_port: int,
         local_udp_port: int,
         masque_server_url: str,
@@ -57,17 +55,14 @@ class SdkConfig:
         log_max_bytes: int,
         log_backup_count: int,
     ) -> None:
-        for field_name, value in (
-            ("agent_runtime_ip", agent_runtime_ip),
-            ("local_vlan_ip", local_vlan_ip),
-        ):
-            try:
-                ip_address(value)
-            except ValueError as exc:
-                raise AgentSdkError(
-                    ErrorCode.INVALID_ARGUMENT, str(exc), field=field_name
-                ) from exc
-
+        try:
+            ip_address(agent_runtime_ip)
+        except ValueError as exc:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                str(exc),
+                field="agent_runtime_ip",
+            ) from exc
         parsed = urlparse(masque_server_url)
         if parsed.scheme != "https" or parsed.hostname is None:
             raise AgentSdkError(
@@ -107,7 +102,6 @@ class SdkConfig:
         *,
         agent_runtime_ip: str,
         agent_runtime_port: int,
-        local_vlan_ip: str,
         local_tcp_port: int,
         local_udp_port: int,
         agent_tun_ip: str,
@@ -123,7 +117,6 @@ class SdkConfig:
         cls.validate_client_parameters(
             agent_runtime_ip=agent_runtime_ip,
             agent_runtime_port=agent_runtime_port,
-            local_vlan_ip=local_vlan_ip,
             local_tcp_port=local_tcp_port,
             local_udp_port=local_udp_port,
             masque_server_url=masque_server_url,
@@ -154,7 +147,6 @@ class SdkConfig:
         return cls(
             agent_runtime_ip=agent_runtime_ip,
             agent_runtime_port=agent_runtime_port,
-            local_vlan_ip=local_vlan_ip,
             local_tcp_port=local_tcp_port,
             local_udp_port=local_udp_port,
             agent_tun_cidr=normalized_tun_cidr,

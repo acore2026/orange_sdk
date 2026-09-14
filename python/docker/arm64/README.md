@@ -96,8 +96,8 @@ docker exec agent-sdk-b ip route get 10.60.0.2
 `agent_tun0`，宿主机上不应出现 `10.60.0.2/32` 或 `10.60.0.3/32` 的本地接口。
 
 单容器直接运行时，`start-agent-a.sh` 和 `start-agent-b.sh` 仍通过环境变量接收配置。
-`AGENT_RUNTIME_IP` 必须是容器可达的 Runtime IPv4 地址，`LOCAL_VLAN_IP` 必须是该
-容器网络命名空间中实际存在的外层 IPv4 地址。
+`AGENT_RUNTIME_IP` 必须是容器可达的 Runtime IPv4 地址。CONNECT-IP 外层源地址由
+容器内的系统路由自动选择，不再配置 `LOCAL_VLAN_IP`。
 
 通用可选变量包括 `AGENT_TCP_PORT`、`AGENT_UDP_PORT`、`AGENT_TUN_NAME`、
 `AGENT_TUN_MTU`、`AGENT_NAME`、`AGENT_OWNER`、`AGENT_REGION`、

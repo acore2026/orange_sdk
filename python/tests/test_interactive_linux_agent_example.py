@@ -55,8 +55,6 @@ def test_interactive_parser_reuses_real_linux_flow_arguments():
         [
             "--runtime-ip",
             "192.168.3.10",
-            "--local-vlan-ip",
-            "192.168.1.10",
             "--agent-name",
             "Agent A",
             "--owner",

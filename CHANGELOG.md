@@ -2,6 +2,24 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-14 — Linux 初始化移除必填物理网卡 IP
+
+### 修改原因
+
+- Python/Linux A/B 启动说明仍要求 `--local-vlan-ip`，与当前由系统路由自动选择
+  CONNECT-IP 外层源地址的设计不一致。
+
+### 修改方式
+
+- Python SDK 删除物理网卡 IP 初始化参数，由 aioquic 和操作系统路由选择外层源地址；
+  A2A 服务只监听 Runtime `/v1/ue/info` 返回的 UE IP。
+- A/B、全接口及底层 MASQUE 测试脚本删除 `--local-vlan-ip`；ARM 入口与 Compose 删除
+  `LOCAL_VLAN_IP` 环境变量和对应校验，并同步更新使用说明。
+
+### 验证内容
+
+- Python 全量测试、源码编译、Shell 语法与 Docker Compose 配置检查通过。
+
 ## 2026-09-14 — Linux A/B 测试脚本补齐算力视频联调
 
 ### 修改原因

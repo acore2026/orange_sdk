@@ -122,14 +122,13 @@ async def run_full_flow(
         "sdk.init",
         "GET /v1/ue/info，建立下行 WebSocket、Agent TUN、消息服务和 MASQUE；"
         f"Runtime=http://{args.runtime_ip}:{args.runtime_port}，"
-        f"local_vlan_ip={args.local_vlan_ip}，MASQUE={args.masque_url}",
+        f"MASQUE={args.masque_url}",
     )
     initialized = await sdk.init(
         args.runtime_ip,
         args.runtime_port,
-        args.local_vlan_ip,
-        args.tcp_port,
-        args.udp_port,
+        local_tcp_port=args.tcp_port,
+        local_udp_port=args.udp_port,
         masque_server_url=args.masque_url,
         masque_authorization=(
             f"Bearer {args.masque_token}" if args.masque_token else None
@@ -412,7 +411,6 @@ def parser() -> argparse.ArgumentParser:
     )
     value.add_argument("--runtime-ip", required=True)
     value.add_argument("--runtime-port", type=int, default=8080)
-    value.add_argument("--local-vlan-ip", required=True)
     value.add_argument("--tcp-port", type=int, default=4001)
     value.add_argument("--udp-port", type=int, default=28443)
     value.add_argument("--agent-id", help="optional expected ID returned by apply_identity")

@@ -487,9 +487,8 @@ async def _create_sdk_fixture(
     result = await sdk.init(
         "192.168.3.10",
         8080,
-        "192.168.1.10",
-        4001,
-        28443,
+        local_tcp_port=4001,
+        local_udp_port=28443,
         masque_server_url="https://192.168.3.10:4433",
         log_file_path=str(tmp_path / "agent-sdk.log"),
     )

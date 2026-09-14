@@ -247,9 +247,8 @@ async def run_agent_a(
         initialized = await client.init(
             args.runtime_ip,
             args.runtime_port,
-            args.local_vlan_ip,
-            args.tcp_port,
-            args.udp_port,
+            local_tcp_port=args.tcp_port,
+            local_udp_port=args.udp_port,
             masque_server_url=args.masque_url,
             masque_authorization=(
                 f"Bearer {args.masque_token}" if args.masque_token else None
@@ -694,7 +693,6 @@ def parser() -> argparse.ArgumentParser:
     )
     value.add_argument("--runtime-ip", required=True)
     value.add_argument("--runtime-port", type=int, default=8080)
-    value.add_argument("--local-vlan-ip", required=True)
     value.add_argument("--tcp-port", type=int, default=4001)
     value.add_argument("--udp-port", type=int, default=28443)
     value.add_argument("--masque-url", required=True)
@@ -835,7 +833,6 @@ if __name__ == "__main__":
             error_code=getattr(getattr(exc, "code", None), "value", None),
             runtime=f"http://{arguments.runtime_ip}:{arguments.runtime_port}",
             masque_url=arguments.masque_url,
-            local_vlan_ip=arguments.local_vlan_ip,
             sdk_log_file=arguments.log_file,
         )
         raise

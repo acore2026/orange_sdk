@@ -121,14 +121,12 @@ async def test_local_http_ingress_and_response_are_logged(tmp_path):
 
     try:
         await server.start(
-            physical_ip="127.0.0.1",
             agent_ip="127.0.0.2",
             tcp_port=0,
             udp_port=28443,
             on_a2a_message=on_a2a,
         )
-        socket_address = server._sites[1]._server.sockets[0].getsockname()
-        physical_socket_address = server._sites[0]._server.sockets[0].getsockname()
+        socket_address = server._sites[0]._server.sockets[0].getsockname()
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"http://127.0.0.2:{socket_address[1]}/A2A/message",
@@ -143,7 +141,7 @@ async def test_local_http_ingress_and_response_are_logged(tmp_path):
                 },
             )
             removed_callback = await client.post(
-                f"http://127.0.0.1:{physical_socket_address[1]}/agent/group-moq-info",
+                f"http://127.0.0.2:{socket_address[1]}/agent/group-moq-info",
                 json={"group_id": "g1"},
             )
         assert response.status_code == 200

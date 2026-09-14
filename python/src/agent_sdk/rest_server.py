@@ -16,21 +16,18 @@ class AiohttpLocalServer:
     def __init__(self, *, logger: logging.Logger | None = None) -> None:
         self._runner: web.AppRunner | None = None
         self._sites: list[web.BaseSite] = []
-        self._physical_ip = ""
         self._agent_ip = ""
         self._logger = logger or logging.getLogger(__name__)
 
     async def start(
         self,
         *,
-        physical_ip: str,
         agent_ip: str,
         tcp_port: int,
         udp_port: int,
         on_a2a_message: Callable[[Mapping[str, Any]], Awaitable[None]],
     ) -> None:
         del udp_port  # UDP application transport is a separate extension point.
-        self._physical_ip = physical_ip
         self._agent_ip = agent_ip
         @web.middleware
         async def http_logging(request: web.Request, handler):
@@ -149,10 +146,9 @@ class AiohttpLocalServer:
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         try:
-            for address in dict.fromkeys((physical_ip, agent_ip)):
-                site = web.TCPSite(self._runner, address, tcp_port)
-                await site.start()
-                self._sites.append(site)
+            site = web.TCPSite(self._runner, agent_ip, tcp_port)
+            await site.start()
+            self._sites.append(site)
         except OSError as exc:
             await self.close()
             raise AgentSdkError(

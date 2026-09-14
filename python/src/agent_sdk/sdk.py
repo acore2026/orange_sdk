@@ -368,7 +368,6 @@ class AgentSdk:
             lambda config: AioquicConnectIpTransport(
                 server_url=config.masque_server_url,
                 authorization=config.masque_authorization,
-                local_address=config.local_vlan_ip,
                 logger=self._logger,
             )
         )
@@ -482,7 +481,6 @@ class AgentSdk:
         self,
         agent_runtime_ip: str,
         agent_runtime_port: int,
-        local_vlan_ip: str,
         local_tcp_port: int,
         local_udp_port: int,
         *,
@@ -510,7 +508,6 @@ class AgentSdk:
             arguments={
                 "agent_runtime_ip": agent_runtime_ip,
                 "agent_runtime_port": agent_runtime_port,
-                "local_vlan_ip": local_vlan_ip,
                 "local_tcp_port": local_tcp_port,
                 "local_udp_port": local_udp_port,
                 "masque_server_url": masque_server_url,
@@ -541,7 +538,6 @@ class AgentSdk:
             SdkConfig.validate_client_parameters(
                 agent_runtime_ip=agent_runtime_ip,
                 agent_runtime_port=agent_runtime_port,
-                local_vlan_ip=local_vlan_ip,
                 local_tcp_port=local_tcp_port,
                 local_udp_port=local_udp_port,
                 masque_server_url=masque_server_url,
@@ -566,7 +562,6 @@ class AgentSdk:
             config = SdkConfig.validate(
                 agent_runtime_ip=agent_runtime_ip,
                 agent_runtime_port=agent_runtime_port,
-                local_vlan_ip=local_vlan_ip,
                 local_tcp_port=local_tcp_port,
                 local_udp_port=local_udp_port,
                 agent_tun_ip=agent_tun_ip,
@@ -610,7 +605,6 @@ class AgentSdk:
 
             self._server = self._server_factory()
             await self._server.start(
-                physical_ip=config.local_vlan_ip,
                 agent_ip=config.agent_tun_ip,
                 tcp_port=config.local_tcp_port,
                 udp_port=config.local_udp_port,
@@ -630,8 +624,8 @@ class AgentSdk:
             result = SdkInitResult(
                 runtime_connected=True,
                 masque_connected=self._masque.connected,
-                local_tcp_endpoint=f"{config.local_vlan_ip}:{config.local_tcp_port}",
-                local_udp_endpoint=f"{config.local_vlan_ip}:{config.local_udp_port}",
+                local_tcp_endpoint=f"{config.agent_tun_ip}:{config.local_tcp_port}",
+                local_udp_endpoint=f"{config.agent_tun_ip}:{config.local_udp_port}",
                 agent_tcp_endpoint=f"{config.agent_tun_ip}:{config.local_tcp_port}",
                 agent_udp_endpoint=f"{config.agent_tun_ip}:{config.local_udp_port}",
                 agent_tun_cidr=config.agent_tun_cidr,

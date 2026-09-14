@@ -38,8 +38,6 @@ def _base_arguments(module):
         [
             "--runtime-ip",
             "192.168.3.10",
-            "--local-vlan-ip",
-            "192.168.1.10",
             "--masque-url",
             "https://192.168.3.10:4433/.well-known/masque/ip",
         ]
@@ -52,6 +50,7 @@ def test_agent_b_defaults_to_the_bundled_local_video():
 
     assert args.video_source == "file"
     assert args.loop_video is True
+    assert "local_vlan_ip" not in vars(args)
     assert Path(args.video_file).resolve().is_file()
 
 

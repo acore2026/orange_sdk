@@ -9,7 +9,7 @@ printf '%s\n' \
     '  start-agent-b.sh' \
     '' \
     'Required environment variables:' \
-    '  AGENT_RUNTIME_IP, LOCAL_VLAN_IP, MASQUE_URL' \
+    '  AGENT_RUNTIME_IP, MASQUE_URL' \
     '' \
     'Test lifecycle defaults:' \
     '  AGENT_FRESH_REGISTRATION=true' \

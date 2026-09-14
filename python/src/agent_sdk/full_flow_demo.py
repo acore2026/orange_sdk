@@ -457,9 +457,8 @@ async def run_demo(
         initialized = await sdk.init(
             "192.168.3.10",
             8080,
-            "192.168.1.10",
-            4001,
-            28443,
+            local_tcp_port=4001,
+            local_udp_port=28443,
             masque_server_url="https://192.168.3.10:4433",
             masque_authorization="Bearer demo-device-a-token",
             log_file_path=log_file_path,

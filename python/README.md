@@ -176,7 +176,6 @@ MASQUE Proxy、AgentRuntime、UERANSIM、`uesimtun0/1` 和 5GC UPF 都是外部�
 result = await sdk.init(
     agent_runtime_ip="192.168.3.10",
     agent_runtime_port=8080,
-    local_vlan_ip="192.168.1.10",
     local_tcp_port=4001,
     local_udp_port=28443,
     masque_server_url="https://192.168.3.10:4433",
@@ -190,10 +189,8 @@ result = await sdk.init(
 )
 ```
 
-设备 B 只需替换本机值：
-
-- `local_vlan_ip="192.168.2.10"`
-- `masque_authorization="Bearer replace-with-secret-for-device-b"`
+设备 B 只需替换 `masque_authorization`。MASQUE 外层源地址由操作系统根据
+`masque_server_url` 的路由自动选择；应用不传物理网卡 IP。
 
 SDK 初始化时调用
 `GET http://<agent_runtime_ip>:<agent_runtime_port>/v1/ue/info`。该请求没有
@@ -212,7 +209,6 @@ SDK 初始化时调用
 |---|---|---|
 | `agent_runtime_ip` | 是 | AgentRuntime 物理网地址 |
 | `agent_runtime_port` | 是 | AgentRuntime HTTP 端口 |
-| `local_vlan_ip` | 是 | 本设备物理网 IP；用于 Runtime 上行 HTTP 和 MASQUE QUIC 外层 |
 | `local_tcp_port` | 是 | 本地 `/A2A/message` TCP 监听端口 |
 | `local_udp_port` | 是 | 对外公布的 UDP 业务端口 |
 | `masque_server_url` | 是 | MASQUE Proxy 的 HTTPS URL，底层使用 HTTP/3/QUIC |
@@ -826,7 +822,6 @@ sudo -E .venv/bin/python examples/masque_two_instance_test.py \
   --role B \
   --runtime-ip 192.168.3.10 \
   --runtime-port 8082 \
-  --local-vlan-ip 192.168.2.10 \
   --masque-url https://192.168.3.10:4434/.well-known/masque/ip \
   --message-port 4001 \
   --control-port 18082
@@ -840,7 +835,6 @@ wsl.exe -d Ubuntu-Agent-B --cd $SdkPythonDir -- `
   --role B `
   --runtime-ip 192.168.3.10 `
   --runtime-port 8082 `
-  --local-vlan-ip 192.168.2.10 `
   --masque-url https://192.168.3.10:4434/.well-known/masque/ip `
   --message-port 4001 `
   --control-port 18082
@@ -867,7 +861,6 @@ sudo -E .venv/bin/python examples/masque_two_instance_test.py \
   --role A \
   --runtime-ip 192.168.3.10 \
   --runtime-port 8081 \
-  --local-vlan-ip 192.168.1.10 \
   --masque-url https://192.168.3.10:4433/.well-known/masque/ip \
   --message-port 4001 \
   --control-port 18081
@@ -882,7 +875,6 @@ wsl.exe -d Ubuntu-Agent-A --cd $SdkPythonDir -- `
   --role A `
   --runtime-ip 192.168.3.10 `
   --runtime-port 8081 `
-  --local-vlan-ip 192.168.1.10 `
   --masque-url https://192.168.3.10:4433/.well-known/masque/ip `
   --message-port 4001 `
   --control-port 18081
@@ -997,7 +989,6 @@ MASQUE Client 建立 CONNECT-IP 后会每 15 秒发送一次 QUIC PING 保活。
 sudo -E .venv/bin/python examples/linux_agent.py \
   --runtime-ip 192.168.3.10 \
   --runtime-port 8080 \
-  --local-vlan-ip 192.168.1.10 \
   --agent-name 'Agent A' \
   --owner 'customer-a' \
   --masque-url https://192.168.3.10:4433/.well-known/masque/ip \
@@ -1038,7 +1029,6 @@ A2A 消息按现行接口不携带 proof。
 sudo -E .venv/bin/python examples/interactive_linux_agent.py \
   --runtime-ip 192.168.3.10 \
   --runtime-port 8080 \
-  --local-vlan-ip 192.168.1.10 \
   --agent-name 'Agent A' \
   --owner 'customer-a' \
   --masque-url https://192.168.3.10:4433/.well-known/masque/ip \
@@ -1093,7 +1083,6 @@ cd /path/to/orange_sdk/python
 sudo -E .venv/bin/python examples/agent_b_test.py \
   --runtime-ip 192.168.3.10 \
   --runtime-port 8089 \
-  --local-vlan-ip 192.168.2.10 \
   --masque-url https://192.168.3.10:8444/.well-known/masque/ip \
   --capability video_rendering \
   --video-source file \
@@ -1115,7 +1104,6 @@ cd /path/to/orange_sdk/python
 sudo -E .venv/bin/python examples/agent_a_test.py \
   --runtime-ip 192.168.3.10 \
   --runtime-port 8088 \
-  --local-vlan-ip 192.168.1.10 \
   --masque-url https://192.168.3.10:8443/.well-known/masque/ip \
   --target-capability video_rendering \
   --group-name agent-a-b-test-group \
@@ -1169,12 +1157,11 @@ CONNECT-IP HTTP 协商。先查看 SDK 日志：
 tail -f ./logs/agent-b-test.log
 ```
 
-再确认 `--local-vlan-ip` 确实存在于当前系统，并且绑定该源地址后能到达
-MASQUE 服务器：
+再确认操作系统存在可到达 MASQUE 服务器的路由；SDK 会使用该路由自动选择源地址：
 
 ```bash
 ip addr show
-ip route get <MASQUE服务器IP> from <local-vlan-ip>
+ip route get <MASQUE服务器IP>
 sudo tcpdump -ni any udp port <MASQUE端口>
 ```
 

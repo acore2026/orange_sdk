@@ -457,7 +457,6 @@ def _apply_role_defaults(args: argparse.Namespace) -> argparse.Namespace:
 
 
 def _validate_args(args: argparse.Namespace) -> None:
-    ip_address(args.local_vlan_ip)
     if not 1 <= args.runtime_port <= 65535:
         raise ValueError("Runtime port must be in 1..65535")
     if not 1 <= args.message_port <= 65535:
@@ -548,7 +547,7 @@ async def run_instance(
             authorization=(
                 f"Bearer {args.masque_token}" if args.masque_token else None
             ),
-            local_address=args.local_vlan_ip,
+            local_address=None,
             logger=logger,
         )
 
@@ -674,7 +673,6 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--role", required=True, type=str.upper, choices=("A", "B"))
     value.add_argument("--runtime-ip", required=True)
     value.add_argument("--runtime-port", required=True, type=int)
-    value.add_argument("--local-vlan-ip", required=True)
     value.add_argument("--masque-url", required=True)
     value.add_argument("--masque-token")
     value.add_argument("--message-port", type=int, default=4001)

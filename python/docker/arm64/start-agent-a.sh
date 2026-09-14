@@ -26,17 +26,10 @@ is_true() {
 }
 
 require_value AGENT_RUNTIME_IP "${AGENT_RUNTIME_IP:-}"
-require_value LOCAL_VLAN_IP "${LOCAL_VLAN_IP:-}"
 require_value MASQUE_URL "${MASQUE_URL:-}"
 
 if [ ! -c /dev/net/tun ]; then
     printf '%s\n' '/dev/net/tun is unavailable; start the container with --device /dev/net/tun' >&2
-    exit 1
-fi
-
-if ! ip -o addr show | awk '{print $4}' | cut -d/ -f1 | grep -Fqx "${LOCAL_VLAN_IP}"; then
-    printf 'LOCAL_VLAN_IP is not assigned inside this network namespace: %s\n' "${LOCAL_VLAN_IP}" >&2
-    printf '%s\n' 'Pass the IPv4 address assigned to this container network namespace.' >&2
     exit 1
 fi
 
@@ -51,7 +44,6 @@ mkdir -p "$(dirname -- "${AGENT_LOG_FILE}")" "${XDG_STATE_HOME:-/var/lib/agent-s
 set -- \
     --runtime-ip "${AGENT_RUNTIME_IP}" \
     --runtime-port "${AGENT_RUNTIME_PORT:-8080}" \
-    --local-vlan-ip "${LOCAL_VLAN_IP}" \
     --tcp-port "${AGENT_TCP_PORT:-4001}" \
     --udp-port "${AGENT_UDP_PORT:-28443}" \
     --masque-url "${MASQUE_URL}" \

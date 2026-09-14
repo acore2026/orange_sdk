@@ -31,8 +31,6 @@ def _arguments(module, tmp_path: Path, role: str, *extra: str):
             "192.168.3.10",
             "--runtime-port",
             "8081" if role == "A" else "8082",
-            "--local-vlan-ip",
-            "192.168.1.10" if role == "A" else "192.168.2.10",
             "--masque-url",
             f"https://192.168.3.10:{4433 if role == 'A' else 4434}/masque",
             "--state-dir",
