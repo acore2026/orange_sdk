@@ -511,7 +511,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--owner", default="ab-test-owner-b")
     value.add_argument("--description", default="Agent B video offload producer test")
     value.add_argument("--region", default="CN")
-    value.add_argument("--capability", default="video_rendering")
+    value.add_argument("--capability", default="dog-vision")
     value.add_argument("--priority", type=int, default=1)
     value.add_argument(
         "--third-party-private-key",

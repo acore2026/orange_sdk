@@ -70,7 +70,7 @@ set -- \
     --owner "${AGENT_OWNER:-ab-test-owner-b}" \
     --description "${AGENT_DESCRIPTION:-Agent B video offload producer test}" \
     --region "${AGENT_REGION:-CN}" \
-    --capability "${AGENT_CAPABILITY:-video_rendering}" \
+    --capability "${AGENT_CAPABILITY:-dog-vision}" \
     --priority "${AGENT_PRIORITY:-1}" \
     --wait-timeout "${AGENT_WAIT_TIMEOUT:-0}" \
     --video-source "${AGENT_VIDEO_SOURCE}" \

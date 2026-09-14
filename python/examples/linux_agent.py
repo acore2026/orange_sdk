@@ -458,7 +458,7 @@ def parser() -> argparse.ArgumentParser:
     )
     value.add_argument("--message-timeout", type=float, default=5.0)
     value.add_argument("--message-type", default="application/json")
-    value.add_argument("--compute-capability-id", default="video_rendering")
+    value.add_argument("--compute-capability-id", default="dog-vision")
     value.add_argument("--compute-cpu-millicores", type=int, default=2000)
     value.add_argument("--compute-memory-mib", type=int, default=4096)
     value.add_argument("--compute-request-id")

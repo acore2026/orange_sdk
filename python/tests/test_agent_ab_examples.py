@@ -50,8 +50,18 @@ def test_agent_b_defaults_to_the_bundled_local_video():
 
     assert args.video_source == "file"
     assert args.loop_video is True
+    assert args.capability == "dog-vision"
     assert "local_vlan_ip" not in vars(args)
     assert Path(args.video_file).resolve().is_file()
+
+
+def test_linux_ab_defaults_use_the_android_dog_vision_capability():
+    agent_a = _base_arguments(_load_example("agent_a_test"))
+    agent_b = _base_arguments(_load_example("agent_b_test"))
+
+    assert agent_a.target_capability == "dog-vision"
+    assert agent_a.compute_capability_id == "dog-vision"
+    assert agent_b.capability == "dog-vision"
 
 
 async def test_agent_a_runs_acn_and_computing_consumer_flow():
@@ -81,7 +91,7 @@ async def test_agent_a_runs_acn_and_computing_consumer_flow():
     target = SimpleNamespace(
         agent_id="did:example:b",
         service_endpoints="http://agent-b:4001/A2A/message",
-        skills=("video_rendering",),
+        skills=("dog-vision",),
         priority=1,
     )
     member = SimpleNamespace(
@@ -170,7 +180,7 @@ async def test_agent_a_runs_acn_and_computing_consumer_flow():
     ]
     assert "task_id" not in sdk.discover_agents.await_args.kwargs
     assert sdk.discover_agents.await_args.kwargs["required_skills"] == [
-        "video_rendering"
+        "dog-vision"
     ]
     assert sdk.create_group.await_args.args[1] == ["did:example:b"]
     assert sdk.create_group.await_args.kwargs["dnn"] == "internet"
@@ -183,7 +193,7 @@ async def test_agent_a_runs_acn_and_computing_consumer_flow():
     assert create_request.acn_context.group_id == "group-a-b"
     assert create_request.acn_context.requester_agent_id == "did:example:a"
     assert create_request.acn_context.target_agent_id == "did:example:b"
-    assert create_request.constraints.capability_id == "video_rendering"
+    assert create_request.constraints.capability_id == "dog-vision"
     assert create_request.constraints.resources.cpu_millicores == 2000
     assert create_request.constraints.resources.memory_mib == 4096
     assert sdk.send_message.await_args_list[1].args[2] == {
@@ -268,10 +278,10 @@ async def test_agent_b_publishes_capability_and_can_stop_before_session():
     )
 
     assert result["agent_id"] == "did:example:b"
-    assert result["capability"] == "video_rendering"
+    assert result["capability"] == "dog-vision"
     assert result["completed_sessions"] == []
     assert sdk.register_capabilities.await_args.kwargs["capabilities"] == [
-        "video_rendering"
+        "dog-vision"
     ]
     assert sdk.register_capabilities.await_args.kwargs["credentials"] == [
         ability.ability_vc

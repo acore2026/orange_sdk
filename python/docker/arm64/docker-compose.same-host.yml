@@ -17,8 +17,8 @@ services:
       AGENT_TUN_NAME: "${AGENT_A_TUN_NAME:-agent_tun0}"
       AGENT_TUN_MTU: "${AGENT_TUN_MTU:-1280}"
       AGENT_LOG_FILE: /var/log/agent-sdk/agent-a.log
-      AGENT_TARGET_CAPABILITY: "${AGENT_TARGET_CAPABILITY:-video_rendering}"
-      AGENT_COMPUTE_CAPABILITY_ID: "${AGENT_COMPUTE_CAPABILITY_ID:-video_rendering}"
+      AGENT_TARGET_CAPABILITY: "${AGENT_TARGET_CAPABILITY:-dog-vision}"
+      AGENT_COMPUTE_CAPABILITY_ID: "${AGENT_COMPUTE_CAPABILITY_ID:-dog-vision}"
       AGENT_COMPUTE_CPU_MILLICORES: "${AGENT_COMPUTE_CPU_MILLICORES:-2000}"
       AGENT_COMPUTE_MEMORY_MIB: "${AGENT_COMPUTE_MEMORY_MIB:-4096}"
       AGENT_COMPUTE_TIMEOUT: "${AGENT_COMPUTE_TIMEOUT:-30}"
@@ -53,7 +53,7 @@ services:
       AGENT_TUN_NAME: "${AGENT_B_TUN_NAME:-agent_tun0}"
       AGENT_TUN_MTU: "${AGENT_TUN_MTU:-1280}"
       AGENT_LOG_FILE: /var/log/agent-sdk/agent-b.log
-      AGENT_CAPABILITY: "${AGENT_CAPABILITY:-video_rendering}"
+      AGENT_CAPABILITY: "${AGENT_CAPABILITY:-dog-vision}"
       AGENT_VIDEO_SOURCE: "${AGENT_VIDEO_SOURCE:-file}"
       AGENT_VIDEO_FILE: "${AGENT_VIDEO_FILE:-/opt/agent-sdk/examples/assets/video-offload-test.mp4}"
       AGENT_LOOP_VIDEO: "${AGENT_LOOP_VIDEO:-true}"

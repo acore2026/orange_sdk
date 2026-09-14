@@ -161,7 +161,7 @@ async def test_linux_agent_full_flow_executes_every_business_api():
     assert request.acn_context.group_id == "g1"
     assert request.acn_context.requester_agent_id == profile.agent_id
     assert request.acn_context.target_agent_id == target.agent_id
-    assert request.constraints.capability_id == "video_rendering"
+    assert request.constraints.capability_id == "dog-vision"
     assert request.constraints.resources.cpu_millicores == 2000
     assert request.constraints.resources.memory_mib == 4096
     assert request.constraints.dnn == "internet"

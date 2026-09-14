@@ -595,7 +595,7 @@ create_status = await sdk.create_computing_session(
             target_agent_id=target.agent_id,
         ),
         constraints=ComputeConstraints(
-            capability_id="video_rendering",
+            capability_id="dog-vision",
             resources=ComputeResources(
                 cpu_millicores=2000,
                 memory_mib=4096,
@@ -997,7 +997,7 @@ sudo -E .venv/bin/python examples/linux_agent.py \
   --group-name customer-demo \
   --dnn internet \
   --message '{"type":"text","content":"hello"}' \
-  --compute-capability-id video_rendering \
+  --compute-capability-id dog-vision \
   --compute-cpu-millicores 2000 \
   --compute-memory-mib 4096 \
   --log-file /var/log/agent-sdk/agent-a.log \
@@ -1065,7 +1065,11 @@ WebSocket、A2A HTTP 监听仍然正常工作。交互步骤覆盖监听器注�
 身份申请、网络能力获取和 Agent Card 发布。`--force-registration` 与
 `--fresh-registration` 互斥。
 
-本测试使用两个独立脚本。B 先发布 `video_rendering` 能力并等待；A 按能力发现 B、
+Linux A/B 与 Android 测试 App 的默认能力统一为 `dog-vision`。如果 Linux B 的
+状态目录中保存的是旧版 `video_rendering` Agent Card，首次与 Android A 联调时应带
+`--force-registration`，让 B 重新发布 `dog-vision` 后再等待发现。
+
+本测试使用两个独立脚本。B 先发布 `dog-vision` 能力并等待；A 按能力发现 B、
 建立二人群组，然后执行完整的算力媒体流程：
 
 1. A 使用正式 `ComputeSessionRequest` 调用 `create_computing_session()`；
@@ -1090,7 +1094,8 @@ sudo -E .venv/bin/python examples/agent_b_test.py \
   --runtime-ip 192.168.3.10 \
   --runtime-port 8089 \
   --masque-url https://192.168.3.10:8444/.well-known/masque/ip \
-  --capability video_rendering \
+  --capability dog-vision \
+  --force-registration \
   --video-source file \
   --video-file ./examples/assets/video-offload-test.mp4 \
   --video-bitrate-kbps 2500 \
@@ -1111,11 +1116,11 @@ sudo -E .venv/bin/python examples/agent_a_test.py \
   --runtime-ip 192.168.3.10 \
   --runtime-port 8088 \
   --masque-url https://192.168.3.10:8443/.well-known/masque/ip \
-  --target-capability video_rendering \
+  --target-capability dog-vision \
   --group-name agent-a-b-test-group \
   --dnn internet \
   --message '{"type":"text","content":"hello Agent B from Agent A"}' \
-  --compute-capability-id video_rendering \
+  --compute-capability-id dog-vision \
   --compute-cpu-millicores 2000 \
   --compute-memory-mib 4096 \
   --frame-count 1 \

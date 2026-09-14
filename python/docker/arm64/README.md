@@ -136,6 +136,8 @@ ARM 测试镜像默认设置 `AGENT_FRESH_REGISTRATION=true` 和
 `AGENT_FORCE_REGISTRATION=true`。该变量优先于默认的
 `AGENT_FRESH_REGISTRATION=true`，因此无需同时修改后者；启动脚本会传入
 `--force-registration` 并调用 SDK 的本地 `reset_agent()`。
+容器和命令行脚本的默认发现、发布及算力能力均为 `dog-vision`，与 Android 测试
+App 一致。
 
 身份、Agent 状态和自动生成的 TLS 私钥保存在 `/var/lib/agent-sdk`，A、B 使用独立
 持久卷；日志保存在各自 `/var/log/agent-sdk` 卷中。停止部署使用：

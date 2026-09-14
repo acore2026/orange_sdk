@@ -34,7 +34,7 @@ if [ ! -c /dev/net/tun ]; then
 fi
 
 AGENT_LOG_FILE="${AGENT_LOG_FILE:-/var/log/agent-sdk/agent-a.log}"
-AGENT_COMPUTE_CAPABILITY_ID="${AGENT_COMPUTE_CAPABILITY_ID:-video_rendering}"
+AGENT_COMPUTE_CAPABILITY_ID="${AGENT_COMPUTE_CAPABILITY_ID:-dog-vision}"
 AGENT_MESSAGE_JSON="${AGENT_MESSAGE_JSON:-}"
 if [ -z "${AGENT_MESSAGE_JSON}" ]; then
     AGENT_MESSAGE_JSON='{"type":"text","content":"hello Agent B from Agent A"}'
