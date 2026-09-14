@@ -403,6 +403,16 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
+    fun `group config ignores unknown supi and does not require it`() = runTest {
+        initializeSdk()
+
+        val action = runtime.deliverGroupConfig(groupConfig(peerSupi = null))
+
+        assertEquals(NetworkMessageAction.ACK, action)
+        assertNotNull(sdk.getGroupSnapshot("g1"))
+    }
+
+    @Test
     fun `version must use semantic version syntax`() = runTest {
         initializeSdk()
         sdk.registerNetworkMessageListener(NetworkMessageListener { _, _ ->
@@ -1182,16 +1192,29 @@ class AgentSdkGroupConfigTest {
         includeSecondPeer: Boolean = false,
         timestamp: Instant = Instant.now(),
         peerIp: String = "8.8.8.8",
+        peerSupi: String? = "imsi-001010000000002",
     ): JsonObject = buildJsonObject {
         put("notification_type", "acf_group_config")
         put("version", "1.0.0")
         put("timestamp", timestamp.toString())
         put("group_id", "g1")
         put("members", buildJsonObject {
-            put("agent1", member(LOCAL_ID, "Agent A", "8.8.8.7", "4001"))
-            put("not-an-id", member(PEER_ID, "Agent B", peerIp, peerPort))
+            put(
+                "agent1",
+                member(LOCAL_ID, "Agent A", "imsi-001010000000001", "8.8.8.7", "4001"),
+            )
+            put("not-an-id", member(PEER_ID, "Agent B", peerSupi, peerIp, peerPort))
             if (includeSecondPeer) {
-                put("agent-c", member(SECOND_PEER_ID, "Agent C", "8.8.8.10", "4002"))
+                put(
+                    "agent-c",
+                    member(
+                        SECOND_PEER_ID,
+                        "Agent C",
+                        "imsi-001010000000003",
+                        "8.8.8.10",
+                        "4002",
+                    ),
+                )
             }
         })
         put("proof", buildJsonObject { put("jws", "test") })
@@ -1200,11 +1223,13 @@ class AgentSdkGroupConfigTest {
     private fun member(
         id: String,
         name: String,
+        supi: String?,
         ip: String,
         tcpPort: String,
     ): JsonObject = buildJsonObject {
         put("agent_id", id)
         put("agent_name", name)
+        supi?.let { put("supi", it) }
         put("skills", buildJsonArray { add(JsonPrimitive("text")) })
         put("agent_ip", ip)
         put("service_endpoints", "http://agent.example:$tcpPort/A2A/message")

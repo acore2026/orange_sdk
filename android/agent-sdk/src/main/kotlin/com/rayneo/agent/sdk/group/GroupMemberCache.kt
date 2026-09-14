@@ -18,7 +18,7 @@ import java.util.Collections
 
 class GroupMemberCache(
     private val tunnelController: TunnelController,
-    private val json: Json = Json { ignoreUnknownKeys = false },
+    private val json: Json = Json { ignoreUnknownKeys = true },
 ) {
     private val mutex = Mutex()
     private val snapshots = mutableMapOf<String, GroupConfigSnapshot>()
