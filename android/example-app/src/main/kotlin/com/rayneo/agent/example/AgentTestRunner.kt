@@ -191,7 +191,7 @@ class AgentTestRunner(
                     metadata = buildJsonObject {
                         put("region", "CN")
                         put("os", "Android")
-                        put("version", "0.2.34")
+                        put("version", "0.2.35")
                     },
                 )
             }

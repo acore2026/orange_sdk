@@ -2,6 +2,29 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-14 — 修复C-02重建TUN期间的A2A投递竞态
+
+### 修改原因
+
+- CREATE返回会话ID后，App立即通过A2A通知Agent B；两端随后接收C-02并重建TUN，B的本地A2A
+  listener也会短暂重启。原发送请求一直占用完整10秒超时，最后以`Socket closed`失败，即使算力
+  会话已经进入`ACTIVE`。
+- A2A重试必须复用同一`message_id`，接收端也必须去重，否则响应在TUN切换时丢失会造成用户
+  消息回调重复执行。
+
+### 修改方式
+
+- Android A2A传输把总超时拆成最长2秒的单次尝试；仅对网络I/O错误退避重试，HTTP拒绝和响应
+  格式错误仍立即返回。
+- Android SDK缓存最近1024个已处理A2A `message_id`；重试消息返回成功但不再次调用用户回调，
+  回调失败时撤销去重记录以允许发送端重试。
+- Android测试App升级为`0.2.35`、`versionCode=37`。
+
+### 验证内容
+
+- 新增socket切换后的A2A重试测试和相同`message_id`接收去重测试；执行Android SDK/App测试及
+  Generic、RayNeo debug APK构建。
+
 ## 2026-09-14 — 修复Python视频运行时交付和启动检查
 
 ### 修改原因

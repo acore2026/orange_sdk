@@ -5,6 +5,7 @@ import com.rayneo.agent.sdk.AgentSdkException
 import com.rayneo.agent.sdk.ErrorCode
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -627,38 +628,74 @@ class OkHttpPeerMessenger(
         body: JsonObject,
         timeoutMillis: Long,
     ): JsonObject = withContext(Dispatchers.IO) {
-        val client = baseClient.newBuilder()
-            .callTimeout(timeoutMillis, TimeUnit.MILLISECONDS)
-            .build()
         val request = Request.Builder()
             .url(endpoint)
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
-        try {
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
+        val deadlineNanos = System.nanoTime() +
+            TimeUnit.MILLISECONDS.toNanos(timeoutMillis.coerceAtLeast(1))
+        var attempt = 0
+        var delivered: JsonObject? = null
+        while (delivered == null) {
+            attempt += 1
+            val remainingMillis = TimeUnit.NANOSECONDS.toMillis(
+                (deadlineNanos - System.nanoTime()).coerceAtLeast(1),
+            ).coerceAtLeast(1)
+            val attemptTimeoutMillis = minOf(remainingMillis, A2A_ATTEMPT_TIMEOUT_MILLIS)
+            val client = baseClient.newBuilder()
+                .callTimeout(attemptTimeoutMillis, TimeUnit.MILLISECONDS)
+                .build()
+            try {
+                delivered = client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw AgentSdkException(
+                            ErrorCode.MESSAGE_DELIVERY_FAILED,
+                            "Peer returned HTTP ${response.code}",
+                        )
+                    }
+                    json.parseToJsonElement(response.body?.string() ?: "{}") as? JsonObject
+                        ?: throw AgentSdkException(
+                            ErrorCode.MESSAGE_DELIVERY_FAILED,
+                            "Peer response must be a JSON object",
+                        )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: AgentSdkException) {
+                throw error
+            } catch (error: Exception) {
+                val root = generateSequence(error as Throwable) { it.cause }.last()
+                val retryDelayMillis = A2A_RETRY_DELAYS_MILLIS.getOrNull(attempt - 1)
+                val remainingAfterFailure = TimeUnit.NANOSECONDS.toMillis(
+                    (deadlineNanos - System.nanoTime()).coerceAtLeast(0),
+                )
+                if (
+                    root !is IOException || retryDelayMillis == null ||
+                    remainingAfterFailure <= retryDelayMillis
+                ) {
+                    val detail = root.message?.takeIf(String::isNotBlank) ?: "no message"
                     throw AgentSdkException(
                         ErrorCode.MESSAGE_DELIVERY_FAILED,
-                        "Peer returned HTTP ${response.code}",
+                        "A2A delivery failed after $attempt attempt(s): " +
+                            "${root::class.java.simpleName}: $detail",
+                        retryable = root is IOException,
+                        cause = error,
                     )
                 }
-                json.parseToJsonElement(response.body?.string() ?: "{}") as? JsonObject
-                    ?: throw AgentSdkException(
-                        ErrorCode.MESSAGE_DELIVERY_FAILED,
-                        "Peer response must be a JSON object",
-                    )
+                Log.w(
+                    TAG_PEER,
+                    "A2A transport attempt=$attempt failed; retrying after " +
+                        "${retryDelayMillis}ms error=${root::class.java.simpleName}",
+                )
+                delay(retryDelayMillis)
             }
-        } catch (error: AgentSdkException) {
-            throw error
-        } catch (error: Exception) {
-            val root = generateSequence(error as Throwable) { it.cause }.last()
-            val detail = root.message?.takeIf(String::isNotBlank) ?: "no message"
-            throw AgentSdkException(
-                ErrorCode.MESSAGE_DELIVERY_FAILED,
-                "A2A delivery failed: ${root::class.java.simpleName}: $detail",
-                retryable = true,
-                cause = error,
-            )
         }
+        checkNotNull(delivered)
+    }
+
+    private companion object {
+        const val TAG_PEER = "AgentSdkPeer"
+        const val A2A_ATTEMPT_TIMEOUT_MILLIS = 2_000L
+        val A2A_RETRY_DELAYS_MILLIS = longArrayOf(100L, 250L, 500L, 1_000L)
     }
 }

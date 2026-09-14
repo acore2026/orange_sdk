@@ -26,6 +26,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.net.SocketException
 
 class OkHttpRuntimeTransportTest {
     @Test
@@ -208,6 +210,42 @@ class OkHttpRuntimeTransportTest {
             assertTrue(request.isCancelled)
         } finally {
             transport.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `peer messenger retries a replayable A2A request after socket replacement`() = runTest {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"status":"OK"}"""),
+        )
+        server.start()
+        val attempts = AtomicInteger()
+        val client = okhttp3.OkHttpClient.Builder()
+            .retryOnConnectionFailure(false)
+            .addInterceptor { chain ->
+                if (attempts.incrementAndGet() == 1) {
+                    throw SocketException("Socket closed during TUN replacement")
+                }
+                chain.proceed(chain.request())
+            }
+            .build()
+        val messenger = OkHttpPeerMessenger(client)
+        try {
+            val response = messenger.send(
+                server.url("/A2A/message").toString(),
+                buildJsonObject { put("message_id", "message-001") },
+                5_000,
+            )
+
+            assertEquals("OK", response["status"]!!.jsonPrimitive.content)
+            assertEquals(2, attempts.get())
+            assertEquals(1, server.requestCount)
+        } finally {
             server.shutdown()
         }
     }

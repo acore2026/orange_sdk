@@ -450,6 +450,31 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
+    fun `duplicate A2A message id is acknowledged without redispatch`() = runTest {
+        initializeSdk()
+        runtime.deliverGroupConfig(groupConfig())
+        var deliveries = 0
+        sdk.registerGroupMessageListener(GroupMessageListener { _, _, _ -> deliveries += 1 })
+        val message = buildJsonObject {
+            put("message_id", "message-retried-after-tun-replacement")
+            put("group_id", "g1")
+            put("src_agent_id", PEER_ID)
+            put("dst_agent_id", LOCAL_ID)
+            put("type", "computing_video_session")
+            put("task_id", "computing:css-001")
+            put("timestamp", "2026-09-14T13:37:05Z")
+            put("payload", buildJsonObject {
+                put("compute_service_session_id", "css-001")
+            })
+        }
+
+        sdk.handleA2aMessage(message)
+        sdk.handleA2aMessage(message)
+
+        assertEquals(1, deliveries)
+    }
+
+    @Test
     fun `computing create uses formal path and exact body`() = runTest {
         initializeSdk()
         runtime.deliverGroupConfig(groupConfig(includeSecondPeer = true))

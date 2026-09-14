@@ -240,6 +240,8 @@ class AgentSdk internal constructor(
     private val computingStatusWaiters =
         mutableMapOf<String, MutableList<CompletableDeferred<ComputeSessionStatus>>>()
     private val computingMutex = Mutex()
+    private val receivedA2aMutex = Mutex()
+    private val receivedA2aMessageIds = linkedSetOf<String>()
     private val computeJson = Json
 
     /** Uses [agentRuntimeIp] and [agentRuntimePort] for every control-plane request. */
@@ -473,7 +475,7 @@ class AgentSdk internal constructor(
                 unsupportedField,
             )
         }
-        payload.requireString("message_id")
+        val messageId = payload.requireString("message_id")
         val groupId = payload.requireString("group_id")
         val senderId = payload.requireString("src_agent_id")
         payload.requireString("type")
@@ -490,7 +492,24 @@ class AgentSdk internal constructor(
             ErrorCode.INVALID_ARGUMENT,
             "A2A payload must be a JSON object",
         )
-        listener.onGroupMessage(groupId, senderId, userPayload)
+        receivedA2aMutex.withLock {
+            if (messageId in receivedA2aMessageIds) {
+                Log.i(TAG, "Acknowledging duplicate A2A message_id=$messageId without redispatch")
+                return@withLock
+            }
+            receivedA2aMessageIds += messageId
+            try {
+                listener.onGroupMessage(groupId, senderId, userPayload)
+            } catch (error: Throwable) {
+                receivedA2aMessageIds -= messageId
+                throw error
+            }
+            while (receivedA2aMessageIds.size > RECEIVED_A2A_MESSAGE_CACHE_LIMIT) {
+                val oldest = receivedA2aMessageIds.iterator()
+                oldest.next()
+                oldest.remove()
+            }
+        }
     }
 
     suspend fun sendMessage(
@@ -2709,6 +2728,7 @@ class AgentSdk internal constructor(
             computingClosing.clear()
             computingCloseResults.clear()
         }
+        receivedA2aMutex.withLock { receivedA2aMessageIds.clear() }
         ueInfo = null
         state = State.CLOSED
     }
@@ -3131,6 +3151,7 @@ class AgentSdk internal constructor(
         private const val COMPUTE_SESSION_STATUS = "COMPUTE_SESSION_STATUS"
         private const val COMPUTE_SESSION_CLOSE = "COMPUTE_SESSION_CLOSE"
         private const val COMPUTE_STATUS_RESULT_LOG_LIMIT = 2_000
+        private const val RECEIVED_A2A_MESSAGE_CACHE_LIMIT = 1_024
         private val CONTROL_ACTION_STATUSES = setOf(
             "ACCEPTED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED", "UNKNOWN",
         )
