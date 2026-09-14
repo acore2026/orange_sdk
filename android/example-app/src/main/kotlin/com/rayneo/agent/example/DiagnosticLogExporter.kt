@@ -313,6 +313,7 @@ internal object DiagnosticLogExporter {
         "AgentSdkRuntime:V",
         "AgentSdkLocalServer:V",
         "AgentSdkVpn:V",
+        "AgentSdkWebRtc:V",
         "System.out:I",
     )
     private val PROC_NETWORK_FILES = listOf(

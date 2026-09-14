@@ -2042,24 +2042,50 @@ class AgentSdk internal constructor(
             val sessionId = status.computeServiceSessionId
             val revision = status.statusRevision?.toULongOrNull()
             if (sessionId == null || revision == null) {
+                Log.i(TAG, computeStatusDiagnostic(status))
                 return@withLock
             }
             val currentRevision = computingStatuses[sessionId]?.statusRevision?.toULongOrNull()
             if (currentRevision == null || revision > currentRevision) {
                 computingStatuses[sessionId] = status
+                Log.i(TAG, computeStatusDiagnostic(status))
                 if (status.status in COMPUTE_TERMINAL_STATUSES) {
                     computingWaiters.remove(sessionId).orEmpty().forEach {
-                        it.completeExceptionally(
-                            AgentSdkException(
-                                ErrorCode.COMPUTING_SESSION_INVALID,
-                                "Computing session ended in state ${status.status}",
-                            )
-                        )
+                        it.completeExceptionally(terminalComputeException(status))
                     }
                 }
             }
         }
     }
+
+    private fun computeStatusDiagnostic(status: ComputeSessionStatus): String = buildString {
+        append("Computing session status")
+        append(" request_id=${status.requestId}")
+        append(" session_id=${status.computeServiceSessionId ?: "<none>"}")
+        append(" status_revision=${status.statusRevision ?: "<none>"}")
+        append(" status=${status.status}")
+        append(" cause=${status.cause.ifBlank { "<none>" }}")
+        if (status.missingFields.isNotEmpty()) {
+            append(" missing_fields=${status.missingFields}")
+        }
+        status.result?.let {
+            append(" result=${it.toString().take(COMPUTE_STATUS_RESULT_LOG_LIMIT)}")
+        }
+    }
+
+    private fun terminalComputeException(status: ComputeSessionStatus): AgentSdkException =
+        AgentSdkException(
+            ErrorCode.COMPUTING_SESSION_INVALID,
+            buildString {
+                append("Computing session ended in state ${status.status}")
+                append(" (cause=${status.cause.ifBlank { "<none>" }}")
+                append(", status_revision=${status.statusRevision ?: "<none>"}")
+                status.result?.let {
+                    append(", result=${it.toString().take(COMPUTE_STATUS_RESULT_LOG_LIMIT)}")
+                }
+                append(')')
+            },
+        )
 
     private suspend fun handleComputeSessionStatus(payload: JsonObject) {
         rememberComputeStatus(parseComputeStatus(payload, messageTypeInPayload = false))
@@ -2429,10 +2455,7 @@ class AgentSdk internal constructor(
         val waiter = computingMutex.withLock {
             computingSessions[sessionId]?.let { return it }
             computingStatuses[sessionId]?.takeIf { it.status in COMPUTE_TERMINAL_STATUSES }?.let {
-                throw AgentSdkException(
-                    ErrorCode.COMPUTING_SESSION_INVALID,
-                    "Computing session ended in state ${it.status}",
-                )
+                throw terminalComputeException(it)
             }
             CompletableDeferred<ComputingSession>().also {
                 computingWaiters.getOrPut(sessionId) { mutableListOf() } += it
@@ -3056,6 +3079,7 @@ class AgentSdk internal constructor(
         private const val COMPUTE_CONNECT_CONFIG = "COMPUTE_CONNECT_CONFIG"
         private const val COMPUTE_SESSION_STATUS = "COMPUTE_SESSION_STATUS"
         private const val COMPUTE_SESSION_CLOSE = "COMPUTE_SESSION_CLOSE"
+        private const val COMPUTE_STATUS_RESULT_LOG_LIMIT = 2_000
         private val CONTROL_ACTION_STATUSES = setOf(
             "ACCEPTED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED", "UNKNOWN",
         )

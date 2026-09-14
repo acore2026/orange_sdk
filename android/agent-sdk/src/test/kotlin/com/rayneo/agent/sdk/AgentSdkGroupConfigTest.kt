@@ -568,6 +568,35 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
+    fun `terminal C04 preserves cause revision and result in media failure`() = runTest {
+        initializeSdk()
+        runtime.deliverDownlink(
+            "COMPUTE_SESSION_STATUS",
+            buildJsonObject {
+                put("request_id", "create-001")
+                put("compute_service_session_id", "css-001")
+                put("status_revision", "7")
+                put("status", "FAILED")
+                put("cause", "resource-activation-failed")
+                put("result", buildJsonObject {
+                    put("failed_component", "sandbox")
+                })
+            },
+        )
+
+        val error = runCatching {
+            sdk.getProcessedVideoStream("css-001")
+        }.exceptionOrNull() as AgentSdkException
+
+        assertEquals(ErrorCode.COMPUTING_SESSION_INVALID, error.code)
+        assertTrue(error.message.orEmpty().contains("state FAILED"))
+        assertTrue(error.message.orEmpty().contains("cause=resource-activation-failed"))
+        assertTrue(error.message.orEmpty().contains("status_revision=7"))
+        assertTrue(error.message.orEmpty().contains("failed_component"))
+        assertTrue(error.message.orEmpty().contains("sandbox"))
+    }
+
+    @Test
     fun `media retry after public timeout reuses request id and offer`() = runTest {
         initializeSdk()
         runtime.deliverDownlink("COMPUTE_CONNECT_CONFIG", computeConnectConfig("producer"))
