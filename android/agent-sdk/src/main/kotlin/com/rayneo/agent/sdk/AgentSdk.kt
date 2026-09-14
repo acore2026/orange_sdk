@@ -378,8 +378,11 @@ class AgentSdk internal constructor(
             )
             return NetworkMessageAction.ACK
         }
-        groups.getOrPut(candidate.groupId) { GroupInfo(candidate.groupId, candidate.groupId) }
-            .status = "ACTIVE"
+        synchronized(groups) {
+            groups.getOrPut(candidate.groupId) {
+                GroupInfo(candidate.groupId, candidate.groupId)
+            }.status = "ACTIVE"
+        }
         try {
             networkListener?.onNetworkMessage(NetworkMessageType.GROUP_CONFIG, payload)
         } catch (_: Exception) {
@@ -886,8 +889,15 @@ class AgentSdk internal constructor(
                 "status",
             )
         }
-        return GroupInfo(response.requireString("group_id"), groupName).also {
-            groups[it.groupId] = it
+        val groupId = response.requireString("group_id")
+        val hasCommittedConfig = groupCache?.snapshot(groupId) != null
+        return synchronized(groups) {
+            val status = if (
+                hasCommittedConfig || groups[groupId]?.status == "ACTIVE"
+            ) "ACTIVE" else "PENDING"
+            GroupInfo(groupId, groupName, status).also {
+                groups[groupId] = it
+            }
         }
     }
 
@@ -905,7 +915,10 @@ class AgentSdk internal constructor(
             )
         }
         val snapshot = groupCache?.snapshot(context.groupId)
-        if (snapshot == null || groups[context.groupId]?.status != "ACTIVE") {
+        val groupActive = synchronized(groups) {
+            groups[context.groupId]?.status == "ACTIVE"
+        }
+        if (snapshot == null || !groupActive) {
             throw AgentSdkException(
                 ErrorCode.GROUP_NOT_ACTIVE,
                 "Group ${context.groupId} is not ACTIVE",

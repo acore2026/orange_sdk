@@ -1100,6 +1100,24 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
+    fun `create group response preserves an earlier active group config`() = runTest {
+        initializeSdk()
+        assertEquals(NetworkMessageAction.ACK, runtime.deliverGroupConfig(groupConfig()))
+
+        val group = sdk.createGroup(
+            agentId = LOCAL_ID,
+            targetAgentIds = listOf(PEER_ID),
+            groupName = "patrol-group",
+            dnn = "internet",
+            maxMembers = 2,
+        )
+        val status = sdk.createComputingSession(createComputeRequest())
+
+        assertEquals("ACTIVE", group.status)
+        assertEquals("css-001", status.computeServiceSessionId)
+    }
+
+    @Test
     fun `create group rejects blank dnn`() = runTest {
         initializeSdk()
 

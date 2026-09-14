@@ -129,6 +129,24 @@ async def test_create_uses_formal_path_and_exact_body(sdk_fixture):
     assert "timestamp" not in body
 
 
+async def test_create_group_response_preserves_earlier_active_config(sdk_fixture):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    await runtime.deliver_group_config(group_payload())
+
+    group = await sdk.create_group(
+        LOCAL_ID,
+        [PEER_ID],
+        "task-patrol",
+        "internet",
+        max_members=2,
+    )
+    status = await sdk.create_computing_session(create_request())
+
+    assert group.status == "ACTIVE"
+    assert status.compute_service_session_id == "css-001"
+
+
 async def test_create_requires_a_locally_active_group(sdk_fixture):
     with pytest.raises(AgentSdkError) as error:
         await sdk_fixture["sdk"].create_computing_session(create_request())

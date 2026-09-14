@@ -1491,7 +1491,17 @@ class AgentSdk:
                 "Runtime group response status must be grouped",
                 field="status",
             )
-        info = GroupInfo(str(response["group_id"]), group_name)
+        group_id = str(response["group_id"])
+        assert self._groups is not None
+        snapshot = await self._groups.snapshot(group_id)
+        current = self._group_info.get(group_id)
+        status = (
+            "ACTIVE"
+            if snapshot is not None
+            or (current is not None and current.status == "ACTIVE")
+            else "PENDING"
+        )
+        info = GroupInfo(group_id, group_name, status)
         self._group_info[info.group_id] = info
         return info
 
