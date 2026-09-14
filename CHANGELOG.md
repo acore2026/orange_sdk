@@ -2,6 +2,27 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-14 — WebRTC网络监视器延迟到CONNECT-IP就绪后创建
+
+### 修改原因
+
+- Android SDK原先在`AgentSdk.create()`阶段创建libwebrtc Factory，此时`initialize()`尚未建立
+  CONNECT-IP VPN；部分厂商系统不会把随后由同一进程创建的VPN完整补入已有网络监视器。
+- 用户面候选策略屏蔽物理网络后，上述时序会使ICE无可用网络并立即结束，外层异常同时隐藏了
+  具体失败阶段和底层原因。
+
+### 修改方式
+
+- WebRTC EGL与Factory改为首次媒体调用时按线程安全方式延迟创建，此时SDK管理的VPN/TUN已
+  建立，libwebrtc初始网络列表可直接发现UE IPv4接口。
+- producer和consumer Offer准备过程记录失败阶段；外层异常保留底层错误文本并写入
+  `AgentSdkWebRtc`，协程取消仍按取消传播。
+- Android测试App升级为`0.2.32`、`versionCode=34`。
+
+### 验证内容
+
+- 执行Android SDK/App全量测试与Generic、RayNeo debug APK构建。
+
 ## 2026-09-14 — 保留Android算力终态诊断信息
 
 ### 修改原因

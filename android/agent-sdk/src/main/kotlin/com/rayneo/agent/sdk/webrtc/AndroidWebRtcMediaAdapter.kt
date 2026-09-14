@@ -13,6 +13,7 @@ import com.rayneo.agent.sdk.transport.MediaOffloadAdapter
 import com.rayneo.agent.sdk.transport.PreparedMediaConnection
 import com.rayneo.agent.sdk.transport.VideoTrack
 import com.rayneo.agent.sdk.transport.VideoUploadHandle
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
@@ -44,12 +45,18 @@ import kotlin.coroutines.resumeWithException
 /** Android WebRTC implementation used internally by AgentSdk media APIs. */
 internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter {
     private val appContext = context.applicationContext
-    private val egl = EglBase.create()
+    private val eglDelegate = lazy(LazyThreadSafetyMode.SYNCHRONIZED) { EglBase.create() }
+    private val egl: EglBase by eglDelegate
     private val peers = CopyOnWriteArraySet<PeerConnection>()
     private val closed = AtomicBoolean(false)
-    private val factory: PeerConnectionFactory
+    private val factoryDelegate = lazy(LazyThreadSafetyMode.SYNCHRONIZED, ::createFactory)
+    private val factory: PeerConnectionFactory by factoryDelegate
 
-    init {
+    private fun createFactory(): PeerConnectionFactory {
+        // AgentSdk creates this adapter before initialize() establishes the VPN. Delay the
+        // libwebrtc network monitor until the first media call so its initial network list
+        // already contains the SDK-managed CONNECT-IP TUN interface.
+        Log.i(TAG, "Creating WebRTC factory after CONNECT-IP VPN initialization")
         if (factoryInitialized.compareAndSet(false, true)) {
             PeerConnectionFactory.initialize(
                 PeerConnectionFactory.InitializationOptions.builder(appContext)
@@ -66,7 +73,7 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
                 PeerConnectionFactory.Options.ADAPTER_TYPE_CELLULAR or
                 PeerConnectionFactory.Options.ADAPTER_TYPE_LOOPBACK
         }
-        factory = PeerConnectionFactory.builder()
+        return PeerConnectionFactory.builder()
             .setOptions(options)
             .setVideoEncoderFactory(
                 DefaultVideoEncoderFactory(egl.eglBaseContext, true, true),
@@ -109,26 +116,38 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
         val source = factory.createVideoSource(false)
         capturer.initialize(texture, appContext, source.capturerObserver)
         val track = factory.createVideoTrack("source-${session.computeServiceSessionId}", source)
+        var phase = "initialize"
+        fun enterPhase(next: String) {
+            phase = next
+            Log.i(TAG, "Preparing producer Offer session=${session.computeServiceSessionId} phase=$phase")
+        }
         try {
+            enterPhase("start camera capture")
             capturer.startCapture(width, height, fps)
+            enterPhase("add send-only video transceiver")
             val transceiver = pc.addTransceiver(
                 track,
                 RtpTransceiver.RtpTransceiverInit(
                     RtpTransceiver.RtpTransceiverDirection.SEND_ONLY,
                 ),
             ) ?: mediaFailure("unable to add the send-only video transceiver")
+            enterPhase("apply video codec preference")
             setCodecPreference(transceiver, session.connectionParameters.videoCodec)
             val parameters = transceiver.sender.parameters
             parameters.encodings.forEach { it.maxBitrateBps = bitrateKbps * 1_000 }
             if (!transceiver.sender.setParameters(parameters)) {
                 mediaFailure("unable to configure the video bitrate")
             }
+            enterPhase("create SDP Offer")
             val offer = pc.awaitCreateOffer()
+            enterPhase("set local SDP Offer")
             pc.awaitSetLocal(offer)
+            enterPhase("gather ICE candidates")
             awaitIceComplete(pc, signals, timeoutSeconds)
             val local = pc.localDescription
                 ?: mediaFailure("local WebRTC Offer is unavailable")
             val resources = ProducerResources(pc, capturer, texture, source, track)
+            enterPhase("publish CONNECT-IP ICE candidates")
             return PreparedUpload(
                 resources,
                 publishUserPlaneOffer(
@@ -140,7 +159,8 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
             )
         } catch (error: Throwable) {
             releaseProducer(ProducerResources(pc, capturer, texture, source, track))
-            mediaFailure("failed to prepare the camera WebRTC Offer", error)
+            if (error is CancellationException) throw error
+            mediaFailure("failed to prepare the camera WebRTC Offer during $phase", error)
         }
     }
 
@@ -151,19 +171,30 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
         ensureOpen()
         val signals = PeerSignals()
         val pc = createPeer(signals)
+        var phase = "initialize"
+        fun enterPhase(next: String) {
+            phase = next
+            Log.i(TAG, "Preparing consumer Offer session=${session.computeServiceSessionId} phase=$phase")
+        }
         try {
+            enterPhase("add receive-only video transceiver")
             val transceiver = pc.addTransceiver(
                 MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO,
                 RtpTransceiver.RtpTransceiverInit(
                     RtpTransceiver.RtpTransceiverDirection.RECV_ONLY,
                 ),
             ) ?: mediaFailure("unable to add the receive-only video transceiver")
+            enterPhase("apply video codec preference")
             setCodecPreference(transceiver, session.connectionParameters.videoCodec)
+            enterPhase("create SDP Offer")
             val offer = pc.awaitCreateOffer()
+            enterPhase("set local SDP Offer")
             pc.awaitSetLocal(offer)
+            enterPhase("gather ICE candidates")
             awaitIceComplete(pc, signals, timeoutSeconds)
             val local = pc.localDescription
                 ?: mediaFailure("local WebRTC Offer is unavailable")
+            enterPhase("publish CONNECT-IP ICE candidates")
             return PreparedConsumer(
                 pc,
                 publishUserPlaneOffer(
@@ -175,7 +206,8 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
             )
         } catch (error: Throwable) {
             closePeer(pc)
-            mediaFailure("failed to prepare the processed-video WebRTC Offer", error)
+            if (error is CancellationException) throw error
+            mediaFailure("failed to prepare the processed-video WebRTC Offer during $phase", error)
         }
     }
 
@@ -183,8 +215,8 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
         if (!closed.compareAndSet(false, true)) return
         peers.toList().forEach(::closePeer)
         peers.clear()
-        factory.dispose()
-        egl.release()
+        if (factoryDelegate.isInitialized()) factory.dispose()
+        if (eglDelegate.isInitialized()) egl.release()
     }
 
     private inner class PreparedUpload(
@@ -549,8 +581,19 @@ private fun rewriteVpnHostAddress(line: String, ueIpv4: String): String {
 private fun candidateParts(line: String): List<String> =
     line.trim().split(Regex("\\s+"))
 
-private fun mediaFailure(message: String, cause: Throwable? = null): Nothing =
-    throw AgentSdkException(ErrorCode.MEDIA_NEGOTIATION_FAILED, message, cause = cause)
+private fun mediaFailure(message: String, cause: Throwable? = null): Nothing {
+    val detailedMessage = if (cause == null) {
+        message
+    } else {
+        "$message: ${cause.message?.takeIf(String::isNotBlank) ?: cause::class.java.simpleName}"
+    }
+    Log.e("AgentSdkWebRtc", detailedMessage, cause)
+    throw AgentSdkException(
+        ErrorCode.MEDIA_NEGOTIATION_FAILED,
+        detailedMessage,
+        cause = cause,
+    )
+}
 
 private fun mediaException(message: String, cause: Throwable? = null) =
     AgentSdkException(ErrorCode.MEDIA_NEGOTIATION_FAILED, message, cause = cause)
