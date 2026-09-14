@@ -5,13 +5,15 @@ import functools
 import inspect
 import ipaddress
 import logging
+import socket
 import time
 import uuid
+from dataclasses import dataclass
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 
 from .agent_state import (
     AgentCardContext,
@@ -32,9 +34,11 @@ from .contracts import (
     NetworkMessageListener,
     PeerMessenger,
     ProofVerifier,
+    SandboxTransport,
     RuntimeTransport,
     TunDevice,
     RemoteVideoStream,
+    RuntimeHttpResponse,
     VideoUploadHandle,
 )
 from .errors import AgentSdkError, ErrorCode
@@ -51,6 +55,23 @@ from .logging_utils import (
 from .masque import AioquicConnectIpTransport
 from .models import (
     AgentProfile,
+    AcnContext,
+    ComputeConnectionParameters,
+    ComputeConstraints,
+    ComputeInputFormat,
+    ComputeNetworkBinding,
+    ComputeRequestType,
+    ComputeResources,
+    ComputeRole,
+    ComputeSessionRequest,
+    ComputeSessionStatus,
+    ComputingContext,
+    ComputingSession,
+    ControlAction,
+    ControlActionRequest,
+    ControlActionStatus,
+    ControlInputType,
+    ControlTargetRole,
     DiscoveredAgent,
     GroupConfigSnapshot,
     GroupInfo,
@@ -58,16 +79,16 @@ from .models import (
     NetworkAbility,
     NetworkMessageAction,
     NetworkMessageType,
-    OffloadingSession,
     OperationResult,
-    ProcessedVideoEndpoint,
-    SandboxSpec,
+    RecognitionTarget,
+    RecognitionTargetStatus,
+    RuntimeDataPlane,
     SdkInitResult,
-    VideoUploadEndpoint,
+    Snssai,
 )
 from .rest_server import AiohttpLocalServer
 from .routes import GroupRouteManager, Pyroute2RouteBackend, RouteBackend
-from .runtime import HttpPeerMessenger, HttpRuntimeTransport
+from .runtime import HttpPeerMessenger, HttpRuntimeTransport, HttpSandboxTransport
 from .security import (
     DeviceControlRequestAuthenticator,
     DeviceMessageSigner,
@@ -77,11 +98,131 @@ from .security import (
 )
 from .tun import LinuxTunDevice, validate_ip_packet
 
+_COMPUTING_SESSION_REQUEST_PATH = "/v1/computing/session-requests"
+_COMPUTE_CONNECT_CONFIG = "COMPUTE_CONNECT_CONFIG"
+_COMPUTE_SESSION_STATUS = "COMPUTE_SESSION_STATUS"
+_COMPUTE_SESSION_CLOSE = "COMPUTE_SESSION_CLOSE"
+_COMPUTE_TERMINAL_STATUSES = {
+    "REJECTED",
+    "CLARIFICATION_REQUIRED",
+    "REQUEST_CANCELLED",
+    "NOT_FOUND",
+    "FAILED",
+    "COMPLETED",
+}
+_COMPUTE_STATUSES = {
+    "ACCEPTED",
+    "WAITING_PARTICIPANTS",
+    "PLANNING",
+    "COORDINATING",
+    "RESERVED",
+    "ACTIVATING",
+    "MEDIA_CONNECTING",
+    "ACTIVE",
+    "RELEASING",
+    "COMPENSATING",
+    "CLEANUP_FAILED",
+    "FAILED",
+    "COMPLETED",
+    "REJECTED",
+    "CLARIFICATION_REQUIRED",
+    "REQUEST_CANCELLED",
+    "NOT_FOUND",
+}
+
 TunFactory = Callable[[str, str, int], Awaitable[TunDevice]]
 MasqueFactory = Callable[[SdkConfig], ConnectIpTransport]
 RuntimeFactory = Callable[[str, int], RuntimeTransport]
 ServerFactory = Callable[[], LocalServer]
 RouteBackendFactory = Callable[[SdkConfig, TunDevice], RouteBackend]
+
+
+class _ManagedVideoUpload:
+    def __init__(self, inner: VideoUploadHandle, close_remote: Callable[[], Awaitable[None]]):
+        self._inner = inner
+        self._close_remote = close_remote
+        self._local_stopped = False
+        self._remote_closed = False
+
+    @property
+    def track_id(self) -> str:
+        return self._inner.track_id
+
+    @property
+    def state(self) -> str:
+        return self._inner.state
+
+    async def pause(self) -> None:
+        await self._inner.pause()
+
+    async def resume(self) -> None:
+        await self._inner.resume()
+
+    async def stop(self) -> None:
+        if self._local_stopped and self._remote_closed:
+            return
+        local_error: BaseException | None = None
+        if not self._local_stopped:
+            try:
+                await self._inner.stop()
+                self._local_stopped = True
+            except BaseException as exc:
+                local_error = exc
+        if not self._remote_closed:
+            await self._close_remote()
+            self._remote_closed = True
+        if local_error is not None:
+            raise local_error
+
+
+class _ManagedRemoteVideoStream:
+    def __init__(self, inner: RemoteVideoStream, close_remote: Callable[[], Awaitable[None]]):
+        self._inner = inner
+        self._close_remote = close_remote
+        self._local_closed = False
+        self._remote_closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        return await self._inner.__anext__()
+
+    async def recv(self) -> Any:
+        return await self._inner.recv()
+
+    async def close(self) -> None:
+        if self._local_closed and self._remote_closed:
+            return
+        local_error: BaseException | None = None
+        if not self._local_closed:
+            try:
+                await self._inner.close()
+                self._local_closed = True
+            except BaseException as exc:
+                local_error = exc
+        if not self._remote_closed:
+            await self._close_remote()
+            self._remote_closed = True
+        if local_error is not None:
+            raise local_error
+
+
+@dataclass(slots=True)
+class _MediaConnection:
+    session: ComputingSession
+    request_id: str
+    media_connection_id: str
+    local: VideoUploadHandle | RemoteVideoStream
+    managed: VideoUploadHandle | RemoteVideoStream
+
+
+@dataclass(slots=True)
+class _PendingMediaConnection:
+    session: ComputingSession
+    request_id: str
+    offer_sdp: str
+    prepared: Any
 
 def _bound_arguments(function, instance, args, kwargs) -> dict[str, Any]:
     try:
@@ -200,7 +341,8 @@ class AgentSdk:
         runtime_factory: RuntimeFactory | None = None,
         server_factory: ServerFactory | None = None,
         route_backend_factory: RouteBackendFactory | None = None,
-        media_offload_adapter: MediaOffloadAdapter | None = None,
+        _media_offload_adapter: MediaOffloadAdapter | None = None,
+        _sandbox_transport: SandboxTransport | None = None,
         agent_state_directory: str | Path | None = None,
     ) -> None:
         self._logger = logging.getLogger(f"agent_sdk.client.{id(self)}")
@@ -245,13 +387,15 @@ class AgentSdk:
                 tun.name, config.agent_tun_ip
             )
         )
-        self._media_offload_adapter = media_offload_adapter
+        self._media_offload_adapter = _media_offload_adapter
+        self._sandbox_transport = _sandbox_transport or HttpSandboxTransport(
+            logger=self._logger
+        )
         self._agent_state_store = AgentStateStore(agent_state_directory)
 
         self._state = "NEW"
         self._config: SdkConfig | None = None
         self._runtime: RuntimeTransport | None = None
-        self._compute_runtime: RuntimeTransport | None = None
         self._server: LocalServer | None = None
         self._tun: TunDevice | None = None
         self._masque: ConnectIpTransport | None = None
@@ -265,7 +409,18 @@ class AgentSdk:
         self._identity_application_context: IdentityApplicationContext | None = None
         self._agent_card_context: AgentCardContext | None = None
         self._group_info: dict[str, GroupInfo] = {}
-        self._offloading_sessions: dict[str, OffloadingSession] = {}
+        self._ue_info: Mapping[str, Any] | None = None
+        self._compute_requests: dict[str, Mapping[str, Any]] = {}
+        self._compute_create_requests: dict[str, ComputeSessionRequest] = {}
+        self._computing_statuses: dict[str, ComputeSessionStatus] = {}
+        self._computing_statuses_by_request: dict[str, ComputeSessionStatus] = {}
+        self._computing_sessions: dict[str, ComputingSession] = {}
+        self._computing_media: dict[str, _MediaConnection] = {}
+        self._computing_pending_media: dict[str, _PendingMediaConnection] = {}
+        self._computing_media_locks: dict[str, asyncio.Lock] = {}
+        self._computing_closing: set[str] = set()
+        self._computing_close_results: dict[tuple[str, str, str], Mapping[str, Any]] = {}
+        self._computing_session_changed = asyncio.Condition()
 
     def _log(
         self,
@@ -339,9 +494,8 @@ class AgentSdk:
         log_level: str = DEFAULT_LOG_LEVEL,
         log_max_bytes: int = DEFAULT_LOG_MAX_BYTES,
         log_backup_count: int = DEFAULT_LOG_BACKUP_COUNT,
-        compute_control_ip: str | None = None,
-        compute_control_port: int | None = None,
     ) -> SdkInitResult:
+        """Initialize the SDK using AgentRuntime for all control-plane requests."""
         self._configure_logging(
             file_path=log_file_path,
             level=log_level,
@@ -367,8 +521,6 @@ class AgentSdk:
                 "log_level": log_level,
                 "log_max_bytes": log_max_bytes,
                 "log_backup_count": log_backup_count,
-                "compute_control_ip": compute_control_ip,
-                "compute_control_port": compute_control_port,
             },
         )
         if not self._group_config_verification_enabled:
@@ -386,28 +538,6 @@ class AgentSdk:
                     ErrorCode.INVALID_ARGUMENT,
                     f"cannot init SDK in state {self._state}",
                 )
-            if (compute_control_ip is None) != (compute_control_port is None):
-                raise AgentSdkError(
-                    ErrorCode.INVALID_ARGUMENT,
-                    "compute_control_ip and compute_control_port must be configured together",
-                    field="compute_control_ip",
-                )
-            normalized_compute_ip: str | None = None
-            if compute_control_ip is not None:
-                try:
-                    normalized_compute_ip = str(ipaddress.ip_address(compute_control_ip.strip()))
-                except ValueError as exc:
-                    raise AgentSdkError(
-                        ErrorCode.INVALID_ARGUMENT,
-                        "compute_control_ip must be an IP literal",
-                        field="compute_control_ip",
-                    ) from exc
-                if not isinstance(compute_control_port, int) or not 1 <= compute_control_port <= 65535:
-                    raise AgentSdkError(
-                        ErrorCode.INVALID_ARGUMENT,
-                        "compute_control_port must be in 1..65535",
-                        field="compute_control_port",
-                    )
             SdkConfig.validate_client_parameters(
                 agent_runtime_ip=agent_runtime_ip,
                 agent_runtime_port=agent_runtime_port,
@@ -431,7 +561,8 @@ class AgentSdk:
                 agent_runtime_ip,
                 agent_runtime_port,
             )
-            agent_tun_ip = await self._runtime.get_ue_agent_ip()
+            self._ue_info = await self._runtime.get_ue_info()
+            agent_tun_ip = HttpRuntimeTransport.select_ue_agent_ip(self._ue_info)
             config = SdkConfig.validate(
                 agent_runtime_ip=agent_runtime_ip,
                 agent_runtime_port=agent_runtime_port,
@@ -491,17 +622,11 @@ class AgentSdk:
             self._pump_task = asyncio.create_task(
                 self._pump_uplink(), name="agent-tun-uplink"
             )
-            if normalized_compute_ip is not None:
-                await self._routes.replace_group_peers(
-                    "compute-control", {normalized_compute_ip}
-                )
-                self._compute_runtime = self._runtime_factory(
-                    normalized_compute_ip, compute_control_port
-                )
-            else:
-                self._compute_runtime = self._runtime
             self._state = "READY"
-            await self._runtime.start_downlink(self._handle_runtime_downlink)
+            await self._runtime.start_downlink(
+                self._handle_runtime_downlink,
+                self._recover_compute_statuses,
+            )
             result = SdkInitResult(
                 runtime_connected=True,
                 masque_connected=self._masque.connected,
@@ -708,22 +833,45 @@ class AgentSdk:
         message_type: str,
         transaction_id: int,
         payload: Mapping[str, Any],
-    ) -> NetworkMessageAction:
+    ) -> Mapping[str, Any] | None:
         self._log(
             logging.INFO,
             "runtime_downlink_dispatch",
             message_type=message_type,
             transaction_id=transaction_id,
         )
+        if message_type == _COMPUTE_CONNECT_CONFIG:
+            return await self._handle_compute_connect_config(payload)
+        if message_type == _COMPUTE_SESSION_STATUS:
+            await self._handle_compute_session_status(payload)
+            return None
+        if message_type == _COMPUTE_SESSION_CLOSE:
+            return await self._handle_compute_session_close(payload)
         if message_type == "ACN_AGENT_GROUPING_INVITATION":
-            return await self._handle_group_invitation(payload)
+            action = await self._handle_group_invitation(payload)
+            group_info = payload.get("group_info")
+            group_id = (
+                group_info.get("group_id")
+                if isinstance(group_info, Mapping)
+                else None
+            )
+            response: dict[str, Any] = {"result": action.value}
+            if isinstance(group_id, str) and group_id:
+                response["group_id"] = group_id
+            return response
         if message_type == "ACN_AGENT_GROUPING_NOTIFICATION":
-            return await self._handle_group_config(payload)
+            action = await self._handle_group_config(payload)
+            response = {"result": action.value}
+            group_id = payload.get("group_id")
+            if isinstance(group_id, str) and group_id:
+                response["group_id"] = group_id
+            return response
         if self._network_listener is None:
-            return NetworkMessageAction.REJECT
-        return await self._network_listener.on_network_message(
+            return {"result": NetworkMessageAction.REJECT.value}
+        action = await self._network_listener.on_network_message(
             NetworkMessageType.UNKNOWN, payload
         )
+        return {"result": action.value}
 
     async def _handle_group_config(
         self, payload: Mapping[str, Any]
@@ -1354,120 +1502,94 @@ class AgentSdk:
         return info
 
     @logged_async
-    async def create_offloading_session(
+    async def create_computing_session(
         self,
-        workload_type: str,
-        sandbox_spec: SandboxSpec,
+        request: ComputeSessionRequest,
         timeout_seconds: float = 30.0,
-    ) -> OffloadingSession:
-        self._require_ready()
+    ) -> ComputeSessionStatus:
+        await self._validate_compute_request(request, ComputeRequestType.CREATE)
+        assert request.acn_context is not None
+        if self._profile is None or (
+            request.acn_context.requester_agent_id != self._profile.agent_id
+        ):
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "acn_context.requester_agent_id must match the local Agent",
+                field="acn_context.requester_agent_id",
+            )
+        assert self._groups is not None
+        snapshot = await self._groups.snapshot(request.acn_context.group_id)
+        group_info = self._group_info.get(request.acn_context.group_id)
+        if snapshot is None or group_info is None or group_info.status != "ACTIVE":
+            raise AgentSdkError(
+                ErrorCode.GROUP_NOT_ACTIVE,
+                f"group {request.acn_context.group_id} is not ACTIVE",
+                field="acn_context.group_id",
+            )
+        if request.acn_context.target_agent_id not in snapshot.members_by_agent_id:
+            raise AgentSdkError(
+                ErrorCode.TARGET_NOT_IN_GROUP,
+                "acn_context.target_agent_id is not in the configured group",
+                field="acn_context.target_agent_id",
+            )
+        return await self._send_compute_request(request, timeout_seconds)
+
+    @logged_async
+    async def query_computing_session(
+        self,
+        request: ComputeSessionRequest,
+        timeout_seconds: float = 30.0,
+    ) -> ComputeSessionStatus:
+        await self._validate_compute_request(request, ComputeRequestType.QUERY)
+        return await self._send_compute_request(request, timeout_seconds)
+
+    @logged_async
+    async def cancel_computing_session(
+        self,
+        request: ComputeSessionRequest,
+        timeout_seconds: float = 30.0,
+    ) -> ComputeSessionStatus:
+        await self._validate_compute_request(request, ComputeRequestType.CANCEL)
+        return await self._send_compute_request(request, timeout_seconds)
+
+    @logged_async
+    async def release_computing_session(
+        self,
+        request: ComputeSessionRequest,
+        timeout_seconds: float = 30.0,
+    ) -> ComputeSessionStatus:
+        await self._validate_compute_request(request, ComputeRequestType.RELEASE)
+        return await self._send_compute_request(request, timeout_seconds)
+
+    @logged_async
+    async def start_video_upload(
+        self,
+        compute_service_session_id: str,
+        camera_id: int = 0,
+        width: int = 1920,
+        height: int = 1080,
+        fps: int = 30,
+        bitrate_kbps: int = 4000,
+        timeout_seconds: float = 15.0,
+    ) -> VideoUploadHandle:
         if timeout_seconds <= 0:
             raise AgentSdkError(
                 ErrorCode.INVALID_ARGUMENT,
                 "timeout_seconds must be greater than zero",
                 field="timeout_seconds",
             )
-        if not isinstance(workload_type, str) or not workload_type.strip():
-            raise AgentSdkError(
-                ErrorCode.INVALID_ARGUMENT,
-                "workload_type must be a non-empty string",
-                field="workload_type",
-            )
-        if not isinstance(sandbox_spec, SandboxSpec):
-            raise AgentSdkError(
-                ErrorCode.INVALID_ARGUMENT,
-                "sandbox_spec must be a SandboxSpec",
-                field="sandbox_spec",
-            )
-        if sandbox_spec.vcpus <= 0:
-            raise AgentSdkError(
-                ErrorCode.INVALID_ARGUMENT,
-                "sandbox_spec.vcpus must be greater than zero",
-                field="sandbox_spec.vcpus",
-            )
-        if sandbox_spec.memory_mb <= 0:
-            raise AgentSdkError(
-                ErrorCode.INVALID_ARGUMENT,
-                "sandbox_spec.memory_mb must be greater than zero",
-                field="sandbox_spec.memory_mb",
-            )
-        assert self._compute_runtime is not None
-        path = "/compute/v1/offloading-sessions"
-        request: dict[str, Any] = {
-            "request_id": str(uuid.uuid4()),
-            "workload_type": workload_type,
-            "sandbox_spec": {
-                "vcpus": sandbox_spec.vcpus,
-                "memory_mb": sandbox_spec.memory_mb,
-            },
-        }
-        body = await self._authenticate_control_request(path, request)
-        response = await asyncio.wait_for(
-            self._compute_runtime.request(
-                "POST",
-                path,
-                body,
-            ),
-            timeout=timeout_seconds,
-        )
-        session_id = self._require_nonempty_string(
-            response.get("session_id"), "session_id", ErrorCode.RUNTIME_REJECTED
-        )
-        producer = self._parse_video_upload_endpoint(
-            self._require_response_object(response, "producer"),
-            error_code=ErrorCode.RUNTIME_REJECTED,
-            field_prefix="producer",
-        )
-        processed_stream = self._parse_processed_video_endpoint(
-            self._require_response_object(response, "processed_stream"),
-            error_code=ErrorCode.RUNTIME_REJECTED,
-            field_prefix="processed_stream",
-        )
-        session = OffloadingSession(
-            session_id=session_id,
-            state=str(response.get("state", "ALLOCATED")),
-            expires_at=self._parse_optional_datetime(response.get("expires_at")),
-            producer=producer,
-            processed_stream=processed_stream,
-        )
-        assert self._routes is not None
-        await self._routes.replace_group_peers(
-            self._offloading_route_key(session_id),
-            self._offloading_endpoint_ips(session),
-        )
-        self._offloading_sessions[session.session_id] = session
-        return session
-
-    @logged_async
-    async def start_video_upload(
-        self,
-        session: OffloadingSession,
-        camera_id: int = 0,
-        width: int = 1920,
-        height: int = 1080,
-        fps: int = 30,
-        bitrate_kbps: int = 4000,
-    ) -> VideoUploadHandle:
         self._require_ready()
-        if session.state in {"CLOSED", "FAILED", "STOPPED"}:
-            raise AgentSdkError(
-                ErrorCode.OFFLOADING_SESSION_INVALID,
-                f"offloading session {session.session_id} is not uploadable "
-                f"in state {session.state}",
-            )
-        if session.producer is None:
-            raise AgentSdkError(
-                ErrorCode.OFFLOADING_SESSION_INVALID,
-                "producer endpoint is missing for offloading session "
-                f"{session.session_id}",
-            )
-        assert self._routes is not None
-        await self._routes.replace_group_peers(
-            self._offloading_route_key(session.session_id),
-            self._offloading_endpoint_ips(session),
+        session = await self._wait_for_computing_session(
+            compute_service_session_id, timeout_seconds
         )
-        self._offloading_sessions[session.session_id] = session
+        if session.role is not ComputeRole.PRODUCER:
+            raise AgentSdkError(
+                ErrorCode.COMPUTING_SESSION_INVALID,
+                "start_video_upload requires the producer configuration",
+                field="role",
+            )
         adapter = self._require_media_adapter()
+        self._validate_media_codec(adapter, session)
         for field, value in (
             ("width", width),
             ("height", height),
@@ -1480,22 +1602,105 @@ class AgentSdk:
                     f"{field} must be greater than zero",
                     field=field,
                 )
-        upload = await adapter.start_video_upload(
-            session,
-            camera_id=camera_id,
-            width=width,
-            height=height,
-            fps=fps,
-            bitrate_kbps=bitrate_kbps,
+        lock = self._computing_media_locks.setdefault(
+            compute_service_session_id, asyncio.Lock()
         )
-        session.state = "SOURCE_CONNECTED"
-        return upload
+        async with lock:
+            existing = self._computing_media.get(compute_service_session_id)
+            if existing is not None:
+                return existing.managed  # type: ignore[return-value]
+            pending = self._computing_pending_media.get(compute_service_session_id)
+            if pending is None:
+                prepared = await self._await_media_step(
+                    adapter.prepare_video_upload(
+                        session,
+                        camera_id=camera_id,
+                        width=width,
+                        height=height,
+                        fps=fps,
+                        bitrate_kbps=bitrate_kbps,
+                    ),
+                    timeout_seconds,
+                    "preparing the local WebRTC Offer",
+                )
+                try:
+                    self._validate_local_media_offer(session, prepared.offer_sdp)
+                except BaseException:
+                    await prepared.abort()
+                    raise
+                pending = _PendingMediaConnection(
+                    session,
+                    f"media-{session.role.value}-{uuid.uuid4()}",
+                    prepared.offer_sdp,
+                    prepared,
+                )
+                self._computing_pending_media[compute_service_session_id] = pending
+            prepared = pending.prepared
+            connection_id: str | None = None
+            try:
+                request_id, connection_id, answer_sdp = await self._create_media_connection(
+                    session, pending.request_id, pending.offer_sdp, timeout_seconds
+                )
+                if compute_service_session_id in self._computing_closing:
+                    raise AgentSdkError(
+                        ErrorCode.COMPUTING_SESSION_INVALID,
+                        "computing session closed during media negotiation",
+                    )
+                await self._install_media_candidate_routes(session, answer_sdp)
+                upload = await self._await_media_step(
+                    prepared.apply_answer(answer_sdp, timeout_seconds),
+                    timeout_seconds,
+                    "applying the Sandbox WebRTC Answer",
+                )
+                if compute_service_session_id in self._computing_closing:
+                    await upload.stop()
+                    raise AgentSdkError(
+                        ErrorCode.COMPUTING_SESSION_INVALID,
+                        "computing session closed during media negotiation",
+                    )
+            except BaseException as exc:
+                preserve_pending = (
+                    connection_id is None
+                    and isinstance(exc, AgentSdkError)
+                    and exc.retryable
+                    and compute_service_session_id not in self._computing_closing
+                )
+                if preserve_pending:
+                    raise
+                self._computing_pending_media.pop(compute_service_session_id, None)
+                try:
+                    await prepared.abort()
+                finally:
+                    if connection_id is not None:
+                        try:
+                            await self._delete_media_connection(
+                                session, connection_id, timeout_seconds
+                            )
+                        except Exception:
+                            pass
+                        if compute_service_session_id not in self._computing_closing:
+                            try:
+                                await self._replace_compute_routes(session)
+                            except Exception:
+                                pass
+                raise
+            managed = _ManagedVideoUpload(
+                upload,
+                lambda: self._close_media_record(
+                    compute_service_session_id, connection_id, timeout_seconds
+                ),
+            )
+            self._computing_media[compute_service_session_id] = _MediaConnection(
+                session, request_id, connection_id, upload, managed
+            )
+            self._computing_pending_media.pop(compute_service_session_id, None)
+            return managed
 
     @logged_async
     async def get_processed_video_stream(
         self,
-        session: OffloadingSession,
-        timeout_seconds: float = 10.0,
+        compute_service_session_id: str,
+        timeout_seconds: float = 15.0,
     ) -> RemoteVideoStream:
         if timeout_seconds <= 0:
             raise AgentSdkError(
@@ -1504,29 +1709,1851 @@ class AgentSdk:
                 field="timeout_seconds",
             )
         self._require_ready()
-        if session.state in {"CLOSED", "FAILED", "STOPPED"}:
-            raise AgentSdkError(
-                ErrorCode.OFFLOADING_SESSION_INVALID,
-                f"offloading session {session.session_id} is not streamable "
-                f"in state {session.state}",
-            )
-        if session.processed_stream is None:
-            raise AgentSdkError(
-                ErrorCode.OFFLOADING_SESSION_INVALID,
-                "processed stream endpoint is missing for offloading session "
-                f"{session.session_id}",
-            )
-        assert self._routes is not None
-        await self._routes.replace_group_peers(
-            self._offloading_route_key(session.session_id),
-            self._offloading_endpoint_ips(session),
+        session = await self._wait_for_computing_session(
+            compute_service_session_id, timeout_seconds
         )
-        self._offloading_sessions[session.session_id] = session
+        if session.role is not ComputeRole.CONSUMER:
+            raise AgentSdkError(
+                ErrorCode.COMPUTING_SESSION_INVALID,
+                "get_processed_video_stream requires the consumer configuration",
+                field="role",
+            )
         adapter = self._require_media_adapter()
-        return await asyncio.wait_for(
-            adapter.get_processed_video_stream(session, timeout_seconds),
+        self._validate_media_codec(adapter, session)
+        lock = self._computing_media_locks.setdefault(
+            compute_service_session_id, asyncio.Lock()
+        )
+        async with lock:
+            existing = self._computing_media.get(compute_service_session_id)
+            if existing is not None:
+                return existing.managed  # type: ignore[return-value]
+            pending = self._computing_pending_media.get(compute_service_session_id)
+            if pending is None:
+                prepared = await self._await_media_step(
+                    adapter.prepare_processed_video(session),
+                    timeout_seconds,
+                    "preparing the local WebRTC Offer",
+                )
+                try:
+                    self._validate_local_media_offer(session, prepared.offer_sdp)
+                except BaseException:
+                    await prepared.abort()
+                    raise
+                pending = _PendingMediaConnection(
+                    session,
+                    f"media-{session.role.value}-{uuid.uuid4()}",
+                    prepared.offer_sdp,
+                    prepared,
+                )
+                self._computing_pending_media[compute_service_session_id] = pending
+            prepared = pending.prepared
+            connection_id: str | None = None
+            try:
+                request_id, connection_id, answer_sdp = await self._create_media_connection(
+                    session, pending.request_id, pending.offer_sdp, timeout_seconds
+                )
+                if compute_service_session_id in self._computing_closing:
+                    raise AgentSdkError(
+                        ErrorCode.COMPUTING_SESSION_INVALID,
+                        "computing session closed during media negotiation",
+                    )
+                await self._install_media_candidate_routes(session, answer_sdp)
+                stream = await self._await_media_step(
+                    prepared.apply_answer(answer_sdp, timeout_seconds),
+                    timeout_seconds,
+                    "applying the Sandbox WebRTC Answer",
+                )
+                if compute_service_session_id in self._computing_closing:
+                    await stream.close()
+                    raise AgentSdkError(
+                        ErrorCode.COMPUTING_SESSION_INVALID,
+                        "computing session closed during media negotiation",
+                    )
+            except BaseException as exc:
+                preserve_pending = (
+                    connection_id is None
+                    and isinstance(exc, AgentSdkError)
+                    and exc.retryable
+                    and compute_service_session_id not in self._computing_closing
+                )
+                if preserve_pending:
+                    raise
+                self._computing_pending_media.pop(compute_service_session_id, None)
+                try:
+                    await prepared.abort()
+                finally:
+                    if connection_id is not None:
+                        try:
+                            await self._delete_media_connection(
+                                session, connection_id, timeout_seconds
+                            )
+                        except Exception:
+                            pass
+                        if compute_service_session_id not in self._computing_closing:
+                            try:
+                                await self._replace_compute_routes(session)
+                            except Exception:
+                                pass
+                raise
+            managed = _ManagedRemoteVideoStream(
+                stream,
+                lambda: self._close_media_record(
+                    compute_service_session_id, connection_id, timeout_seconds
+                ),
+            )
+            self._computing_media[compute_service_session_id] = _MediaConnection(
+                session, request_id, connection_id, stream, managed
+            )
+            self._computing_pending_media.pop(compute_service_session_id, None)
+            return managed
+
+    @logged_async
+    async def update_recognition_target(
+        self,
+        compute_service_session_id: str,
+        request_id: str,
+        text: str,
+        language: str | None = None,
+        timeout_seconds: float = 15.0,
+    ) -> RecognitionTargetStatus:
+        """Replace the consumer session's current visual recognition target."""
+        self._validate_sandbox_timeout(timeout_seconds)
+        self._validate_compute_request_id(request_id, "request_id")
+        self._require_nonempty_string(text, "text", ErrorCode.INVALID_ARGUMENT)
+        if language is not None:
+            self._require_nonempty_string(
+                language, "language", ErrorCode.INVALID_ARGUMENT
+            )
+        session = await self._wait_for_computing_session(
+            compute_service_session_id, timeout_seconds
+        )
+        self._require_consumer_session(session, "update_recognition_target")
+        context = self._media_context(session)
+        input_body: dict[str, Any] = {"type": "TEXT", "text": text}
+        if language is not None:
+            input_body["language"] = language
+        body = {
+            "request_id": request_id,
+            "computing_context": context,
+            "input": input_body,
+        }
+        response = await self._sandbox_transport.request_with_status(
+            "PUT",
+            self._recognition_target_url(session),
+            body,
+            timeout_seconds,
+            session.network_binding.ue_ipv4,
+        )
+        return self._parse_recognition_target_response(
+            response, session, expected_request_id=request_id
+        )
+
+    @logged_async
+    async def get_recognition_target(
+        self,
+        compute_service_session_id: str,
+        timeout_seconds: float = 15.0,
+    ) -> RecognitionTargetStatus:
+        """Read the latest recognition target applied to a consumer session."""
+        self._validate_sandbox_timeout(timeout_seconds)
+        session = await self._wait_for_computing_session(
+            compute_service_session_id, timeout_seconds
+        )
+        self._require_consumer_session(session, "get_recognition_target")
+        response = await self._sandbox_transport.request_with_status(
+            "GET",
+            self._recognition_target_url(session),
+            None,
+            timeout_seconds,
+            session.network_binding.ue_ipv4,
+        )
+        return self._parse_recognition_target_response(response, session)
+
+    @logged_async
+    async def create_control_action(
+        self,
+        compute_service_session_id: str,
+        request: ControlActionRequest,
+        timeout_seconds: float = 15.0,
+    ) -> ControlActionStatus:
+        """Submit one runtime action to the Sandbox for a consumer session."""
+        self._validate_sandbox_timeout(timeout_seconds)
+        self._validate_control_action_request(request)
+        session = await self._wait_for_computing_session(
+            compute_service_session_id, timeout_seconds
+        )
+        self._require_consumer_session(session, "create_control_action")
+        body: dict[str, Any] = {
+            "request_id": request.request_id,
+            "computing_context": self._media_context(session),
+            "input": {"type": request.input_type.value},
+        }
+        if request.action is not None:
+            body["action"] = request.action.value
+        if request.input_type is ControlInputType.TEXT:
+            body["input"]["text"] = request.text
+            if request.language is not None:
+                body["input"]["language"] = request.language
+        if request.parameters is not None:
+            body["parameters"] = dict(request.parameters)
+        if request.target is not None:
+            target: dict[str, Any] = {"role": request.target.role.value}
+            if request.target.agent_id is not None:
+                target["agent_id"] = request.target.agent_id
+            body["target"] = target
+        response = await self._sandbox_transport.request_with_status(
+            "POST",
+            self._control_actions_url(session),
+            body,
+            timeout_seconds,
+            session.network_binding.ue_ipv4,
+        )
+        return self._parse_control_action_response(
+            response,
+            session,
+            expected_http_status=202,
+            expected_request_id=request.request_id,
+            require_context=True,
+            require_normalized=request.input_type is ControlInputType.TEXT,
+        )
+
+    @logged_async
+    async def get_control_action(
+        self,
+        compute_service_session_id: str,
+        action_id: str,
+        timeout_seconds: float = 15.0,
+    ) -> ControlActionStatus:
+        """Read an asynchronous Sandbox action without executing it again."""
+        self._validate_sandbox_timeout(timeout_seconds)
+        action_id = self._require_nonempty_string(
+            action_id, "action_id", ErrorCode.INVALID_ARGUMENT
+        )
+        session = await self._wait_for_computing_session(
+            compute_service_session_id, timeout_seconds
+        )
+        self._require_consumer_session(session, "get_control_action")
+        url = (
+            f"{self._control_actions_url(session).rstrip('/')}"
+            f"/{quote(action_id, safe='')}"
+        )
+        response = await self._sandbox_transport.request_with_status(
+            "GET", url, None, timeout_seconds, session.network_binding.ue_ipv4
+        )
+        return self._parse_control_action_response(
+            response,
+            session,
+            expected_http_status=200,
+            expected_action_id=action_id,
+        )
+
+    def _validate_control_action_request(self, request: ControlActionRequest) -> None:
+        if not isinstance(request, ControlActionRequest):
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "request must be a ControlActionRequest",
+                field="request",
+            )
+        self._validate_compute_request_id(request.request_id, "request_id")
+        if not isinstance(request.input_type, ControlInputType):
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "input_type must be a ControlInputType",
+                field="input_type",
+            )
+        if request.action is not None and not isinstance(request.action, ControlAction):
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "action must be a ControlAction",
+                field="action",
+            )
+        if request.input_type is ControlInputType.TEXT:
+            self._require_nonempty_string(
+                request.text, "text", ErrorCode.INVALID_ARGUMENT
+            )
+            if request.language is not None:
+                self._require_nonempty_string(
+                    request.language, "language", ErrorCode.INVALID_ARGUMENT
+                )
+            if request.parameters is not None:
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "TEXT control input must not contain parameters",
+                    field="parameters",
+                )
+        else:
+            if request.text is not None or request.language is not None:
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "STRUCTURED control input must not contain text or language",
+                    field="text",
+                )
+            if request.action is None:
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "STRUCTURED control input requires action",
+                    field="action",
+                )
+            if not isinstance(request.parameters, Mapping):
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "STRUCTURED control input requires a parameters object",
+                    field="parameters",
+                )
+        if request.target is not None:
+            if not isinstance(request.target.role, ControlTargetRole):
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "target.role must be a ControlTargetRole",
+                    field="target.role",
+                )
+            if request.target.role is ControlTargetRole.PRODUCER:
+                self._require_nonempty_string(
+                    request.target.agent_id,
+                    "target.agent_id",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            elif request.target.agent_id is not None:
+                self._require_nonempty_string(
+                    request.target.agent_id,
+                    "target.agent_id",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+
+    def _parse_control_action_response(
+        self,
+        response: RuntimeHttpResponse,
+        session: ComputingSession,
+        *,
+        expected_http_status: int,
+        expected_request_id: str | None = None,
+        expected_action_id: str | None = None,
+        require_context: bool = False,
+        require_normalized: bool = False,
+    ) -> ControlActionStatus:
+        if response.status_code != expected_http_status:
+            error = response.body.get("error")
+            code = error.get("code") if isinstance(error, Mapping) else None
+            message = error.get("message") if isinstance(error, Mapping) else None
+            raise AgentSdkError(
+                ErrorCode.SANDBOX_REJECTED,
+                str(message or f"Sandbox returned HTTP {response.status_code}"),
+                retryable=response.status_code >= 500,
+                details={"sandbox_code": code, "status_code": response.status_code},
+            )
+        request_id = self._require_nonempty_string(
+            response.body.get("request_id"),
+            "request_id",
+            ErrorCode.SANDBOX_REJECTED,
+        )
+        if expected_request_id is not None and request_id != expected_request_id:
+            raise AgentSdkError(
+                ErrorCode.SANDBOX_REJECTED,
+                "response request_id does not match the control request",
+                field="request_id",
+            )
+        action_id = self._require_nonempty_string(
+            response.body.get("action_id"),
+            "action_id",
+            ErrorCode.SANDBOX_REJECTED,
+        )
+        if expected_action_id is not None and action_id != expected_action_id:
+            raise AgentSdkError(
+                ErrorCode.SANDBOX_REJECTED,
+                "response action_id does not match the query",
+                field="action_id",
+            )
+        raw_context = response.body.get("computing_context")
+        expected_context = self._media_context(session)
+        if require_context and raw_context is None:
+            raise AgentSdkError(
+                ErrorCode.SANDBOX_REJECTED,
+                "response computing_context is required",
+                field="computing_context",
+            )
+        if raw_context is not None and raw_context != expected_context:
+            raise AgentSdkError(
+                ErrorCode.SANDBOX_REJECTED,
+                "response computing_context does not match C-02",
+                field="computing_context",
+            )
+        status = self._require_nonempty_string(
+            response.body.get("status"), "status", ErrorCode.SANDBOX_REJECTED
+        )
+        if status not in {
+            "ACCEPTED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED", "UNKNOWN"
+        }:
+            raise AgentSdkError(
+                ErrorCode.SANDBOX_REJECTED,
+                "status is not a defined control action status",
+                field="status",
+            )
+        cause = response.body.get("cause")
+        if not isinstance(cause, str):
+            raise AgentSdkError(
+                ErrorCode.SANDBOX_REJECTED,
+                "cause must be a string",
+                field="cause",
+            )
+        raw_normalized_action = response.body.get("normalized_action")
+        normalized_action: ControlAction | None = None
+        if raw_normalized_action is not None:
+            try:
+                normalized_action = ControlAction(raw_normalized_action)
+            except (TypeError, ValueError) as exc:
+                raise AgentSdkError(
+                    ErrorCode.SANDBOX_REJECTED,
+                    "normalized_action is not a defined action",
+                    field="normalized_action",
+                ) from exc
+        raw_normalized_parameters = response.body.get("normalized_parameters")
+        if raw_normalized_parameters is not None and not isinstance(
+            raw_normalized_parameters, Mapping
+        ):
+            raise AgentSdkError(
+                ErrorCode.SANDBOX_REJECTED,
+                "normalized_parameters must be an object",
+                field="normalized_parameters",
+            )
+        if require_normalized and (
+            normalized_action is None or raw_normalized_parameters is None
+        ):
+            raise AgentSdkError(
+                ErrorCode.SANDBOX_REJECTED,
+                "TEXT control response requires normalized_action and normalized_parameters",
+            )
+        raw_result = response.body.get("result")
+        if raw_result is not None and not isinstance(raw_result, Mapping):
+            raise AgentSdkError(
+                ErrorCode.SANDBOX_REJECTED,
+                "result must be an object",
+                field="result",
+            )
+        context = None
+        if raw_context is not None:
+            context = ComputingContext(
+                compute_service_session_id=session.compute_service_session_id,
+                compute_instance_id=session.compute_instance_id,
+                binding_ref=session.binding_ref,
+                role=session.role,
+                agent_id=session.receiver_agent_id,
+            )
+        return ControlActionStatus(
+            request_id=request_id,
+            action_id=action_id,
+            status=status,
+            cause=cause,
+            computing_context=context,
+            normalized_action=normalized_action,
+            normalized_parameters=(
+                dict(raw_normalized_parameters)
+                if isinstance(raw_normalized_parameters, Mapping)
+                else None
+            ),
+            result=dict(raw_result) if isinstance(raw_result, Mapping) else None,
+        )
+
+    @staticmethod
+    def _validate_sandbox_timeout(timeout_seconds: float) -> None:
+        if timeout_seconds <= 0:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "timeout_seconds must be greater than zero",
+                field="timeout_seconds",
+            )
+
+    @staticmethod
+    def _require_consumer_session(
+        session: ComputingSession, operation: str
+    ) -> None:
+        if session.role is not ComputeRole.CONSUMER:
+            raise AgentSdkError(
+                ErrorCode.COMPUTING_SESSION_INVALID,
+                f"{operation} requires the consumer configuration",
+                field="role",
+            )
+
+    def _parse_recognition_target_response(
+        self,
+        response: RuntimeHttpResponse,
+        session: ComputingSession,
+        *,
+        expected_request_id: str | None = None,
+    ) -> RecognitionTargetStatus:
+        if response.status_code != 200:
+            error = response.body.get("error")
+            code = error.get("code") if isinstance(error, Mapping) else None
+            message = error.get("message") if isinstance(error, Mapping) else None
+            raise AgentSdkError(
+                ErrorCode.SANDBOX_REJECTED,
+                str(message or f"Sandbox returned HTTP {response.status_code}"),
+                retryable=response.status_code >= 500,
+                details={"sandbox_code": code, "status_code": response.status_code},
+            )
+        request_id = self._require_nonempty_string(
+            response.body.get("request_id"),
+            "request_id",
+            ErrorCode.SANDBOX_REJECTED,
+        )
+        if expected_request_id is not None and request_id != expected_request_id:
+            raise AgentSdkError(
+                ErrorCode.SANDBOX_REJECTED,
+                "response request_id does not match the recognition request",
+                field="request_id",
+            )
+        expected_context = self._media_context(session)
+        if response.body.get("computing_context") != expected_context:
+            raise AgentSdkError(
+                ErrorCode.SANDBOX_REJECTED,
+                "response computing_context does not match C-02",
+                field="computing_context",
+            )
+        if response.body.get("status") != "APPLIED":
+            raise AgentSdkError(
+                ErrorCode.SANDBOX_REJECTED,
+                "recognition target status must be APPLIED",
+                field="status",
+            )
+        revision = response.body.get("target_revision")
+        if (
+            not isinstance(revision, str)
+            or not revision.isdecimal()
+            or int(revision) > 0xFFFFFFFFFFFFFFFF
+        ):
+            raise AgentSdkError(
+                ErrorCode.SANDBOX_REJECTED,
+                "target_revision must be a uint64 decimal string",
+                field="target_revision",
+            )
+        raw_target = response.body.get("target")
+        if not isinstance(raw_target, Mapping):
+            raise AgentSdkError(
+                ErrorCode.SANDBOX_REJECTED,
+                "target must be an object",
+                field="target",
+            )
+        label = self._require_nonempty_string(
+            raw_target.get("label"), "target.label", ErrorCode.SANDBOX_REJECTED
+        )
+        prompt = self._require_nonempty_string(
+            raw_target.get("prompt"), "target.prompt", ErrorCode.SANDBOX_REJECTED
+        )
+        return RecognitionTargetStatus(
+            request_id=request_id,
+            computing_context=ComputingContext(
+                compute_service_session_id=session.compute_service_session_id,
+                compute_instance_id=session.compute_instance_id,
+                binding_ref=session.binding_ref,
+                role=session.role,
+                agent_id=session.receiver_agent_id,
+            ),
+            status="APPLIED",
+            target_revision=revision,
+            target=RecognitionTarget(label=label, prompt=prompt),
+        )
+
+    @staticmethod
+    async def _await_media_step(awaitable, timeout_seconds: float, operation: str):
+        try:
+            return await asyncio.wait_for(awaitable, timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            raise AgentSdkError(
+                ErrorCode.TIMEOUT,
+                f"timed out while {operation}",
+                retryable=True,
+            ) from exc
+
+    @staticmethod
+    def _validate_media_codec(
+        adapter: MediaOffloadAdapter, session: ComputingSession
+    ) -> None:
+        codec = session.connection_parameters.video_codec
+        if codec is not None and not adapter.supports_video_codec(codec):
+            raise AgentSdkError(
+                ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                f"required video codec is not supported: {codec}",
+                field="connection_parameters.video_codec",
+            )
+
+    @staticmethod
+    def _media_context(session: ComputingSession) -> dict[str, str]:
+        return {
+            "compute_service_session_id": session.compute_service_session_id,
+            "compute_instance_id": session.compute_instance_id,
+            "binding_ref": session.binding_ref,
+            "role": session.role.value,
+            "agent_id": session.receiver_agent_id,
+        }
+
+    async def _create_media_connection(
+        self,
+        session: ComputingSession,
+        request_id: str,
+        offer_sdp: str,
+        timeout_seconds: float,
+    ) -> tuple[str, str, str]:
+        context = self._media_context(session)
+        body = {
+            "request_id": request_id,
+            "computing_context": context,
+            "offer": {"type": "offer", "sdp": offer_sdp},
+        }
+        response: RuntimeHttpResponse | None = None
+        for attempt in range(2):
+            try:
+                response = await self._sandbox_transport.request_with_status(
+                    "POST",
+                    self._media_connections_url(session),
+                    body,
+                    timeout_seconds,
+                    session.network_binding.ue_ipv4,
+                )
+                break
+            except AgentSdkError as exc:
+                if attempt == 1 or not exc.retryable:
+                    raise
+        assert response is not None
+        if response.status_code != 201:
+            error = response.body.get("error")
+            code = error.get("code") if isinstance(error, Mapping) else None
+            message = error.get("message") if isinstance(error, Mapping) else None
+            raise AgentSdkError(
+                ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                str(message or f"Sandbox returned HTTP {response.status_code}"),
+                retryable=response.status_code >= 500,
+                details={"sandbox_code": code, "status_code": response.status_code},
+            )
+        raw_connection_id = response.body.get("media_connection_id")
+        try:
+            if response.body.get("request_id") != request_id:
+                self._invalid_media_response("response request_id does not match the request")
+            if response.body.get("computing_context") != context:
+                self._invalid_media_response("response computing_context does not match C-02")
+            connection_id = self._require_nonempty_string(
+                raw_connection_id,
+                "media_connection_id",
+                ErrorCode.MEDIA_NEGOTIATION_FAILED,
+            )
+            answer = response.body.get("answer")
+            if not isinstance(answer, Mapping) or answer.get("type") != "answer":
+                self._invalid_media_response("answer.type must be answer")
+            answer_sdp = self._require_nonempty_string(
+                answer.get("sdp"), "answer.sdp", ErrorCode.MEDIA_NEGOTIATION_FAILED
+            )
+        except AgentSdkError:
+            if isinstance(raw_connection_id, str) and raw_connection_id:
+                try:
+                    await self._delete_media_connection(
+                        session, raw_connection_id, timeout_seconds
+                    )
+                except Exception:
+                    pass
+            raise
+        return request_id, connection_id, answer_sdp
+
+    @staticmethod
+    def _invalid_media_response(message: str) -> None:
+        raise AgentSdkError(ErrorCode.MEDIA_NEGOTIATION_FAILED, message)
+
+    @classmethod
+    def _validate_local_media_offer(
+        cls, session: ComputingSession, offer_sdp: str
+    ) -> None:
+        expected_direction = (
+            "a=sendonly" if session.role is ComputeRole.PRODUCER else "a=recvonly"
+        )
+        if expected_direction not in offer_sdp.splitlines():
+            raise AgentSdkError(
+                ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                f"local WebRTC Offer must contain {expected_direction}",
+            )
+        candidates = cls._candidate_ipv4s(offer_sdp)
+        if session.network_binding.ue_ipv4 not in candidates:
+            raise AgentSdkError(
+                ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                "local WebRTC Offer has no ICE candidate for the C-02 UE IPv4 address",
+            )
+        host_addresses = cls._candidate_ipv4s(offer_sdp, host_only=True)
+        if host_addresses != {session.network_binding.ue_ipv4}:
+            raise AgentSdkError(
+                ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                "local WebRTC Offer contains a host candidate outside the C-02 user plane",
+            )
+
+    @staticmethod
+    def _candidate_ipv4s(sdp: str, *, host_only: bool = False) -> set[str]:
+        addresses: set[str] = set()
+        for line in sdp.splitlines():
+            if not line.startswith("a=candidate:"):
+                continue
+            parts = line.split()
+            if len(parts) < 6:
+                continue
+            if host_only and (len(parts) < 8 or parts[7].lower() != "host"):
+                continue
+            try:
+                addresses.add(str(ipaddress.IPv4Address(parts[4])))
+            except ValueError:
+                continue
+        return addresses
+
+    async def _install_media_candidate_routes(
+        self, session: ComputingSession, answer_sdp: str
+    ) -> None:
+        expected_direction = (
+            "a=recvonly" if session.role is ComputeRole.PRODUCER else "a=sendonly"
+        )
+        if expected_direction not in answer_sdp.splitlines():
+            raise AgentSdkError(
+                ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                f"Sandbox Answer must contain {expected_direction}",
+            )
+        codec = session.connection_parameters.video_codec
+        if codec is not None:
+            wanted = codec.lower().removeprefix("video/")
+            negotiated = {
+                line.split(None, 1)[1].split("/", 1)[0].lower()
+                for line in answer_sdp.splitlines()
+                if line.startswith("a=rtpmap:") and len(line.split(None, 1)) == 2
+            }
+            if wanted not in negotiated:
+                raise AgentSdkError(
+                    ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                    f"Sandbox Answer did not negotiate required video codec {codec}",
+                )
+        candidates = self._candidate_ipv4s(answer_sdp)
+        if not candidates:
+            raise AgentSdkError(
+                ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                "Sandbox Answer has no IPv4 ICE candidate",
+            )
+        await self._replace_compute_routes(session, candidates)
+
+    async def _close_media_record(
+        self, session_id: str, connection_id: str, timeout_seconds: float
+    ) -> None:
+        record = self._computing_media.get(session_id)
+        if record is not None and record.media_connection_id != connection_id:
+            return
+        session = record.session if record is not None else self._computing_sessions.get(session_id)
+        if session is None:
+            return
+        try:
+            await self._delete_media_connection(session, connection_id, timeout_seconds)
+            current = self._computing_media.get(session_id)
+            if current is not None and current.media_connection_id == connection_id:
+                self._computing_media.pop(session_id, None)
+        finally:
+            if session_id not in self._computing_closing:
+                await self._replace_compute_routes(session)
+
+    async def _delete_media_connection(
+        self, session: ComputingSession, connection_id: str, timeout_seconds: float
+    ) -> None:
+        url = f"{self._media_connections_url(session).rstrip('/')}/{quote(connection_id, safe='')}"
+        response = await self._sandbox_transport.request_with_status(
+            "DELETE", url, None, timeout_seconds, session.network_binding.ue_ipv4
+        )
+        if response.status_code != 204:
+            raise AgentSdkError(
+                ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                f"Sandbox returned HTTP {response.status_code} for media DELETE",
+                retryable=response.status_code >= 500,
+                details={"status_code": response.status_code, "response": dict(response.body)},
+            )
+
+    async def _validate_compute_request(
+        self,
+        request: ComputeSessionRequest,
+        expected_type: ComputeRequestType,
+    ) -> None:
+        self._require_ready()
+        if not isinstance(request, ComputeSessionRequest):
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "request must be a ComputeSessionRequest",
+                field="request",
+            )
+        if request.message_type != "COMPUTE_SESSION_REQUEST":
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "message_type must be COMPUTE_SESSION_REQUEST",
+                field="message_type",
+            )
+        if request.request_type is not expected_type:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"request_type must be {expected_type.value}",
+                field="request_type",
+            )
+        self._validate_compute_request_id(request.request_id, "request_id")
+        if not isinstance(request.input_format, ComputeInputFormat):
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "input_format must be a ComputeInputFormat",
+                field="input_format",
+            )
+
+        if expected_type is ComputeRequestType.CREATE:
+            context = request.acn_context
+            if not isinstance(context, AcnContext):
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "acn_context is required for CREATE",
+                    field="acn_context",
+                )
+            for field, value in (
+                ("acn_context.group_id", context.group_id),
+                ("acn_context.requester_agent_id", context.requester_agent_id),
+                ("acn_context.target_agent_id", context.target_agent_id),
+            ):
+                self._require_nonempty_string(value, field, ErrorCode.INVALID_ARGUMENT)
+            if request.ui_locale is not None:
+                self._require_nonempty_string(
+                    request.ui_locale, "ui_locale", ErrorCode.INVALID_ARGUMENT
+                )
+            if request.compute_service_session_id is not None or request.target_request_id is not None:
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "CREATE must not contain a target session or target request",
+                )
+            if request.input_format is ComputeInputFormat.NATURAL_LANGUAGE:
+                self._require_nonempty_string(
+                    request.text, "text", ErrorCode.INVALID_ARGUMENT
+                )
+                if request.constraints is not None:
+                    raise AgentSdkError(
+                        ErrorCode.INVALID_ARGUMENT,
+                        "natural-language CREATE must not contain constraints",
+                        field="constraints",
+                    )
+            else:
+                if request.text is not None:
+                    raise AgentSdkError(
+                        ErrorCode.INVALID_ARGUMENT,
+                        "structured CREATE must not contain text",
+                        field="text",
+                    )
+                self._validate_compute_constraints(request.constraints)
+            return
+
+        if request.input_format is not ComputeInputFormat.STRUCTURED:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "QUERY, CANCEL and RELEASE require input_format=STRUCTURED",
+                field="input_format",
+            )
+        if any(
+            value is not None
+            for value in (
+                request.acn_context,
+                request.text,
+                request.constraints,
+                request.ui_locale,
+            )
+        ):
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "non-CREATE requests must not contain CREATE fields",
+            )
+        has_session = request.compute_service_session_id is not None
+        has_target_request = request.target_request_id is not None
+        if expected_type in {ComputeRequestType.QUERY, ComputeRequestType.CANCEL}:
+            if has_session == has_target_request:
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "exactly one of compute_service_session_id and target_request_id is required",
+                )
+        elif not has_session or has_target_request:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "RELEASE requires compute_service_session_id only",
+                field="compute_service_session_id",
+            )
+        if has_session:
+            self._require_nonempty_string(
+                request.compute_service_session_id,
+                "compute_service_session_id",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if has_target_request:
+            self._validate_compute_request_id(
+                request.target_request_id, "target_request_id"
+            )
+
+    @classmethod
+    def _validate_compute_constraints(
+        cls, constraints: ComputeConstraints | None
+    ) -> None:
+        if not isinstance(constraints, ComputeConstraints):
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "constraints are required for structured CREATE",
+                field="constraints",
+            )
+        cls._require_nonempty_string(
+            constraints.capability_id,
+            "constraints.capability_id",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+        for field, value in (
+            ("constraints.api_version", constraints.api_version),
+            ("constraints.image_id", constraints.image_id),
+            ("constraints.dnn", constraints.dnn),
+            ("constraints.snssai", constraints.snssai),
+            ("constraints.placement_region", constraints.placement_region),
+            (
+                "constraints.data_residency_region",
+                constraints.data_residency_region,
+            ),
+        ):
+            if value is not None:
+                cls._require_nonempty_string(value, field, ErrorCode.INVALID_ARGUMENT)
+        resources = constraints.resources
+        if resources is not None:
+            if not isinstance(resources, ComputeResources):
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "constraints.resources must be ComputeResources",
+                    field="constraints.resources",
+                )
+            for field, value in (
+                ("cpu_millicores", resources.cpu_millicores),
+                ("memory_mib", resources.memory_mib),
+                ("gpu_count", resources.gpu_count),
+            ):
+                if value is not None and (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or not 0 <= value <= 0xFFFFFFFF
+                ):
+                    raise AgentSdkError(
+                        ErrorCode.INVALID_ARGUMENT,
+                        f"constraints.resources.{field} must be uint32",
+                        field=f"constraints.resources.{field}",
+                    )
+            if resources.gpu_model is not None:
+                cls._require_nonempty_string(
+                    resources.gpu_model,
+                    "constraints.resources.gpu_model",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+        duration = constraints.max_duration_ms
+        if duration is not None and (
+            isinstance(duration, bool)
+            or not isinstance(duration, int)
+            or not 0 <= duration <= 0xFFFFFFFF
+        ):
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "constraints.max_duration_ms must be uint32",
+                field="constraints.max_duration_ms",
+            )
+        if constraints.allow_base_qos is not None and not isinstance(
+            constraints.allow_base_qos, bool
+        ):
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "constraints.allow_base_qos must be a bool",
+                field="constraints.allow_base_qos",
+            )
+
+    @staticmethod
+    def _validate_compute_request_id(value: Any, field: str) -> None:
+        if not isinstance(value, str) or not value or not 1 <= len(value.encode("utf-8")) <= 128:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"{field} must contain 1..128 UTF-8 bytes",
+                field=field,
+            )
+
+    @staticmethod
+    def _compute_request_body(request: ComputeSessionRequest) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "message_type": request.message_type,
+            "request_type": request.request_type.value,
+            "input_format": request.input_format.value,
+            "request_id": request.request_id,
+        }
+        if request.acn_context is not None:
+            body["acn_context"] = {
+                "group_id": request.acn_context.group_id,
+                "requester_agent_id": request.acn_context.requester_agent_id,
+                "target_agent_id": request.acn_context.target_agent_id,
+            }
+        if request.text is not None:
+            body["text"] = request.text
+        if request.constraints is not None:
+            constraints: dict[str, Any] = {
+                "capability_id": request.constraints.capability_id
+            }
+            for field in (
+                "api_version",
+                "image_id",
+                "dnn",
+                "snssai",
+                "allow_base_qos",
+                "max_duration_ms",
+                "placement_region",
+                "data_residency_region",
+            ):
+                value = getattr(request.constraints, field)
+                if value is not None:
+                    constraints[field] = value
+            if request.constraints.resources is not None:
+                resources = {
+                    field: getattr(request.constraints.resources, field)
+                    for field in (
+                        "cpu_millicores",
+                        "memory_mib",
+                        "gpu_count",
+                        "gpu_model",
+                    )
+                    if getattr(request.constraints.resources, field) is not None
+                }
+                constraints["resources"] = resources
+            body["constraints"] = constraints
+        for field in (
+            "compute_service_session_id",
+            "target_request_id",
+            "ui_locale",
+        ):
+            value = getattr(request, field)
+            if value is not None:
+                body[field] = value
+        return body
+
+    async def _compute_preflight(self) -> None:
+        assert self._runtime is not None
+        status = await self._runtime.get_acn_status()
+        if status.get("ready") is not True:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "GET /v1/acn/status did not report ready=true",
+                retryable=True,
+                details={"cause": "nas_not_ready"},
+            )
+        ue_info = await self._runtime.get_ue_info()
+        HttpRuntimeTransport.select_ue_agent_ip(ue_info)
+        sessions = ue_info.get("pdu_sessions")
+        if not isinstance(sessions, list) or not any(
+            isinstance(item, Mapping)
+            and item.get("state") == "active"
+            and item.get("type") == "IPv4"
+            for item in sessions
+        ):
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "no active IPv4 PDU Session is available",
+                details={"cause": "pdu-session-required"},
+            )
+        accesses = ue_info.get("data_plane_accesses")
+        compatible = [
+            item
+            for item in accesses or ()
+            if isinstance(item, Mapping)
+            and item.get("access_type") == "HTTP3_CONNECT_IP"
+            and item.get("session_selection") == "EXACT_PDU_SESSION_ID"
+        ]
+        if not compatible:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime provides no exact HTTP3 CONNECT-IP data-plane access",
+                details={"cause": "data-plane-access-unsupported"},
+            )
+        self._ue_info = ue_info
+
+    async def _send_compute_request(
+        self, request: ComputeSessionRequest, timeout_seconds: float
+    ) -> ComputeSessionStatus:
+        if timeout_seconds <= 0:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "timeout_seconds must be greater than zero",
+                field="timeout_seconds",
+            )
+        body = self._compute_request_body(request)
+        previous = self._compute_requests.get(request.request_id)
+        if previous is not None and previous != body:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "request_id was already used with different computing content",
+                field="request_id",
+                details={"cause": "idempotency-conflict"},
+            )
+        self._compute_requests[request.request_id] = body
+        await self._compute_preflight()
+        if request.request_type is ComputeRequestType.CREATE:
+            self._compute_create_requests[request.request_id] = request
+        assert self._runtime is not None
+        response = await asyncio.wait_for(
+            self._runtime.request_with_status(
+                "POST", _COMPUTING_SESSION_REQUEST_PATH, body
+            ),
             timeout=timeout_seconds,
         )
+        if not isinstance(response, RuntimeHttpResponse):
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime transport returned an invalid HTTP response",
+            )
+        allowed_status = (
+            {202}
+            if request.request_type is ComputeRequestType.CREATE
+            else {200}
+            if request.request_type is ComputeRequestType.QUERY
+            else {200, 202}
+        )
+        if response.body.get("message_type") == _COMPUTE_SESSION_STATUS:
+            if response.status_code not in allowed_status and not 400 <= response.status_code < 500:
+                raise AgentSdkError(
+                    ErrorCode.RUNTIME_REJECTED,
+                    f"Runtime returned invalid HTTP {response.status_code} for "
+                    f"{request.request_type.value}",
+                    details={"http_status": response.status_code},
+                )
+            result = self._parse_compute_status(response.body)
+            if result.request_id != request.request_id:
+                raise AgentSdkError(
+                    ErrorCode.RUNTIME_REJECTED,
+                    "C-04 request_id does not match the computing request",
+                    field="request_id",
+                )
+            await self._remember_compute_status(result)
+            return result
+        error = response.body.get("error")
+        if isinstance(error, Mapping):
+            cause = error.get("code")
+            error_code = ErrorCode.TIMEOUT if response.status_code == 504 else ErrorCode.RUNTIME_REJECTED
+            raise AgentSdkError(
+                error_code,
+                str(error.get("message") or f"Runtime rejected computing request: {cause}"),
+                retryable=response.status_code in {503, 504},
+                details={"cause": cause, "http_status": response.status_code},
+            )
+        raise AgentSdkError(
+            ErrorCode.RUNTIME_REJECTED,
+            f"Runtime returned HTTP {response.status_code} without C-04 or error",
+        )
+
+    def _parse_compute_status(
+        self, payload: Mapping[str, Any], *, message_type_in_payload: bool = True
+    ) -> ComputeSessionStatus:
+        if message_type_in_payload and payload.get("message_type") != _COMPUTE_SESSION_STATUS:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "message_type must be COMPUTE_SESSION_STATUS",
+                field="message_type",
+            )
+        request_id = self._require_nonempty_string(
+            payload.get("request_id"), "request_id", ErrorCode.RUNTIME_REJECTED
+        )
+        status = self._require_nonempty_string(
+            payload.get("status"), "status", ErrorCode.RUNTIME_REJECTED
+        )
+        if status not in _COMPUTE_STATUSES:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "status is not a defined computing session status",
+                field="status",
+            )
+        cause = payload.get("cause")
+        if not isinstance(cause, str):
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "cause must be a string",
+                field="cause",
+            )
+        session_id = payload.get("compute_service_session_id")
+        revision = payload.get("status_revision")
+        if session_id is not None:
+            session_id = self._require_nonempty_string(
+                session_id,
+                "compute_service_session_id",
+                ErrorCode.RUNTIME_REJECTED,
+            )
+            if not isinstance(revision, str) or not revision.isdecimal():
+                raise AgentSdkError(
+                    ErrorCode.RUNTIME_REJECTED,
+                    "status_revision must be a uint64 decimal string",
+                    field="status_revision",
+                )
+            parsed_revision = int(revision)
+            if not 0 <= parsed_revision <= 0xFFFFFFFFFFFFFFFF:
+                raise AgentSdkError(
+                    ErrorCode.RUNTIME_REJECTED,
+                    "status_revision exceeds uint64",
+                    field="status_revision",
+                )
+        elif revision is not None:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "status_revision requires compute_service_session_id",
+                field="status_revision",
+            )
+        missing = payload.get("missing_fields", [])
+        if not isinstance(missing, list) or not all(
+            isinstance(item, str) and item for item in missing
+        ):
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "missing_fields must be an array of strings",
+                field="missing_fields",
+            )
+        if status == "CLARIFICATION_REQUIRED" and "missing_fields" not in payload:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "CLARIFICATION_REQUIRED requires missing_fields",
+                field="missing_fields",
+            )
+        result = payload.get("result")
+        if result is not None and not isinstance(result, Mapping):
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "result must be an object",
+                field="result",
+            )
+        return ComputeSessionStatus(
+            message_type=_COMPUTE_SESSION_STATUS,
+            request_id=request_id,
+            compute_service_session_id=session_id,
+            status_revision=revision,
+            status=status,
+            cause=cause,
+            missing_fields=tuple(missing),
+            result=dict(result) if isinstance(result, Mapping) else None,
+        )
+
+    async def _remember_compute_status(self, status: ComputeSessionStatus) -> bool:
+        self._computing_statuses_by_request[status.request_id] = status
+        session_id = status.compute_service_session_id
+        if session_id is None or status.status_revision is None:
+            return True
+        current = self._computing_statuses.get(session_id)
+        if current is not None and current.status_revision is not None:
+            if int(status.status_revision) <= int(current.status_revision):
+                return False
+        self._computing_statuses[session_id] = status
+        async with self._computing_session_changed:
+            self._computing_session_changed.notify_all()
+        return True
+
+    async def _handle_compute_session_status(
+        self, payload: Mapping[str, Any]
+    ) -> None:
+        await self._remember_compute_status(
+            self._parse_compute_status(payload, message_type_in_payload=False)
+        )
+
+    @staticmethod
+    def _require_object(value: Any, field: str) -> Mapping[str, Any]:
+        if not isinstance(value, Mapping):
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                f"{field} must be an object",
+                field=field,
+            )
+        return value
+
+    @staticmethod
+    def _require_uint(value: Any, field: str, maximum: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                f"{field} must be an unsigned integer",
+                field=field,
+            )
+        return value
+
+    def _parse_compute_connect_config(
+        self, payload: Mapping[str, Any]
+    ) -> ComputingSession:
+        session_id = self._require_nonempty_string(
+            payload.get("compute_service_session_id"),
+            "compute_service_session_id",
+            ErrorCode.RUNTIME_REJECTED,
+        )
+        instance_id = self._require_nonempty_string(
+            payload.get("compute_instance_id"),
+            "compute_instance_id",
+            ErrorCode.RUNTIME_REJECTED,
+        )
+        binding_ref = self._require_nonempty_string(
+            payload.get("binding_ref"), "binding_ref", ErrorCode.RUNTIME_REJECTED
+        )
+        try:
+            role = ComputeRole(payload.get("role"))
+        except ValueError as exc:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "role must be consumer or producer",
+                field="role",
+            ) from exc
+        receiver_agent_id = self._require_nonempty_string(
+            payload.get("receiver_agent_id"),
+            "receiver_agent_id",
+            ErrorCode.RUNTIME_REJECTED,
+        )
+        service_endpoint = self._require_service_endpoint(
+            payload.get("service_endpoint"), "service_endpoint"
+        )
+        raw_binding = self._require_object(payload.get("network_binding"), "network_binding")
+        raw_snssai = self._require_object(raw_binding.get("snssai"), "network_binding.snssai")
+        raw_data_plane = self._require_object(
+            raw_binding.get("runtime_data_plane"),
+            "network_binding.runtime_data_plane",
+        )
+        binding = ComputeNetworkBinding(
+            pdu_session_id=self._require_uint(
+                raw_binding.get("pdu_session_id"),
+                "network_binding.pdu_session_id",
+                255,
+            ),
+            dnn=self._require_nonempty_string(
+                raw_binding.get("dnn"),
+                "network_binding.dnn",
+                ErrorCode.RUNTIME_REJECTED,
+            ),
+            snssai=Snssai(
+                sst=self._require_uint(
+                    raw_snssai.get("sst"), "network_binding.snssai.sst", 255
+                ),
+                sd=self._parse_optional_sd(raw_snssai.get("sd")),
+            ),
+            ue_ipv4=self._require_ipv4(
+                raw_binding.get("ue_ipv4"), "network_binding.ue_ipv4"
+            ),
+            runtime_data_plane=RuntimeDataPlane(
+                access_type=self._require_nonempty_string(
+                    raw_data_plane.get("access_type"),
+                    "network_binding.runtime_data_plane.access_type",
+                    ErrorCode.RUNTIME_REJECTED,
+                ),
+                session_selection=self._require_nonempty_string(
+                    raw_data_plane.get("session_selection"),
+                    "network_binding.runtime_data_plane.session_selection",
+                    ErrorCode.RUNTIME_REJECTED,
+                ),
+            ),
+        )
+        raw_parameters = self._require_object(
+            payload.get("connection_parameters"), "connection_parameters"
+        )
+        parameters = ComputeConnectionParameters(
+            media_connections_path=self._require_absolute_path(
+                raw_parameters.get("media_connections_path"),
+                "connection_parameters.media_connections_path",
+            ),
+            transport=self._require_nonempty_string(
+                raw_parameters.get("transport"),
+                "connection_parameters.transport",
+                ErrorCode.RUNTIME_REJECTED,
+            ),
+            recognition_target_path_template=self._optional_absolute_path(
+                raw_parameters.get("recognition_target_path_template"),
+                "connection_parameters.recognition_target_path_template",
+            ),
+            video_codec=self._optional_nonempty_string(
+                raw_parameters.get("video_codec"),
+                "connection_parameters.video_codec",
+            ),
+        )
+        if parameters.transport != "WEBRTC":
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "connection_parameters.transport must be WEBRTC",
+                field="connection_parameters.transport",
+            )
+        recognition_path = parameters.recognition_target_path_template
+        if recognition_path is not None and recognition_path.count(
+            "{compute_service_session_id}"
+        ) != 1:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "recognition_target_path_template must contain "
+                "{compute_service_session_id} exactly once",
+                field="connection_parameters.recognition_target_path_template",
+            )
+        expires_at = self._parse_optional_datetime(payload.get("expires_at"))
+        return ComputingSession(
+            compute_service_session_id=session_id,
+            compute_instance_id=instance_id,
+            binding_ref=binding_ref,
+            role=role,
+            receiver_agent_id=receiver_agent_id,
+            service_endpoint=service_endpoint,
+            network_binding=binding,
+            connection_parameters=parameters,
+            expires_at=expires_at,
+        )
+
+    async def _handle_compute_connect_config(
+        self, payload: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        try:
+            session = self._parse_compute_connect_config(payload)
+        except AgentSdkError:
+            return self._raw_compute_config_ack(payload, False, "invalid-request")
+        key = (
+            session.binding_ref,
+            session.role.value,
+            session.receiver_agent_id,
+        )
+        if key in self._computing_close_results:
+            return self._compute_config_ack(session, False, "session-closed")
+        current = self._computing_sessions.get(session.compute_service_session_id)
+        if current is not None:
+            if current == session:
+                return self._compute_config_ack(session, True, "")
+            return self._compute_config_ack(session, False, "config-conflict")
+        binding_match = next(
+            (
+                configured
+                for configured in self._computing_sessions.values()
+                if (
+                    configured.binding_ref,
+                    configured.role.value,
+                    configured.receiver_agent_id,
+                )
+                == key
+            ),
+            None,
+        )
+        if binding_match is not None:
+            return self._compute_config_ack(session, False, "config-conflict")
+        try:
+            await self._validate_and_install_compute_binding(session)
+        except AgentSdkError as exc:
+            cause = str(exc.details.get("cause") or "config-rejected")
+            return self._compute_config_ack(session, False, cause)
+        self._computing_sessions[session.compute_service_session_id] = session
+        async with self._computing_session_changed:
+            self._computing_session_changed.notify_all()
+        return self._compute_config_ack(session, True, "")
+
+    async def _validate_and_install_compute_binding(
+        self, session: ComputingSession
+    ) -> None:
+        if self._profile is None or session.receiver_agent_id != self._profile.agent_id:
+            self._raise_compute_binding_error(
+                "binding-mismatch", "receiver_agent_id does not match the local Agent"
+            )
+        binding = session.network_binding
+        if (
+            binding.runtime_data_plane.access_type != "HTTP3_CONNECT_IP"
+            or binding.runtime_data_plane.session_selection != "EXACT_PDU_SESSION_ID"
+        ):
+            self._raise_compute_binding_error(
+                "data-plane-access-unsupported", "unsupported Runtime data-plane mapping"
+            )
+        ue_info = self._ue_info
+        if ue_info is None:
+            assert self._runtime is not None
+            ue_info = await self._runtime.get_ue_info()
+            self._ue_info = ue_info
+        sessions = ue_info.get("pdu_sessions")
+        matching = [
+            item
+            for item in sessions or ()
+            if isinstance(item, Mapping)
+            and item.get("pdu_session_id") == binding.pdu_session_id
+            and item.get("state") == "active"
+            and item.get("type") == "IPv4"
+        ]
+        if len(matching) != 1:
+            self._raise_compute_binding_error(
+                "pdu-session-not-found", "configured PDU Session is not active"
+            )
+        pdu = matching[0]
+        raw_snssai = pdu.get("snssai")
+        local_sd = raw_snssai.get("sd") if isinstance(raw_snssai, Mapping) else None
+        local_sst = raw_snssai.get("sst") if isinstance(raw_snssai, Mapping) else None
+        try:
+            local_ip = str(ipaddress.IPv4Address(str(pdu.get("ipv4"))))
+        except ValueError:
+            self._raise_compute_binding_error(
+                "network-binding-mismatch", "local PDU Session has an invalid IPv4 address"
+            )
+        if (
+            pdu.get("dnn") != binding.dnn
+            or local_sst != binding.snssai.sst
+            or local_sd != binding.snssai.sd
+            or local_ip != binding.ue_ipv4
+            or self._config is None
+            or self._config.agent_tun_ip != binding.ue_ipv4
+        ):
+            self._raise_compute_binding_error(
+                "network-binding-mismatch", "C-02 does not match the local PDU Session"
+            )
+        accesses = ue_info.get("data_plane_accesses")
+        matching_accesses = [
+            item
+            for item in accesses or ()
+            if isinstance(item, Mapping)
+            and item.get("access_type") == binding.runtime_data_plane.access_type
+            and item.get("session_selection") == binding.runtime_data_plane.session_selection
+        ]
+        if len(matching_accesses) != 1:
+            self._raise_compute_binding_error(
+                "data-plane-access-unsupported", "no unique matching data-plane access"
+            )
+        template = matching_accesses[0].get("endpoint_template")
+        if not isinstance(template, str) or template.count("{pdu_session_id}") != 1:
+            self._raise_compute_binding_error(
+                "data-plane-access-unsupported", "invalid data-plane endpoint template"
+            )
+        expanded = template.replace("{pdu_session_id}", str(binding.pdu_session_id))
+        try:
+            parsed_access = urlsplit(expanded)
+        except ValueError:
+            parsed_access = None
+        if (
+            parsed_access is None
+            or parsed_access.scheme != "https"
+            or not parsed_access.hostname
+            or parsed_access.username is not None
+            or parsed_access.fragment
+            or self._masque is None
+            or not self._masque.connected
+        ):
+            self._raise_compute_binding_error(
+                "data-plane-access-unsupported", "CONNECT-IP data plane is unavailable"
+            )
+        await self._install_compute_route(session)
+
+    async def _install_compute_route(self, session: ComputingSession) -> None:
+        await self._replace_compute_routes(session)
+
+    async def _replace_compute_routes(
+        self, session: ComputingSession, extra_addresses: set[str] | None = None
+    ) -> None:
+        host = urlsplit(session.service_endpoint).hostname
+        assert host is not None and self._routes is not None
+        try:
+            addresses = {str(ipaddress.IPv4Address(host))}
+        except ValueError:
+            resolved = await asyncio.to_thread(
+                socket.getaddrinfo, host, None, socket.AF_INET, socket.SOCK_STREAM
+            )
+            addresses = {item[4][0] for item in resolved}
+        if not addresses:
+            self._raise_compute_binding_error(
+                "config-rejected", "service_endpoint host cannot be resolved"
+            )
+        addresses.update(extra_addresses or ())
+        await self._routes.replace_group_peers(
+            self._computing_route_key(session.binding_ref), addresses
+        )
+
+    @staticmethod
+    def _raise_compute_binding_error(cause: str, message: str) -> None:
+        raise AgentSdkError(
+            ErrorCode.RUNTIME_REJECTED, message, details={"cause": cause}
+        )
+
+    @staticmethod
+    def _network_binding_body(binding: ComputeNetworkBinding) -> dict[str, Any]:
+        snssai: dict[str, Any] = {"sst": binding.snssai.sst}
+        if binding.snssai.sd is not None:
+            snssai["sd"] = binding.snssai.sd
+        return {
+            "pdu_session_id": binding.pdu_session_id,
+            "dnn": binding.dnn,
+            "snssai": snssai,
+            "ue_ipv4": binding.ue_ipv4,
+            "runtime_data_plane": {
+                "access_type": binding.runtime_data_plane.access_type,
+                "session_selection": binding.runtime_data_plane.session_selection,
+            },
+        }
+
+    @classmethod
+    def _compute_config_ack(
+        cls, session: ComputingSession, accepted: bool, cause: str
+    ) -> Mapping[str, Any]:
+        return {
+            "compute_service_session_id": session.compute_service_session_id,
+            "compute_instance_id": session.compute_instance_id,
+            "binding_ref": session.binding_ref,
+            "role": session.role.value,
+            "receiver_agent_id": session.receiver_agent_id,
+            "network_binding": cls._network_binding_body(session.network_binding),
+            "accepted": accepted,
+            "cause": cause,
+        }
+
+    @staticmethod
+    def _raw_compute_config_ack(
+        payload: Mapping[str, Any], accepted: bool, cause: str
+    ) -> Mapping[str, Any]:
+        fields = (
+            "compute_service_session_id",
+            "compute_instance_id",
+            "binding_ref",
+            "role",
+            "receiver_agent_id",
+            "network_binding",
+        )
+        return {
+            **{field: payload[field] for field in fields if field in payload},
+            "accepted": accepted,
+            "cause": cause,
+        }
+
+    async def _handle_compute_session_close(
+        self, payload: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        field_names = (
+                "compute_service_session_id",
+                "compute_instance_id",
+                "binding_ref",
+                "role",
+                "receiver_agent_id",
+        )
+        try:
+            fields = {
+                name: self._require_nonempty_string(
+                    payload.get(name), name, ErrorCode.RUNTIME_REJECTED
+                )
+                for name in field_names
+            }
+        except AgentSdkError:
+            return {
+                **{
+                    name: payload[name]
+                    for name in field_names
+                    if isinstance(payload.get(name), str) and payload[name]
+                },
+                "closed": False,
+                "cause": "invalid-request",
+            }
+        close_cause = payload.get("cause")
+        if not isinstance(close_cause, str):
+            return {**fields, "closed": False, "cause": "invalid-request"}
+        if fields["role"] not in {role.value for role in ComputeRole}:
+            return {**fields, "closed": False, "cause": "binding-mismatch"}
+        key = (fields["binding_ref"], fields["role"], fields["receiver_agent_id"])
+        previous = self._computing_close_results.get(key)
+        if previous is not None:
+            return previous
+        session = self._computing_sessions.get(fields["compute_service_session_id"])
+        response_base = {
+            name: fields[name]
+            for name in (
+                "compute_service_session_id",
+                "compute_instance_id",
+                "binding_ref",
+                "role",
+                "receiver_agent_id",
+            )
+        }
+        if (
+            session is None
+            or session.compute_instance_id != fields["compute_instance_id"]
+            or session.binding_ref != fields["binding_ref"]
+            or session.role.value != fields["role"]
+            or session.receiver_agent_id != fields["receiver_agent_id"]
+        ):
+            result = {**response_base, "closed": False, "cause": "binding-mismatch"}
+            return result
+        self._computing_closing.add(session.compute_service_session_id)
+        try:
+            pending = self._computing_pending_media.pop(
+                session.compute_service_session_id, None
+            )
+            if pending is not None:
+                try:
+                    await pending.prepared.abort()
+                except Exception:
+                    pass
+            media = self._computing_media.get(session.compute_service_session_id)
+            if media is not None:
+                try:
+                    if session.role is ComputeRole.PRODUCER:
+                        await media.managed.stop()  # type: ignore[attr-defined]
+                    else:
+                        await media.managed.close()  # type: ignore[attr-defined]
+                except Exception:
+                    # C-05 still tears down the local binding. Remote media cleanup
+                    # converges through CMF UnbindComputeSession.
+                    pass
+            self._computing_media.pop(session.compute_service_session_id, None)
+            assert self._routes is not None
+            await self._routes.replace_group_peers(
+                self._computing_route_key(session.binding_ref), set()
+            )
+            self._computing_sessions.pop(session.compute_service_session_id, None)
+            result = {**response_base, "closed": True, "cause": ""}
+        except Exception:
+            result = {**response_base, "closed": False, "cause": "runtime-unhealthy"}
+        self._computing_close_results[key] = result
+        async with self._computing_session_changed:
+            self._computing_session_changed.notify_all()
+        return result
+
+    async def _wait_for_computing_session(
+        self, compute_service_session_id: str, timeout_seconds: float
+    ) -> ComputingSession:
+        session_id = self._require_nonempty_string(
+            compute_service_session_id,
+            "compute_service_session_id",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+
+        async def wait() -> ComputingSession:
+            async with self._computing_session_changed:
+                while session_id not in self._computing_sessions:
+                    status = self._computing_statuses.get(session_id)
+                    if status is not None and status.status in _COMPUTE_TERMINAL_STATUSES:
+                        raise AgentSdkError(
+                            ErrorCode.COMPUTING_SESSION_INVALID,
+                            f"computing session ended in state {status.status}",
+                        )
+                    await self._computing_session_changed.wait()
+                return self._computing_sessions[session_id]
+
+        try:
+            return await asyncio.wait_for(wait(), timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            raise AgentSdkError(
+                ErrorCode.TIMEOUT,
+                f"timed out waiting for C-02 for computing session {session_id}",
+                retryable=True,
+            ) from exc
+
+    async def _recover_compute_statuses(self) -> None:
+        for create_request in tuple(self._compute_create_requests.values()):
+            known = self._computing_statuses_by_request.get(create_request.request_id)
+            if known is not None and known.compute_service_session_id is not None:
+                known = self._computing_statuses.get(
+                    known.compute_service_session_id, known
+                )
+            if known is not None and known.status in _COMPUTE_TERMINAL_STATUSES:
+                continue
+            recovery = ComputeSessionRequest(
+                message_type="COMPUTE_SESSION_REQUEST",
+                request_type=ComputeRequestType.QUERY,
+                input_format=ComputeInputFormat.STRUCTURED,
+                request_id=str(uuid.uuid4()),
+                target_request_id=create_request.request_id,
+            )
+            try:
+                await self._send_compute_request(recovery, 30.0)
+            except Exception as exc:
+                self._log(
+                    logging.WARNING,
+                    "compute_status_recovery_failed",
+                    request_id=create_request.request_id,
+                    error=str(exc),
+                )
+
+    @staticmethod
+    def _parse_optional_sd(value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or len(value) != 6:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "network_binding.snssai.sd must be six hexadecimal characters",
+                field="network_binding.snssai.sd",
+            )
+        try:
+            int(value, 16)
+        except ValueError as exc:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                "network_binding.snssai.sd must be six hexadecimal characters",
+                field="network_binding.snssai.sd",
+            ) from exc
+        return value
+
+    @classmethod
+    def _require_ipv4(cls, value: Any, field: str) -> str:
+        text = cls._require_nonempty_string(value, field, ErrorCode.RUNTIME_REJECTED)
+        try:
+            return str(ipaddress.IPv4Address(text))
+        except ValueError as exc:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                f"{field} must be an IPv4 literal",
+                field=field,
+            ) from exc
+
+    @classmethod
+    def _require_service_endpoint(cls, value: Any, field: str) -> str:
+        text = cls._require_nonempty_string(value, field, ErrorCode.RUNTIME_REJECTED)
+        try:
+            parsed = urlsplit(text)
+            port = parsed.port
+        except ValueError as exc:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED, f"{field} is invalid", field=field
+            ) from exc
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+            or port is not None and not 1 <= port <= 65535
+        ):
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                f"{field} must be an absolute HTTP or HTTPS URI",
+                field=field,
+            )
+        return text.rstrip("/")
+
+    @classmethod
+    def _require_absolute_path(cls, value: Any, field: str) -> str:
+        text = cls._require_nonempty_string(value, field, ErrorCode.RUNTIME_REJECTED)
+        if not text.startswith("/") or urlsplit(text).scheme or urlsplit(text).netloc:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                f"{field} must be an absolute path",
+                field=field,
+            )
+        return text
+
+    @classmethod
+    def _optional_absolute_path(cls, value: Any, field: str) -> str | None:
+        return None if value is None else cls._require_absolute_path(value, field)
+
+    @classmethod
+    def _optional_nonempty_string(cls, value: Any, field: str) -> str | None:
+        return None if value is None else cls._require_nonempty_string(
+            value, field, ErrorCode.RUNTIME_REJECTED
+        )
+
+    @staticmethod
+    def _computing_route_key(binding_ref: str) -> str:
+        return f"computing:{binding_ref}"
+
+    @staticmethod
+    def _media_connections_url(session: ComputingSession) -> str:
+        return urljoin(
+            session.service_endpoint.rstrip("/") + "/",
+            session.connection_parameters.media_connections_path,
+        )
+
+    @staticmethod
+    def _recognition_target_url(session: ComputingSession) -> str:
+        template = session.connection_parameters.recognition_target_path_template
+        if template is None:
+            raise AgentSdkError(
+                ErrorCode.COMPUTING_SESSION_INVALID,
+                "C-02 does not provide recognition_target_path_template",
+                field="connection_parameters.recognition_target_path_template",
+            )
+        path = template.replace(
+            "{compute_service_session_id}",
+            quote(session.compute_service_session_id, safe=""),
+        )
+        return urljoin(session.service_endpoint.rstrip("/") + "/", path)
+
+    @staticmethod
+    def _control_actions_url(session: ComputingSession) -> str:
+        return urljoin(session.service_endpoint.rstrip("/") + "/", "/v1/control-actions")
 
     @staticmethod
     def _require_nonempty_string(
@@ -1541,75 +3568,6 @@ class AgentSdk:
                 field=field,
             )
         return value.strip()
-
-    @classmethod
-    def _parse_video_upload_endpoint(
-        cls,
-        value: Any,
-        *,
-        error_code: ErrorCode,
-        field_prefix: str,
-    ) -> VideoUploadEndpoint:
-        if not isinstance(value, Mapping):
-            raise AgentSdkError(
-                error_code,
-                f"{field_prefix} must be an object",
-                field=field_prefix,
-            )
-        return VideoUploadEndpoint(
-            video_server_ip=cls._require_ip_address(
-                value.get("video_server_ip"),
-                f"{field_prefix}.video_server_ip",
-                error_code,
-            ),
-            source_start_url=cls._require_http_url(
-                value.get("source_start_url"),
-                f"{field_prefix}.source_start_url",
-                error_code,
-            ),
-            source_stop_url=cls._require_http_url(
-                value.get("source_stop_url"),
-                f"{field_prefix}.source_stop_url",
-                error_code,
-            ),
-        )
-
-    @classmethod
-    def _parse_processed_video_endpoint(
-        cls,
-        value: Any,
-        *,
-        error_code: ErrorCode,
-        field_prefix: str,
-    ) -> ProcessedVideoEndpoint:
-        if not isinstance(value, Mapping):
-            raise AgentSdkError(
-                error_code,
-                f"{field_prefix} must be an object",
-                field=field_prefix,
-            )
-        protocol = str(value.get("protocol", "webrtc"))
-        signaling = str(value.get("signaling", "non-trickle"))
-        if protocol != "webrtc" or signaling not in {"non-trickle", "trickle"}:
-            raise AgentSdkError(
-                error_code,
-                f"{field_prefix} contains an unsupported WebRTC profile",
-                field=field_prefix,
-            )
-        return ProcessedVideoEndpoint(
-            video_server_ip=cls._require_ip_address(
-                value.get("video_server_ip"),
-                f"{field_prefix}.video_server_ip",
-                error_code,
-            ),
-            offer_url=cls._require_http_url(
-                value.get("offer_url"),
-                f"{field_prefix}.offer_url",
-                error_code,
-            ),
-            protocol=protocol,
-            signaling=signaling,
-        )
 
     @classmethod
     def _require_ip_address(
@@ -1628,54 +3586,11 @@ class AgentSdk:
                 field=field,
             ) from exc
 
-    @classmethod
-    def _require_http_url(
-        cls,
-        value: Any,
-        field: str,
-        error_code: ErrorCode,
-    ) -> str:
-        text = cls._require_nonempty_string(value, field, error_code)
-        try:
-            parsed = urlsplit(text)
-            port = parsed.port
-        except ValueError as exc:
-            raise AgentSdkError(
-                error_code, f"{field} is not a valid URL", field=field
-            ) from exc
-        if (
-            parsed.scheme not in {"http", "https"}
-            or parsed.hostname is None
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.fragment
-            or port is not None and not 1 <= port <= 65535
-        ):
-            raise AgentSdkError(
-                error_code,
-                f"{field} must be an HTTP/HTTPS URL without credentials or fragment",
-                field=field,
-            )
-        return text
-
-    @staticmethod
-    def _offloading_route_key(session_id: str) -> str:
-        return f"offloading:{session_id}"
-
-    @staticmethod
-    def _offloading_endpoint_ips(session: OffloadingSession) -> set[str]:
-        return {
-            endpoint.video_server_ip
-            for endpoint in (session.producer, session.processed_stream)
-            if endpoint is not None
-        }
-
     def _require_media_adapter(self) -> MediaOffloadAdapter:
         if self._media_offload_adapter is None:
-            raise AgentSdkError(
-                ErrorCode.OFFLOADING_SESSION_NOT_FOUND,
-                "no WebRTC media adapter is configured",
-            )
+            from .webrtc import AiortcMediaOffloadAdapter
+
+            self._media_offload_adapter = AiortcMediaOffloadAdapter()
         return self._media_offload_adapter
 
     async def _operation(
@@ -2002,6 +3917,8 @@ class AgentSdk:
             return
         try:
             self._state = "CLOSING"
+            self._computing_closing.update(self._computing_sessions)
+            self._computing_closing.update(self._computing_pending_media)
             # Drain the inbound HTTP server while routes, MASQUE and the TUN are
             # still alive.  In particular, an application may call close as
             # soon as its A2A listener returns; closing MASQUE first can discard
@@ -2012,22 +3929,44 @@ class AgentSdk:
                 self._pump_task.cancel()
                 await asyncio.gather(self._pump_task, return_exceptions=True)
                 self._pump_task = None
+            for pending in tuple(self._computing_pending_media.values()):
+                try:
+                    await pending.prepared.abort()
+                except Exception:
+                    pass
+            self._computing_pending_media.clear()
+            for record in tuple(self._computing_media.values()):
+                try:
+                    if record.session.role is ComputeRole.PRODUCER:
+                        await record.managed.stop()  # type: ignore[attr-defined]
+                    else:
+                        await record.managed.close()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
             if self._groups is not None:
                 await self._groups.close()
             if self._routes is not None:
                 await self._routes.close()
             if self._masque is not None:
                 await self._masque.close()
-            if self._compute_runtime is not None and self._compute_runtime is not self._runtime:
-                await self._compute_runtime.close()
-            self._compute_runtime = None
             if self._runtime is not None:
                 await self._runtime.close()
+            await self._sandbox_transport.close()
             if self._tun is not None:
                 await self._tun.close()
             if self._media_offload_adapter is not None:
                 await self._media_offload_adapter.close()
-            self._offloading_sessions.clear()
+            self._compute_requests.clear()
+            self._compute_create_requests.clear()
+            self._computing_statuses.clear()
+            self._computing_statuses_by_request.clear()
+            self._computing_sessions.clear()
+            self._computing_media.clear()
+            self._computing_pending_media.clear()
+            self._computing_media_locks.clear()
+            self._computing_closing.clear()
+            self._computing_close_results.clear()
+            self._ue_info = None
             self._state = "CLOSED"
         except Exception as exc:
             self._log(

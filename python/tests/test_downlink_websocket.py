@@ -49,8 +49,8 @@ async def test_runtime_downlink_websocket_supports_concurrent_out_of_order_respo
         calls.append((message_type, transaction_id, dict(payload)))
         if payload["sequence"] == 1:
             await release_first.wait()
-            return NetworkMessageAction.ACCEPT
-        return NetworkMessageAction.ACK
+            return {"group_id": "group-invitation", "result": "ACCEPT"}
+        return {"group_id": "group-config", "result": "ACK"}
 
     transport = HttpRuntimeTransport("127.0.0.1", port)
     try:
@@ -154,5 +154,69 @@ async def test_sdk_maps_nas_invitation_to_network_listener(sdk_fixture):
         "ACN_AGENT_GROUPING_INVITATION", payload, transaction_id=49
     )
 
-    assert result is NetworkMessageAction.ACCEPT
+    assert result == {"group_id": "group-a-b", "result": "ACCEPT"}
     assert listener.messages == [(NetworkMessageType.GROUP_INVITATION, payload)]
+
+
+async def test_runtime_downlink_accepts_event_without_request_id_or_response():
+    runner, port, connections, responses, _ = await _runtime_server()
+    delivered = asyncio.Event()
+
+    async def handler(message_type, transaction_id, payload):
+        assert message_type == "COMPUTE_SESSION_STATUS"
+        assert transaction_id == 34
+        delivered.set()
+        return None
+
+    transport = HttpRuntimeTransport("127.0.0.1", port)
+    try:
+        await transport.start_downlink(handler)
+        socket = await asyncio.wait_for(connections.get(), timeout=1)
+        await socket.send_json({
+            "kind": "event",
+            "message_type": "COMPUTE_SESSION_STATUS",
+            "transaction_id": 34,
+            "payload": {"request_id": "create-001", "status": "ACCEPTED", "cause": ""},
+        })
+        await asyncio.wait_for(delivered.wait(), timeout=1)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(responses.get(), timeout=0.05)
+    finally:
+        await transport.close()
+        await runner.cleanup()
+
+
+async def test_runtime_request_with_status_preserves_c04_on_http_422():
+    async def computing(request: web.Request) -> web.Response:
+        body = await request.json()
+        return web.json_response(
+            {
+                "message_type": "COMPUTE_SESSION_STATUS",
+                "request_id": body["request_id"],
+                "status": "CLARIFICATION_REQUIRED",
+                "cause": "missing-capability",
+                "missing_fields": ["constraints.capability_id"],
+            },
+            status=422,
+        )
+
+    app = web.Application()
+    app.router.add_post("/v1/computing/session-requests", computing)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    transport = HttpRuntimeTransport("127.0.0.1", port)
+    try:
+        response = await transport.request_with_status(
+            "POST",
+            "/v1/computing/session-requests",
+            {"request_id": "create-001"},
+        )
+        assert response.status_code == 422
+        assert response.body["status"] == "CLARIFICATION_REQUIRED"
+        assert response.body["request_id"] == "create-001"
+    finally:
+        await transport.close()
+        await runner.cleanup()

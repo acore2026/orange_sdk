@@ -32,6 +32,7 @@ COPY . /opt/agent-sdk
 
 RUN python -m pip install --no-cache-dir /opt/agent-sdk \
     && python -c "import agent_sdk; print(agent_sdk.__version__)" \
+    && python -c "import av; source=av.open('/opt/agent-sdk/examples/assets/video-offload-test.mp4'); frame=next(source.decode(video=0)); assert (frame.width, frame.height) == (1280, 720); source.close()" \
     && sh -n /opt/agent-sdk/docker/arm64/start-agent-a.sh \
     && sh -n /opt/agent-sdk/docker/arm64/start-agent-b.sh \
     && install -m 0755 /opt/agent-sdk/docker/arm64/start-agent-a.sh /usr/local/bin/start-agent-a.sh \

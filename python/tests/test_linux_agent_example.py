@@ -41,7 +41,7 @@ def test_linux_agent_contains_every_public_sdk_call():
         "create_group",
         "get_group_snapshot",
         "send_message",
-        "create_offloading_session",
+        "create_computing_session",
         "start_video_upload",
         "get_processed_video_stream",
         "close",
@@ -132,17 +132,11 @@ async def test_linux_agent_full_flow_executes_every_business_api():
         send_message=AsyncMock(
             return_value=SimpleNamespace(message_id="message-1", delivered=True)
         ),
-        create_offloading_session=AsyncMock(
+        create_computing_session=AsyncMock(
             return_value=SimpleNamespace(
-                session_id="session-1",
-                state="ALLOCATED",
-                expires_at=None,
-                processed_stream=SimpleNamespace(
-                    video_server_ip="172.30.0.10",
-                    offer_url="http://172.30.0.10:28500/processed",
-                    protocol="webrtc",
-                    signaling="non-trickle",
-                ),
+                compute_service_session_id="session-1",
+                status="ACCEPTED",
+                cause="",
             )
         ),
         start_video_upload=AsyncMock(return_value=upload),
@@ -164,26 +158,26 @@ async def test_linux_agent_full_flow_executes_every_business_api():
         "test_vc_private_key_path": None,
     }
     assert sdk.create_group.await_args.kwargs["dnn"] == "internet"
-    assert (
-        sdk.create_offloading_session.await_args.kwargs["workload_type"]
-        == "video_rendering"
+    request = sdk.create_computing_session.await_args.args[0]
+    assert request.message_type == "COMPUTE_SESSION_REQUEST"
+    assert request.request_type.value == "CREATE"
+    assert request.input_format.value == "STRUCTURED"
+    assert request.acn_context.group_id == "g1"
+    assert request.acn_context.requester_agent_id == profile.agent_id
+    assert request.acn_context.target_agent_id == target.agent_id
+    assert request.constraints.capability_id == "video_rendering"
+    assert request.constraints.resources.cpu_millicores == 2000
+    assert request.constraints.resources.memory_mib == 4096
+    assert request.constraints.dnn == "internet"
+    sdk.get_processed_video_stream.assert_awaited_once_with(
+        "session-1", timeout_seconds=10.0
     )
-    sandbox_spec = sdk.create_offloading_session.await_args.kwargs["sandbox_spec"]
-    assert sandbox_spec.vcpus == 2
-    assert sandbox_spec.memory_mb == 4096
-    assert "agent_id" not in sdk.create_offloading_session.await_args.kwargs
-    assert "group_id" not in sdk.create_offloading_session.await_args.kwargs
-    assert "sandbox_id" not in sdk.create_offloading_session.await_args.kwargs
-    assert "target_agent_ids" not in sdk.start_video_upload.await_args.kwargs
     assert sdk.send_message.await_count == 2
     session_message = sdk.send_message.await_args_list[1].args[2]
-    assert session_message["type"] == "processed_video_session"
-    assert "consumer_agent_id" not in session_message
-    assert "source_agent_id" not in session_message
-    assert "group_id" not in session_message
-    assert "sandbox_id" not in session_message
-    assert "access_ticket" not in str(session_message)
-    assert "access_token" not in str(session_message)
+    assert session_message == {"compute_service_session_id": "session-1"}
+    assert sdk.send_message.await_args_list[1].kwargs["message_type"] == (
+        "computing_video_session"
+    )
     for method_name in (
         "init",
         "apply_identity",
@@ -194,14 +188,11 @@ async def test_linux_agent_full_flow_executes_every_business_api():
         "create_group",
         "get_group_snapshot",
         "send_message",
-        "create_offloading_session",
-        "start_video_upload",
+        "create_computing_session",
+        "get_processed_video_stream",
         "deregister_identity",
     ):
         getattr(sdk, method_name).assert_awaited()
-    upload.pause.assert_awaited_once()
-    upload.resume.assert_awaited_once()
-    upload.stop.assert_awaited_once()
     assert [name for name, _ in steps] == [
         "sdk.init",
         "sdk.apply_identity",
@@ -213,12 +204,9 @@ async def test_linux_agent_full_flow_executes_every_business_api():
         "sdk.create_group",
         "sdk.get_group_snapshot",
         "sdk.send_message",
-        "sdk.create_offloading_session",
+        "sdk.create_computing_session",
         "sdk.send_message",
-        "sdk.start_video_upload",
-        "upload.pause",
-        "upload.resume",
-        "upload.stop",
+        "sdk.get_processed_video_stream",
         "sdk.deregister_identity",
     ]
     assert all(description for _, description in steps)

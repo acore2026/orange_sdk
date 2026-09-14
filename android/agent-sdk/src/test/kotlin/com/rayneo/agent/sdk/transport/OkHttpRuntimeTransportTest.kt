@@ -16,12 +16,95 @@ import okhttp3.WebSocketListener
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
 class OkHttpRuntimeTransportTest {
+    @Test
+    fun `Sandbox transport supports Sandbox resource methods`() = runTest {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(201)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"media_connection_id":"media-001"}"""),
+        )
+        server.enqueue(MockResponse().setResponseCode(204))
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"status":"APPLIED"}"""),
+        )
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"status":"APPLIED"}"""),
+        )
+        server.start()
+        val transport = OkHttpSandboxTransport()
+        try {
+            val body = buildJsonObject { put("request_id", "media-request-001") }
+            val created = transport.requestWithStatus(
+                "POST",
+                server.url("/v1/media-connections").toString(),
+                body,
+                2.0,
+                "127.0.0.1",
+            )
+            assertEquals(201, created.statusCode)
+            assertEquals("media-001", created.body["media_connection_id"]!!.jsonPrimitive.content)
+            val post = server.takeRequest(2, TimeUnit.SECONDS)!!
+            assertEquals("POST", post.method)
+            assertEquals("/v1/media-connections", post.path)
+            assertEquals(body, Json.parseToJsonElement(post.body.readUtf8()))
+
+            val deleted = transport.requestWithStatus(
+                "DELETE",
+                server.url("/v1/media-connections/media-001").toString(),
+                null,
+                2.0,
+                "127.0.0.1",
+            )
+            assertEquals(204, deleted.statusCode)
+            val delete = server.takeRequest(2, TimeUnit.SECONDS)!!
+            assertEquals("DELETE", delete.method)
+            assertEquals(0L, delete.bodySize)
+
+            val recognitionBody = buildJsonObject { put("request_id", "recognition-001") }
+            val updated = transport.requestWithStatus(
+                "PUT",
+                server.url("/v1/recognition-targets/css-001").toString(),
+                recognitionBody,
+                2.0,
+                "127.0.0.1",
+            )
+            assertEquals(200, updated.statusCode)
+            val put = server.takeRequest(2, TimeUnit.SECONDS)!!
+            assertEquals("PUT", put.method)
+            assertEquals(recognitionBody, Json.parseToJsonElement(put.body.readUtf8()))
+
+            val fetched = transport.requestWithStatus(
+                "GET",
+                server.url("/v1/recognition-targets/css-001").toString(),
+                null,
+                2.0,
+                "127.0.0.1",
+            )
+            assertEquals(200, fetched.statusCode)
+            val get = server.takeRequest(2, TimeUnit.SECONDS)!!
+            assertEquals("GET", get.method)
+            assertEquals(0L, get.bodySize)
+        } finally {
+            transport.close()
+            server.shutdown()
+        }
+    }
+
     @Test
     fun `UE info uses exact GET and returns active default PDU IPv4`() = runTest {
         val server = MockWebServer()
@@ -65,6 +148,71 @@ class OkHttpRuntimeTransportTest {
     }
 
     @Test
+    fun `request with status preserves C04 on HTTP 422`() = runTest {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(422)
+                .setHeader("Content-Type", "application/json")
+                .setBody(
+                    """{"message_type":"COMPUTE_SESSION_STATUS","request_id":"create-001","status":"CLARIFICATION_REQUIRED","cause":"missing-capability","missing_fields":["constraints.capability_id"]}""",
+                ),
+        )
+        server.start()
+        val transport = OkHttpRuntimeTransport(server.hostName, server.port)
+        try {
+            val response = transport.requestWithStatus(
+                "POST",
+                "/v1/computing/session-requests",
+                buildJsonObject { put("request_id", "create-001") },
+            )
+            assertEquals(422, response.statusCode)
+            assertEquals(
+                "CLARIFICATION_REQUIRED",
+                response.body["status"]!!.jsonPrimitive.content,
+            )
+        } finally {
+            transport.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `downlink status event has no websocket response`() = runTest {
+        val server = MockWebServer()
+        val opened = CompletableDeferred<WebSocket>()
+        val delivered = CompletableDeferred<Unit>()
+        val responses = LinkedBlockingQueue<String>()
+        server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                opened.complete(webSocket)
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                responses.put(text)
+            }
+        }))
+        server.start()
+        val transport = OkHttpRuntimeTransport(server.hostName, server.port)
+        try {
+            transport.startDownlink { messageType, transactionId, _ ->
+                assertEquals("COMPUTE_SESSION_STATUS", messageType)
+                assertEquals(34, transactionId)
+                delivered.complete(Unit)
+                null
+            }
+            opened.await().send(
+                """{"kind":"event","message_type":"COMPUTE_SESSION_STATUS","transaction_id":34,"payload":{"request_id":"create-001","status":"ACCEPTED","cause":""}}""",
+            )
+            delivered.await()
+            assertNull(responses.poll(200, TimeUnit.MILLISECONDS))
+        } finally {
+            transport.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun `downlink websocket uses runtime port and allows out of order responses`() = runTest {
         val server = MockWebServer()
         val opened = CompletableDeferred<WebSocket>()
@@ -89,9 +237,15 @@ class OkHttpRuntimeTransportTest {
             transport.startDownlink { _, _, payload ->
                 if (payload["sequence"]!!.jsonPrimitive.int == 1) {
                     releaseFirst.await()
-                    NetworkMessageAction.ACCEPT
+                    buildJsonObject {
+                        put("group_id", "group-invitation")
+                        put("result", NetworkMessageAction.ACCEPT.name)
+                    }
                 } else {
-                    NetworkMessageAction.ACK
+                    buildJsonObject {
+                        put("group_id", "group-config")
+                        put("result", NetworkMessageAction.ACK.name)
+                    }
                 }
             }
             val serverSocket = opened.await()
@@ -180,7 +334,12 @@ class OkHttpRuntimeTransportTest {
             reconnectMaxDelayMillis = 20,
         )
         try {
-            transport.startDownlink { _, _, _ -> NetworkMessageAction.ACK }
+            transport.startDownlink { _, _, payload ->
+                buildJsonObject {
+                    put("group_id", payload["group_id"]!!)
+                    put("result", NetworkMessageAction.ACK.name)
+                }
+            }
             firstOpened.await().close(1011, "simulated runtime restart")
             val reconnected = checkNotNull(secondOpened.poll(2, TimeUnit.SECONDS)) {
                 "downlink WebSocket did not reconnect"

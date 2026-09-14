@@ -3,21 +3,27 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from datetime import datetime
+import uuid
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from agent_sdk import (
+    AcnContext,
     AgentSdk,
+    ComputeConstraints,
+    ComputeInputFormat,
+    ComputeRequestType,
+    ComputeResources,
+    ComputeSessionRequest,
+    ComputeSessionStatus,
     NetworkMessageAction,
     NetworkMessageType,
-    OffloadingSession,
-    ProcessedVideoEndpoint,
-    SandboxSpec,
 )
 
 
 StepHook = Callable[[str, str], Awaitable[None]]
+COMPUTE_SESSION_ID_FIELD = "compute_service_session_id"
+COMPUTE_SESSION_MESSAGE_TYPE = "computing_video_session"
 
 
 async def _before_step(
@@ -39,86 +45,36 @@ class NetworkListener:
 
 
 class GroupListener:
-    def __init__(self, sdk=None, processed_stream_timeout: float = 10.0):
+    def __init__(
+        self,
+        sdk=None,
+        *,
+        camera_id: int = 0,
+        width: int = 1280,
+        height: int = 720,
+        fps: int = 30,
+        bitrate_kbps: int = 2500,
+    ):
         self.sdk = sdk
-        self.processed_stream_timeout = processed_stream_timeout
+        self.camera_id = camera_id
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.bitrate_kbps = bitrate_kbps
 
     async def on_group_message(self, group_id, sender_agent_id, payload):
         print(f"[callback] A2A {group_id=} {sender_agent_id=}: {payload}")
-        if payload.get("type") == "processed_video_session" and self.sdk is not None:
-            session = _offloading_session_from_message(payload)
-            stream = await self.sdk.get_processed_video_stream(
-                session,
-                timeout_seconds=self.processed_stream_timeout,
+        if COMPUTE_SESSION_ID_FIELD in payload and self.sdk is not None:
+            session_id = _computing_session_id_from_message(payload)
+            upload = await self.sdk.start_video_upload(
+                session_id,
+                camera_id=self.camera_id,
+                width=self.width,
+                height=self.height,
+                fps=self.fps,
+                bitrate_kbps=self.bitrate_kbps,
             )
-            print("[callback] processed video stream:", session.session_id, stream)
-
-
-class ExampleVideoUploadHandle:
-    """Example-only media handle; replace with the platform WebRTC adapter."""
-
-    def __init__(self) -> None:
-        self.track_id = "linux-example-video-track"
-        self.state = "RUNNING"
-
-    async def pause(self) -> None:
-        self.state = "PAUSED"
-
-    async def resume(self) -> None:
-        self.state = "RUNNING"
-
-    async def stop(self) -> None:
-        self.state = "STOPPED"
-
-
-class ExampleRemoteVideoStream(AsyncIterator[Any]):
-    def __init__(self) -> None:
-        self._delivered = False
-
-    def __aiter__(self) -> "ExampleRemoteVideoStream":
-        return self
-
-    async def __anext__(self) -> Any:
-        if self._delivered:
-            raise StopAsyncIteration
-        self._delivered = True
-        return await self.recv()
-
-    async def recv(self) -> Any:
-        return {"example": True, "frame": "replace-with-real-decoded-frame"}
-
-
-class ExampleMediaOffloadAdapter:
-    """Exercises every media SDK call without claiming to upload camera data."""
-
-    async def start_video_upload(
-        self,
-        session,
-        *,
-        camera_id,
-        width,
-        height,
-        fps,
-        bitrate_kbps,
-    ) -> ExampleVideoUploadHandle:
-        print(
-            "[media] example upload:",
-            session.session_id,
-            camera_id,
-            f"{width}x{height}@{fps}",
-            f"{bitrate_kbps}kbps",
-        )
-        return ExampleVideoUploadHandle()
-
-    async def get_processed_video_stream(
-        self, session, timeout_seconds
-    ) -> ExampleRemoteVideoStream:
-        del timeout_seconds
-        print(f"[media] example processed stream: {session.session_id}")
-        return ExampleRemoteVideoStream()
-
-    async def close(self) -> None:
-        return None
+            print("[callback] video upload started:", session_id, upload.track_id)
 
 
 def _message(value: str) -> Mapping[str, Any]:
@@ -131,48 +87,18 @@ def _message(value: str) -> Mapping[str, Any]:
     return parsed
 
 
-def _processed_video_message(session: OffloadingSession) -> Mapping[str, Any]:
-    endpoint = session.processed_stream
-    if endpoint is None:
-        raise RuntimeError("offloading session has no processed stream endpoint")
-    return {
-        "type": "processed_video_session",
-        "version": "1.0",
-        "session_id": session.session_id,
-        "state": session.state,
-        "expires_at": (
-            session.expires_at.isoformat() if session.expires_at is not None else None
-        ),
-        "processed_stream": {
-            "video_server_ip": endpoint.video_server_ip,
-            "offer_url": endpoint.offer_url,
-            "protocol": endpoint.protocol,
-            "signaling": endpoint.signaling,
-        },
-    }
+def _processed_video_message(status: ComputeSessionStatus) -> Mapping[str, Any]:
+    session_id = status.compute_service_session_id
+    if session_id is None:
+        raise RuntimeError("CREATE response does not contain compute_service_session_id")
+    return {COMPUTE_SESSION_ID_FIELD: session_id}
 
 
-def _offloading_session_from_message(
-    payload: Mapping[str, Any],
-) -> OffloadingSession:
-    processed = payload.get("processed_stream")
-    if not isinstance(processed, Mapping):
-        raise ValueError("processed video session is missing processed_stream")
-    expires_at = payload.get("expires_at")
-    parsed_expiry = None
-    if isinstance(expires_at, str) and expires_at:
-        parsed_expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-    return OffloadingSession(
-        session_id=str(payload["session_id"]),
-        state=str(payload.get("state", "ALLOCATED")),
-        expires_at=parsed_expiry,
-        processed_stream=ProcessedVideoEndpoint(
-            video_server_ip=str(processed["video_server_ip"]),
-            offer_url=str(processed["offer_url"]),
-            protocol=str(processed.get("protocol", "webrtc")),
-            signaling=str(processed.get("signaling", "non-trickle")),
-        ),
-    )
+def _computing_session_id_from_message(payload: Mapping[str, Any]) -> str:
+    value = payload.get(COMPUTE_SESSION_ID_FIELD)
+    if not isinstance(value, str) or not value:
+        raise ValueError("computing video session requires compute_service_session_id")
+    return value
 
 
 async def _wait_for_group(sdk: AgentSdk, group_id: str, timeout: float):
@@ -367,20 +293,41 @@ async def run_full_flow(
 
     await _before_step(
         before_step,
-        "sdk.create_offloading_session",
-        "POST /compute/v1/offloading-sessions 创建算力卸载会话；"
-        f"workload_type={args.offloading_workload_type!r}，"
-        f"sandbox_spec={args.sandbox_vcpus} vCPU/{args.sandbox_memory_mb} MiB",
+        "sdk.create_computing_session",
+        "POST /v1/computing/session-requests 提交结构化 CREATE；"
+        f"capability_id={args.compute_capability_id!r}，"
+        f"resources={args.compute_cpu_millicores}m CPU/"
+        f"{args.compute_memory_mib} MiB",
     )
-    session = await sdk.create_offloading_session(
-        workload_type=args.offloading_workload_type,
-        sandbox_spec=SandboxSpec(
-            vcpus=args.sandbox_vcpus,
-            memory_mb=args.sandbox_memory_mb,
+    status = await sdk.create_computing_session(
+        ComputeSessionRequest(
+            message_type="COMPUTE_SESSION_REQUEST",
+            request_type=ComputeRequestType.CREATE,
+            input_format=ComputeInputFormat.STRUCTURED,
+            request_id=args.compute_request_id or str(uuid.uuid4()),
+            acn_context=AcnContext(
+                group_id=group.group_id,
+                requester_agent_id=profile.agent_id,
+                target_agent_id=target_agent_id,
+            ),
+            constraints=ComputeConstraints(
+                capability_id=args.compute_capability_id,
+                resources=ComputeResources(
+                    cpu_millicores=args.compute_cpu_millicores,
+                    memory_mib=args.compute_memory_mib,
+                ),
+                dnn=args.dnn,
+                allow_base_qos=True,
+            ),
         ),
-        timeout_seconds=args.offloading_timeout,
+        timeout_seconds=args.compute_timeout,
     )
-    print("[11 create_offloading_session]", session.session_id, session.state)
+    session_id = status.compute_service_session_id
+    if session_id is None:
+        raise RuntimeError(
+            f"CREATE returned {status.status}/{status.cause} without a session ID"
+        )
+    print("[11 create_computing_session]", session_id, status.status)
 
     await _before_step(
         before_step,
@@ -392,9 +339,9 @@ async def run_full_flow(
     session_receipt = await sdk.send_message(
         group.group_id,
         target_agent_id,
-        _processed_video_message(session),
+        _processed_video_message(status),
         timeout_seconds=args.message_timeout,
-        message_type="processed_video_session",
+        message_type=COMPUTE_SESSION_MESSAGE_TYPE,
         task_id=args.task_id,
     )
     print(
@@ -405,41 +352,14 @@ async def run_full_flow(
 
     await _before_step(
         before_step,
-        "sdk.start_video_upload",
-        "通过媒体适配器启动视频上传；"
-        f"camera_id={args.camera_id}，{args.video_width}x{args.video_height}"
-        f"@{args.video_fps}，bitrate={args.video_bitrate_kbps}kbps",
+        "sdk.get_processed_video_stream",
+        "等待 SDK 内部接收 consumer C-02，并通过下发的媒体端点建立处理流",
     )
-    upload = await sdk.start_video_upload(
-        session,
-        camera_id=args.camera_id,
-        width=args.video_width,
-        height=args.video_height,
-        fps=args.video_fps,
-        bitrate_kbps=args.video_bitrate_kbps,
+    stream = await sdk.get_processed_video_stream(
+        session_id,
+        timeout_seconds=args.processed_stream_timeout,
     )
-    await _before_step(
-        before_step,
-        "upload.pause",
-        "暂停当前视频上传句柄",
-    )
-    await upload.pause()
-    print("[12a upload.pause]", upload.track_id, upload.state)
-    await _before_step(
-        before_step,
-        "upload.resume",
-        "恢复当前视频上传句柄",
-    )
-    await upload.resume()
-    print("[12b upload.resume]", upload.track_id, upload.state)
-
-    await _before_step(
-        before_step,
-        "upload.stop",
-        "停止视频上传句柄",
-    )
-    await upload.stop()
-    print("[13b upload.stop]", upload.track_id, upload.state)
+    print("[13 get_processed_video_stream]", session_id, stream)
 
     if args.stay_running:
         print("[14 stay_running] press Ctrl+C to close the SDK")
@@ -465,12 +385,17 @@ async def run_full_flow(
 
 async def main(args) -> None:
     print("SDK uses its persistent device key and embedded core-network public key.")
-    sdk = AgentSdk(
-        media_offload_adapter=ExampleMediaOffloadAdapter(),
-    )
+    sdk = AgentSdk()
     unregister_network = sdk.register_network_message_listener(NetworkListener())
     unregister_group = sdk.register_group_message_listener(
-        GroupListener(sdk, args.processed_stream_timeout)
+        GroupListener(
+            sdk,
+            camera_id=args.camera_id,
+            width=args.video_width,
+            height=args.video_height,
+            fps=args.video_fps,
+            bitrate_kbps=args.video_bitrate_kbps,
+        )
     )
     try:
         await run_full_flow(sdk, args)
@@ -535,10 +460,11 @@ def parser() -> argparse.ArgumentParser:
     )
     value.add_argument("--message-timeout", type=float, default=5.0)
     value.add_argument("--message-type", default="application/json")
-    value.add_argument("--offloading-workload-type", default="video_rendering")
-    value.add_argument("--sandbox-vcpus", type=int, default=2)
-    value.add_argument("--sandbox-memory-mb", type=int, default=4096)
-    value.add_argument("--offloading-timeout", type=float, default=30.0)
+    value.add_argument("--compute-capability-id", default="video_rendering")
+    value.add_argument("--compute-cpu-millicores", type=int, default=2000)
+    value.add_argument("--compute-memory-mib", type=int, default=4096)
+    value.add_argument("--compute-request-id")
+    value.add_argument("--compute-timeout", type=float, default=30.0)
     value.add_argument("--camera-id", type=int, default=0)
     value.add_argument("--video-width", type=int, default=1280)
     value.add_argument("--video-height", type=int, default=720)

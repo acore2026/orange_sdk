@@ -6,7 +6,7 @@ from typing import Any, Mapping
 
 import pytest
 
-from agent_sdk import AgentSdk, NetworkMessageAction
+from agent_sdk import AgentSdk, NetworkMessageAction, RuntimeHttpResponse
 from agent_sdk.models import AgentProfile, NetworkMessageType
 from agent_sdk.routes import MemoryRouteBackend
 
@@ -60,28 +60,55 @@ class FakeRuntime:
         self.closed = False
         self.downlink_handler = None
 
-    async def get_ue_agent_ip(self) -> str:
+    async def get_ue_info(self) -> Mapping[str, Any]:
         self.ue_info_requests += 1
-        return "8.8.8.7"
+        return {
+            "identity": {"supi": "imsi-001010000000001"},
+            "nas": {
+                "registered": True,
+                "state": "session_ready",
+                "security_context": True,
+            },
+            "pdu_sessions": [{
+                "pdu_session_id": 1,
+                "state": "active",
+                "type": "IPv4",
+                "dnn": "internet",
+                "snssai": {"sst": 1, "sd": "010203"},
+                "ipv4": "8.8.8.7",
+                "default_route": True,
+            }],
+            "data_plane_accesses": [{
+                "access_type": "HTTP3_CONNECT_IP",
+                "endpoint_template": "https://runtime.example/masque/{pdu_session_id}",
+                "session_selection": "EXACT_PDU_SESSION_ID",
+            }],
+        }
 
-    async def start_downlink(self, handler) -> None:
+    async def get_acn_status(self) -> Mapping[str, Any]:
+        return {"ready": True}
+
+    async def start_downlink(self, handler, on_reconnected=None) -> None:
         self.downlink_handler = handler
+        self.on_reconnected = on_reconnected
 
     async def deliver_downlink(
         self,
         message_type: str,
         payload: Mapping[str, Any],
         transaction_id: int = 49,
-    ) -> NetworkMessageAction:
+    ) -> Mapping[str, Any] | None:
         assert self.downlink_handler is not None
         return await self.downlink_handler(message_type, transaction_id, payload)
 
     async def deliver_group_config(
         self, payload: Mapping[str, Any]
     ) -> NetworkMessageAction:
-        return await self.deliver_downlink(
+        response = await self.deliver_downlink(
             "ACN_AGENT_GROUPING_NOTIFICATION", payload
         )
+        assert response is not None
+        return NetworkMessageAction(response["result"])
 
     async def request(self, method: str, path: str, body: Mapping[str, Any]):
         self.requests.append((method, path, body))
@@ -126,26 +153,21 @@ class FakeRuntime:
             }
         if path == "/acf/v1/agents-grouping":
             return {"status": "grouped", "group_id": "g1"}
-        if path == "/compute/v1/offloading-sessions":
-            return {
-                "session_id": "session-1",
-                "state": "ALLOCATED",
-                "expires_at": "2027-08-18T12:00:00Z",
-                "producer": {
-                    "video_server_ip": "8.8.8.9",
-                    "source_start_url": "https://8.8.8.9:28500/v1/source-pulls",
-                    "source_stop_url": (
-                        "https://8.8.8.9:28500/v1/source-pulls/session-1"
-                    ),
-                },
-                "processed_stream": {
-                    "video_server_ip": "8.8.8.9",
-                    "offer_url": "https://8.8.8.9:28500/v1/processed/offer",
-                    "protocol": "webrtc",
-                    "signaling": "non-trickle",
-                },
-            }
         return {"success": True, "operation_id": "op-1"}
+
+    async def request_with_status(self, method, path, body):
+        if path == "/v1/computing/session-requests":
+            self.requests.append((method, path, body))
+            status_code = 202 if body["request_type"] == "CREATE" else 200
+            return RuntimeHttpResponse(status_code, {
+                "message_type": "COMPUTE_SESSION_STATUS",
+                "request_id": body["request_id"],
+                "compute_service_session_id": "css-001",
+                "status_revision": "1",
+                "status": "ACCEPTED",
+                "cause": "",
+            })
+        return RuntimeHttpResponse(200, await self.request(method, path, body))
 
     async def close(self) -> None:
         self.closed = True
@@ -241,6 +263,8 @@ class FakeVideoUpload:
 
 
 class FakeRemoteVideoStream:
+    closed = False
+
     async def recv(self):
         return b"frame"
 
@@ -250,20 +274,135 @@ class FakeRemoteVideoStream:
     async def __anext__(self):
         return await self.recv()
 
+    async def close(self):
+        self.closed = True
+
+
+class FakePreparedMedia:
+    def __init__(self, role, result):
+        direction = "sendonly" if role == "producer" else "recvonly"
+        self.offer_sdp = (
+            "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+            f"a={direction}\r\n"
+            "a=candidate:1 1 UDP 1 8.8.8.7 50000 typ host\r\n"
+            "a=end-of-candidates\r\n"
+        )
+        self.result = result
+        self.answer_sdp = None
+        self.aborted = False
+
+    async def apply_answer(self, answer_sdp, timeout_seconds):
+        self.answer_sdp = answer_sdp
+        return self.result
+
+    async def abort(self):
+        self.aborted = True
+
 
 class FakeMediaAdapter:
     def __init__(self):
         self.upload_args = None
+        self.stream_args = None
         self.closed = False
         self.upload = FakeVideoUpload()
         self.stream = FakeRemoteVideoStream()
 
-    async def start_video_upload(self, session, **kwargs):
-        self.upload_args = (session.session_id, kwargs)
-        return self.upload
+    def supports_video_codec(self, codec):
+        return codec.upper() in {"H264", "VP8"}
 
-    async def get_processed_video_stream(self, session, timeout_seconds):
-        return self.stream
+    async def prepare_video_upload(self, session, **kwargs):
+        self.upload_args = (
+            session.compute_service_session_id,
+            kwargs,
+        )
+        self.prepared = FakePreparedMedia("producer", self.upload)
+        return self.prepared
+
+    async def prepare_processed_video(self, session):
+        self.stream_args = (
+            session.compute_service_session_id,
+        )
+        self.prepared = FakePreparedMedia("consumer", self.stream)
+        return self.prepared
+
+    async def close(self):
+        self.closed = True
+
+
+class FakeSandboxTransport:
+    def __init__(self):
+        self.requests = []
+        self.closed = False
+        self.recognition_target = None
+        self.control_action = None
+
+    async def request_with_status(
+        self, method, url, body, timeout_seconds, source_ipv4
+    ):
+        self.requests.append((method, url, body, timeout_seconds, source_ipv4))
+        if method == "DELETE":
+            return RuntimeHttpResponse(204, {})
+        if "/v1/recognition-targets/" in url:
+            if method == "PUT":
+                context = body["computing_context"]
+                self.recognition_target = {
+                    "request_id": body["request_id"],
+                    "computing_context": context,
+                    "status": "APPLIED",
+                    "target_revision": "1",
+                    "target": {"label": "红色玩偶", "prompt": "red toy"},
+                }
+                return RuntimeHttpResponse(200, self.recognition_target)
+            if method == "GET" and self.recognition_target is not None:
+                return RuntimeHttpResponse(200, self.recognition_target)
+            return RuntimeHttpResponse(
+                404,
+                {"error": {"code": "recognition-target-not-set", "message": "not set"}},
+            )
+        if "/v1/control-actions" in url:
+            if method == "POST":
+                context = body["computing_context"]
+                if body["input"]["type"] == "TEXT":
+                    normalized_action = "search_object"
+                    normalized_parameters = {"query": "cup"}
+                else:
+                    normalized_action = body["action"]
+                    normalized_parameters = body["parameters"]
+                self.control_action = {
+                    "request_id": body["request_id"],
+                    "action_id": "action-001",
+                    "computing_context": context,
+                    "normalized_action": normalized_action,
+                    "normalized_parameters": normalized_parameters,
+                    "status": "RUNNING",
+                    "result": {"phase": "started"},
+                    "cause": "",
+                }
+                return RuntimeHttpResponse(202, self.control_action)
+            if method == "GET" and self.control_action is not None:
+                result = dict(self.control_action)
+                result.pop("computing_context")
+                result["status"] = "COMPLETED"
+                return RuntimeHttpResponse(200, result)
+            return RuntimeHttpResponse(
+                404,
+                {"error": {"code": "action-not-found", "message": "not found"}},
+            )
+        context = body["computing_context"]
+        return RuntimeHttpResponse(201, {
+            "request_id": body["request_id"],
+            "computing_context": context,
+            "media_connection_id": f"media-{context['role']}-001",
+            "answer": {
+                "type": "answer",
+                "sdp": (
+                    "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+                    f"a={'recvonly' if context['role'] == 'producer' else 'sendonly'}\r\n"
+                    "a=candidate:2 1 UDP 1 8.8.8.10 51000 typ host\r\n"
+                    "a=end-of-candidates\r\n"
+                ),
+            },
+        })
 
     async def close(self):
         self.closed = True
@@ -307,24 +446,28 @@ async def _create_sdk_fixture(
     tmp_path,
     *,
     restore_profile: bool,
-    compute_override: bool = False,
 ):
     tun = FakeTun()
     masque = FakeMasque()
     runtime = FakeRuntime()
-    compute_runtime = FakeRuntime()
+    runtime_targets = []
     server = FakeServer()
     backend = MemoryRouteBackend()
     proof = FakeProofVerifier()
     messenger = FakePeerMessenger()
     signature_verifier = FakeSignatureVerifier()
     media = FakeMediaAdapter()
+    sandbox = FakeSandboxTransport()
 
     async def tun_factory(name, cidr, mtu):
         tun.name = name
         tun.cidr = cidr
         tun.mtu = mtu
         return tun
+
+    def runtime_factory(host, port):
+        runtime_targets.append((host, port))
+        return runtime
 
     sdk = AgentSdk(
         _proof_verifier=proof,
@@ -334,12 +477,11 @@ async def _create_sdk_fixture(
         _message_signer=FakeMessageSigner(),
         tun_factory=tun_factory,
         masque_factory=lambda config: masque,
-        runtime_factory=lambda host, port: (
-            compute_runtime if compute_override and port == 28500 else runtime
-        ),
+        runtime_factory=runtime_factory,
         server_factory=lambda: server,
         route_backend_factory=lambda config, tun_device: backend,
-        media_offload_adapter=media,
+        _media_offload_adapter=media,
+        _sandbox_transport=sandbox,
         agent_state_directory=tmp_path / "agent-state",
     )
     result = await sdk.init(
@@ -350,8 +492,6 @@ async def _create_sdk_fixture(
         28443,
         masque_server_url="https://192.168.3.10:4433",
         log_file_path=str(tmp_path / "agent-sdk.log"),
-        compute_control_ip="172.30.0.10" if compute_override else None,
-        compute_control_port=28500 if compute_override else None,
     )
     if restore_profile:
         sdk.set_local_profile_for_restore(
@@ -363,13 +503,14 @@ async def _create_sdk_fixture(
         "tun": tun,
         "masque": masque,
         "runtime": runtime,
-        "compute_runtime": compute_runtime,
+        "runtime_targets": runtime_targets,
         "server": server,
         "backend": backend,
         "proof": proof,
         "messenger": messenger,
         "signature_verifier": signature_verifier,
         "media": media,
+        "sandbox": sandbox,
         "log_path": tmp_path / "agent-sdk.log",
     }
 

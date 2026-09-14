@@ -12,8 +12,9 @@ SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/interactive_linux_agent.py`：复用真实 Linux 全流程参数，每按一次回车只调用下一个 SDK 接口。
-- `examples/agent_a_test.py`：A 按 B 的能力发现 B、邀请 B 建组，随后通过群组缓存向 B 发送消息。
-- `examples/agent_b_test.py`：B 发布能力、自动接受 A 的邀请，并打印收到的群组消息。
+- `examples/agent_a_test.py`：A 发现 B、建组、申请正式算力会话，并验证处理后视频首帧。
+- `examples/agent_b_test.py`：B 发布算力能力、自动接受邀请，并按 A 下发的 session ID 循环上传仓库内置测试视频。
+- `examples/assets/video-offload-test.mp4`：用于 A/B 端到端联调的 8 秒 720p H.264 合成测试片。
 - `examples/masque_two_instance_test.py`：在两个隔离的 Ubuntu 实例中验证 A 经 MASQUE/5GC 向 B 发送消息，B 在控制台和本地文件记录收包证据。
 - `docker/arm64/`：在 x86 主机使用 Buildx 制作 `linux/arm64` 运行镜像，并提供 A/B 环境变量启动脚本；完整用法见 `docker/arm64/README.md`。
 
@@ -367,8 +368,10 @@ class NetworkListener:
     async def on_network_message(self, message_type, payload):
         if message_type is NetworkMessageType.GROUP_INVITATION:
             return NetworkMessageAction.ACCEPT
-        # 联调 Profile 不验 proof；到达监听器前仍会校验字段、缓存并安装路由。
-        return NetworkMessageAction.ACK
+        if message_type is NetworkMessageType.GROUP_CONFIG:
+            # 到达监听器前，SDK 已完成字段校验、缓存提交和路由安装。
+            return NetworkMessageAction.ACK
+        return NetworkMessageAction.REJECT
 
 
 class GroupListener:
@@ -377,9 +380,21 @@ class GroupListener:
 
 
 sdk = AgentSdk()
-sdk.register_network_message_listener(NetworkListener())
-sdk.register_group_message_listener(GroupListener())
+unregister_network = sdk.register_network_message_listener(NetworkListener())
+unregister_group = sdk.register_group_message_listener(GroupListener())
 ```
+
+这两个注册函数都是公开 SDK 接口，应在创建 `AgentSdk` 后、调用 `init()` 前执行：
+
+- `register_network_message_listener` 同时处理群组邀请和群组配置。收到
+  `GROUP_INVITATION` 时返回 `ACCEPT/REJECT` 决定是否接受邀请；`GROUP_CONFIG`
+  在 SDK 已提交缓存和路由后用于通知应用。
+- `register_group_message_listener` 接收其他 Agent 调用 `send_message` 投递的业务
+  JSON。`send_message` 自身是发送接口，不接收回调参数。
+
+注册动作不发送 HTTP，也不建立连接；实际 Runtime 下行 WebSocket 和本地
+`/A2A/message` 服务由 `init()` 启动。两个返回值都是无参注销函数，应用退出时依次
+调用 `unregister_group()` 和 `unregister_network()`。
 
 应用不传入签名器、验签器或私钥。首次 `init()` 时 SDK 自动生成 P-256
 设备密钥并持久化；之后控制面请求复用该私钥签名。当前封闭联调构建不会校验
@@ -549,75 +564,187 @@ service_endpoints = http://agent-b:4001/A2A/message
 
 ### 4.4 计算和视频卸载
 
-应用需要在构造 `AgentSdk` 时提供平台对应的 `MediaOffloadAdapter`。视频源 Agent C
-按资源规格申请网络分配的 Sandbox，再调用 `start_video_upload`。上传接口只负责媒体上传，
-不会选择接收者、申请消费者凭据或发送 A2A 消息：
+四种算力会话操作都使用 `init()` 中的 AgentRuntime IP 和端口：
+
+```text
+POST http://{agent_runtime_ip}:{agent_runtime_port}/v1/computing/session-requests
+```
+
+每次请求前，SDK 自动读取 `/v1/acn/status` 和 `/v1/ue/info`，确认 NAS 已就绪、
+至少有一个 ACTIVE IPv4 PDU Session，并存在
+`HTTP3_CONNECT_IP + EXACT_PDU_SESSION_ID` 数据面能力。CREATE 还会确认
+`acn_context.group_id` 在本地为 `ACTIVE`、请求方是本机 Agent、目标 Agent 在群组中。
+
+结构化 CREATE 示例：
 
 ```python
-from agent_sdk import SandboxSpec
-
-session = await sdk.create_offloading_session(
-    workload_type="video_rendering",
-    sandbox_spec=SandboxSpec(vcpus=2, memory_mb=4096),
+from agent_sdk import (
+    AcnContext,
+    ComputeConstraints,
+    ComputeInputFormat,
+    ComputeRequestType,
+    ComputeResources,
+    ComputeSessionRequest,
 )
 
+create_status = await sdk.create_computing_session(
+    ComputeSessionRequest(
+        message_type="COMPUTE_SESSION_REQUEST",
+        request_type=ComputeRequestType.CREATE,
+        input_format=ComputeInputFormat.STRUCTURED,
+        request_id="create-glasses-001",
+        acn_context=AcnContext(
+            group_id=group.group_id,
+            requester_agent_id=profile.agent_id,
+            target_agent_id=target.agent_id,
+        ),
+        constraints=ComputeConstraints(
+            capability_id="video_rendering",
+            resources=ComputeResources(
+                cpu_millicores=2000,
+                memory_mib=4096,
+            ),
+            dnn="internet",
+            allow_base_qos=True,
+        ),
+    )
+)
+session_id = create_status.compute_service_session_id
+```
+
+同步响应是 `ComputeSessionStatus`，CREATE 成功使用 HTTP 202；它只表示请求已受理，
+不返回 Sandbox IP 或媒体 URL。自然语言 CREATE 使用
+`input_format=NATURAL_LANGUAGE` 和非空 `text`；结构化 CREATE 使用非空
+`constraints`，两者互斥。重试同一操作必须复用相同 `request_id` 和相同请求体。
+
+QUERY、CANCEL 和 RELEASE 使用同一路径：
+
+```python
+query_status = await sdk.query_computing_session(
+    ComputeSessionRequest(
+        message_type="COMPUTE_SESSION_REQUEST",
+        request_type=ComputeRequestType.QUERY,
+        input_format=ComputeInputFormat.STRUCTURED,
+        request_id="query-001",
+        target_request_id="create-glasses-001",
+    )
+)
+cancel_status = await sdk.cancel_computing_session(
+    ComputeSessionRequest(
+        message_type="COMPUTE_SESSION_REQUEST",
+        request_type=ComputeRequestType.CANCEL,
+        input_format=ComputeInputFormat.STRUCTURED,
+        request_id="cancel-001",
+        target_request_id="create-glasses-001",
+    )
+)
+release_status = await sdk.release_computing_session(
+    ComputeSessionRequest(
+        message_type="COMPUTE_SESSION_REQUEST",
+        request_type=ComputeRequestType.RELEASE,
+        input_format=ComputeInputFormat.STRUCTURED,
+        request_id="release-001",
+        compute_service_session_id=session_id,
+    )
+)
+```
+
+SDK 在 `init()` 中通过公共 WebSocket 内部注册并处理
+`COMPUTE_CONNECT_CONFIG`、`COMPUTE_SESSION_STATUS` 和
+`COMPUTE_SESSION_CLOSE`。应用不注册算网 listener。C-02 到达后，SDK 校验
+`receiver_agent_id`、PDU Session ID、DNN、S-NSSAI、`ue_ipv4` 和 Runtime 数据面能力，
+为 `service_endpoint` 安装用户面路由，缓存 `binding_ref`、角色和媒体路径，并自动返回
+C-03。C-04 按 `status_revision` 去重。C-05 会停止该会话的媒体对象、释放路由并自动
+返回 C-06。C-02 没有 `group_id`，因此其群组授权结果以网侧 CA 为准，SDK 只复核本端
+身份和网络绑定。
+
+媒体接口只接收 `compute_service_session_id`。它们会等待对应 C-02，再从 SDK 缓存的
+`service_endpoint + media_connections_path` 生成完整内部 URL。consumer 使用：
+
+```python
+stream = await sdk.get_processed_video_stream(session_id, timeout_seconds=15.0)
+frame = await stream.recv()
+# 不再使用时释放本地 PeerConnection，并自动 DELETE Sandbox 媒体资源
+await stream.close()
+```
+
+producer 使用：
+
+```python
 upload = await sdk.start_video_upload(
-    session,
+    session_id,
     camera_id=0,
     width=1280,
     height=720,
     fps=30,
     bitrate_kbps=2500,
+    timeout_seconds=15.0,
 )
 ```
 
-`create_offloading_session` 的公开入参不包含 `agent_id`、`group_id` 或 `sandbox_id`。
-Sandbox 由网络按 `sandbox_spec` 分配；2 vCPU、4 GiB 内存表示为
-`SandboxSpec(vcpus=2, memory_mb=4096)`。响应同时返回 producer 和
-processed-stream 端点。同一个 Agent
-可以上传后直接拉取自己的处理流：
+两端都是 Offerer。producer 的 Offer 为 `sendonly`，consumer 的 Offer 为
+`recvonly`。SDK 调用 `setLocalDescription()` 并等待 ICE gathering complete，随后向
+C-02 给出的媒体集合路径发送正式
+`request_id + computing_context + offer` JSON；只接受 HTTP 201、原样回显的上下文、
+`media_connection_id` 和 `answer.type=answer`。应用不接触 SDP。SDK 应用 Answer 前会把
+其中的 IPv4 ICE 候选加入 CONNECT-IP 路由，同时拒绝未发布 C-02 `ue_ipv4` 或夹带其他
+物理网 host candidate 的本地 Offer。`upload.stop()`、`stream.close()`、C-05 和
+`sdk.close()` 都会关闭本地 PeerConnection；主动关闭还会自动调用 Sandbox 的
+`DELETE /v1/media-connections/{media_connection_id}`。
+
+consumer 可以通过 C-02 的 `recognition_target_path_template` 更新或读取当前识别目标，
+无需接触 Sandbox 地址和 `computing_context`：
 
 ```python
-stream = await sdk.get_processed_video_stream(session)
-frame = await stream.recv()
-```
-
-如果上传方 C 希望让接收方 E 获取处理流，由应用使用既有 `send_message` 把必要的
-session 信息发送给 E；也可以完全不发送。E 把消息解析为 `OffloadingSession`（仅需
-`session_id/state/expires_at/processed_stream`），再传给
-`get_processed_video_stream(session)`。这属于应用协议，不新增 SDK 接口。
-
-`OffloadingSession` 不包含 `sandbox_id`、`group_id`、`source_agent_id` 或任意本机
-信息。A2A 的来源、目标和群组由 `send_message` 的消息信封承载，不重复放入视频
-会话载荷。
-
-`start_video_upload(session, ...)` 与 `get_processed_video_stream(session, ...)` 都从
-函数入参中的 session 读取 Video Server IP、端口/URL 和 session ID；SDK 内没有固定
-Video Server 地址，也不依赖名为 A/B 的角色。所需 producer 与 processed-stream
-信息都来自 `create_offloading_session` 返回值，应用跨终端传递时可按接收方用途裁剪。
-
-WebRTC 信令和端点中不携带业务层 token、ticket、Bearer 或 proof；Agent ID 的可信性
-由核心网会话维护。WebRTC 自身仍按协议执行 ICE、DTLS 和 SRTP。SDK 继续通过
-`MediaOffloadAdapter` 隔离具体的 `aiortc`、GStreamer 或硬件媒体栈。
-
-当前核心网没有实际算力沙箱时，可以部署仓库根目录的
-[`mock-video-server`](../mock-video-server/README.md)，并在初始化时只覆写算力控制端点：
-
-```python
-await sdk.init(
-    agent_runtime_ip=runtime_ip,
-    agent_runtime_port=runtime_port,
-    local_vlan_ip=local_vlan_ip,
-    local_tcp_port=4001,
-    local_udp_port=28443,
-    masque_server_url=masque_url,
-    compute_control_ip="172.30.0.10",
-    compute_control_port=28500,
+target = await sdk.update_recognition_target(
+    session_id,
+    request_id="recognition-001",
+    text="寻找红色玩偶",
+    language="zh",
 )
+assert target.status == "APPLIED"
+print(target.target_revision, target.target.label, target.target.prompt)
+
+current = await sdk.get_recognition_target(session_id)
 ```
 
-SDK 会为该 IP 安装 TUN 主机路由；只有 `/compute` 请求使用覆写端点，身份、能力、
-发现、建组和下行 WebSocket 仍使用原 AgentRuntime。不传这两个参数时行为完全不变。
+SDK 将会话 ID 展开到 C-02 路径模板，使用同一个 UE IPv4 访问 Sandbox，并校验 HTTP
+200、`request_id/computing_context` 回显、`status=APPLIED`、uint64
+`target_revision` 以及 `target.label/target.prompt`。同一更新重试时，应用复用原
+`request_id` 和原文本。
+
+运行期动作同样由 SDK 直接发送到 Sandbox。文本动作由 Sandbox 规范化，结构化动作
+则显式提供 `movement`、`grab` 或 `search_object` 和参数：
+
+```python
+from agent_sdk import ControlActionRequest, ControlInputType
+
+action = await sdk.create_control_action(
+    session_id,
+    ControlActionRequest(
+        request_id="control-search-001",
+        input_type=ControlInputType.TEXT,
+        text="寻找杯子",
+        language="zh",
+    ),
+)
+
+while action.status in {"ACCEPTED", "RUNNING", "UNKNOWN"}:
+    action = await sdk.get_control_action(session_id, action.action_id)
+```
+
+创建固定调用 `POST /v1/control-actions` 并要求 HTTP 202；查询调用
+`GET /v1/control-actions/{action_id}` 并要求 HTTP 200。SDK 校验请求和动作 ID、状态、
+`cause`、可选结果，以及创建响应的 `computing_context` 回显。Sandbox 向 producer
+Runtime 转发机器狗动作的接口不向应用暴露。
+
+请求方是 consumer，CREATE 中的目标 Agent 是 producer。应用如需通知 producer 启动
+上传，只通过现有 `send_message` 传递 `compute_service_session_id`；不要传 Sandbox IP、
+端口或 URL。producer 的 SDK 已通过自己的 C-02 获得完整端点配置。
+
+算力 HTTP 请求固定复用 `init()` 的 `agent_runtime_ip/agent_runtime_port`；SDK 不再
+提供独立算力控制地址覆盖。仓库现有 Android 测试 App 与旧 Mock Server 本轮按要求
+没有迁移，旧联调需继续使用此前与它们匹配的构建产物。
 
 ### 4.5 关闭
 
@@ -879,8 +1006,9 @@ sudo -E .venv/bin/python examples/linux_agent.py \
   --group-name customer-demo \
   --dnn internet \
   --message '{"type":"text","content":"hello"}' \
-  --sandbox-vcpus 2 \
-  --sandbox-memory-mb 4096 \
+  --compute-capability-id video_rendering \
+  --compute-cpu-millicores 2000 \
+  --compute-memory-mib 4096 \
   --log-file /var/log/agent-sdk/agent-a.log \
   --log-level INFO
 ```
@@ -890,9 +1018,9 @@ sudo -E .venv/bin/python examples/linux_agent.py \
 `--target-agent-id` 省略时使用发现结果的第一项；建群后脚本会等待
 AgentRuntime 下发 `acf_group_config`，不会让用户填写对端 IP 或端口。
 
-为保证示例能够实际执行所有媒体函数，文件内置了明确标记为 example-only
-的 `ExampleMediaOffloadAdapter`；它不读取真实摄像头，也不代表真实 WebRTC
-上传。生产联调必须替换成平台媒体适配器。
+Wheel 安装依赖包含 `aiortc`。`start_video_upload()` 默认通过 Linux V4L2 打开
+`/dev/video{camera_id}`，`get_processed_video_stream()` 返回可 `recv()` 和
+`close()` 的 aiortc 远端视频流；应用不再实现或注入媒体 HTTP/WebRTC 适配器。
 
 该全流程默认注销本次申请的身份。需要保留身份时传 `--keep-identity`，并把
 验证后的 `AgentProfile` 安全持久化；传 `--stay-running` 可在流程完成后继续
@@ -927,7 +1055,7 @@ WebSocket、A2A HTTP 监听仍然正常工作。交互步骤覆盖监听器注�
 恢复、网络能力、能力注册/更新、发现、建组、群组缓存、消息发送、算力卸载、媒体
 句柄操作、身份注销和 `close`。
 
-### 5.4 A 按能力发现 B、建组并发送消息
+### 5.4 Linux A/B 算力会话与视频联调
 
 两个自动脚本都会在 `sdk.init()` 后恢复上述状态机：状态1执行身份申请和 Agent Card
 发布；状态2只获取网络能力并发布 Agent Card；状态3复用保存的 Profile，跳过
@@ -941,11 +1069,22 @@ WebSocket、A2A HTTP 监听仍然正常工作。交互步骤覆盖监听器注�
 回退到复用。ARM 测试镜像默认同时启用 `--fresh-registration` 和
 `--deregister-on-exit`，普通命令行调用仍保持向后兼容的默认行为。
 
-本测试使用两个独立脚本。B 必须先启动并完成能力发布；A 随后以
-`required_skills=[target_capability]` 调用能力发现，用发现到的 B Agent ID 创建
-群组，等待 WebSocket 群组配置写入 SDK 缓存，最后调用
-`send_message(group_id, target_agent_id, ...)`。应用不传 B 的 IP 和端口；SDK 从
-群组配置缓存解析目标端点。
+本测试使用两个独立脚本。B 先发布 `video_rendering` 能力并等待；A 按能力发现 B、
+建立二人群组，然后执行完整的算力媒体流程：
+
+1. A 使用正式 `ComputeSessionRequest` 调用 `create_computing_session()`；
+2. A 通过群组消息只把 `compute_service_session_id` 发送给 B，消息不包含 Sandbox
+   IP、端口、URL、ticket 或 token；
+3. B 的 A2A 回调把 session ID 放入队列后立即返回，B 主任务再调用
+   `start_video_upload()`，因此不会用 WebRTC 建连阻塞 A2A 响应；
+4. A 调用 `query_computing_session()`，再调用 `get_processed_video_stream()` 并等待
+   处理后视频首帧；
+5. A 默认调用 `release_computing_session()`，双方 SDK 收到 C-05 后自动关闭 WebRTC
+   与数据面引用并回复 C-06。B 检测上传句柄进入 `STOPPED` 后结束测试。
+
+C-02、C-04 和 C-05 仍由 SDK 内部处理。两个脚本没有注册算力下行回调；应用只处理
+群组邀请、群组配置和 A2A 业务消息。A/B 调用媒体接口时只传
+`compute_service_session_id`，Sandbox 端点及媒体路径来自 SDK 的 C-02 缓存。
 
 先在设备 B 启动：
 
@@ -956,12 +1095,19 @@ sudo -E .venv/bin/python examples/agent_b_test.py \
   --runtime-port 8089 \
   --local-vlan-ip 192.168.2.10 \
   --masque-url https://192.168.3.10:8444/.well-known/masque/ip \
-  --capability text \
-  --exit-after-message \
+  --capability video_rendering \
+  --video-source file \
+  --video-file ./examples/assets/video-offload-test.mp4 \
+  --video-bitrate-kbps 2500 \
+  --max-sessions 1 \
   --log-file ./logs/agent-b-test.log
 ```
 
-B 会直接连续执行初始化和能力发布；等待它输出 `B_READY`后，
+B 默认循环读取仓库中的 8 秒 H.264 合成测试片
+`examples/assets/video-offload-test.mp4`，不依赖真实摄像头。文件解码后的画面仍通过
+正式 producer WebRTC 链路发送到 Sandbox。需要恢复摄像头测试时改为
+`--video-source camera --camera-id 0`，并确认 V4L2 设备支持指定分辨率和帧率。
+等待 B 输出 `B_READY` 后，
 再在设备 A 启动：
 
 ```bash
@@ -971,30 +1117,43 @@ sudo -E .venv/bin/python examples/agent_a_test.py \
   --runtime-port 8088 \
   --local-vlan-ip 192.168.1.10 \
   --masque-url https://192.168.3.10:8443/.well-known/masque/ip \
-  --target-capability text \
+  --target-capability video_rendering \
   --group-name agent-a-b-test-group \
   --dnn internet \
   --message '{"type":"text","content":"hello Agent B from Agent A"}' \
+  --compute-capability-id video_rendering \
+  --compute-cpu-millicores 2000 \
+  --compute-memory-mib 4096 \
+  --frame-count 1 \
+  --terminal-action release \
   --log-file ./logs/agent-a-test.log
 ```
 
-A 端也会默认连续执行能力发现、建组和消息发送。能力发现结果中存在多个相同
+A 仍会先发送原 ACN 文本测试消息，再申请算力会话。能力发现结果中存在多个相同
 能力的 Agent 时，可增加 `--target-agent-id <B的Agent ID>` 精确选择。建组邀请和
-群组配置是网络下行事务，两个脚本会立即处理，不额外等待回车，避免阻塞建组流程。
+群组配置是网络下行事务，两个脚本会立即处理，不额外等待回车。`--frame-count 0`
+可持续接收视频直到 Ctrl+C；`--terminal-action cancel` 可改测 CANCEL；
+`--terminal-action none` 只用于观察会话，不会主动回收网侧资源。CREATE 的其他正式
+约束可通过 `--compute-api-version`、`--compute-image-id`、`--compute-gpu-count`、
+`--compute-gpu-model`、`--compute-snssai`、`--compute-max-duration-ms`、区域及
+`--[no-]allow-base-qos` 传入。
 
 成功判据如下：
 
-- A 输出 `TARGET_B_SELECTED`、`GROUP_CONFIG_READY` 和 `MESSAGE_DELIVERED`；
+- A 输出 `TARGET_B_SELECTED`、`GROUP_CONFIG_READY`、`COMPUTING_SESSION_CREATED`、
+  `COMPUTING_SESSION_QUERIED`、`PROCESSED_VIDEO_FRAME` 和
+  `COMPUTING_SESSION_TERMINATED`；
 - B 输出 `GROUP_INVITATION_ACCEPTED`、`GROUP_CONFIG_APPLIED` 和
-  `B_MESSAGE_RECEIVED`；
-- A 的发送调用中只有 `group_id` 和 `target_agent_id`，没有由用户提供的 B IP/端口。
+  `VIDEO_UPLOAD_STARTED`、`COMPUTING_SESSION_CLOSED`；
+- 算力 A2A 消息体只有 `compute_service_session_id`，端点只出现在 SDK 日志中的 C-02
+  处理和 U-MEDIA 协商中。
 
 测试能力 VC 默认由 B 使用 Wheel 内置的三方测试私钥签发，对应公私钥都位于
 `agent_sdk/certs/third-party-capability-*-key.pem`，不依赖
 `/root/lpx/cert/third-party`。只有需要覆盖测试私钥时才传
 `--third-party-private-key`。如果需要在每个主动调用前
-人工确认，可显式增加 `--prompt`；B 不传 `--exit-after-message` 时，在收到
-第一条消息后继续常驻。SDK 文件日志在 `sdk.init()` 中完成初始化，
+人工确认，可显式增加 `--prompt`；B 的 `--max-sessions 0` 会持续服务后续会话。
+SDK 文件日志在 `sdk.init()` 中完成初始化，
 脚本启动到 `init` 之前的状态会直接输出到终端。
 
 如果 `sdk.init()` 报告 `MASQUE QUIC handshake timed out after 10s`，表示
@@ -1041,9 +1200,18 @@ ss -lunp | grep <MASQUE端口>
 | `create_group(..., dnn, ...)` | 使用 `target_agents + group_config` 请求建群；`dnn` 必填 | `GroupInfo` |
 | `get_group_snapshot(group_id)` | 查询 SDK 已提交的只读群组快照 | `GroupConfigSnapshot | None` |
 | `send_message(...)` | 按群组缓存直接调用完整 `service_endpoints` | `MessageReceipt` |
-| `create_offloading_session(...)` | 创建计算卸载会话 | `OffloadingSession` |
-| `start_video_upload(session, ...)` | 按会话中的 producer 端点启动视频上传；不选择接收者、不自动发消息 | `VideoUploadHandle` |
-| `get_processed_video_stream(session, ...)` | 使用应用持有或收到的会话获取处理后视频流 | `RemoteVideoStream` |
+| `register_network_message_listener(listener)` | 接受/拒绝群组邀请，并接收群组配置已提交通知 | 无参注销函数 `Callable[[], None]` |
+| `register_group_message_listener(listener)` | 接收其他 Agent 通过 `send_message` 投递的业务 JSON | 无参注销函数 `Callable[[], None]` |
+| `create_computing_session(request, ...)` | 提交正式 CREATE；校验本地 ACTIVE 群组和双方 Agent 身份 | `ComputeSessionStatus` |
+| `query_computing_session(request, ...)` | 按会话 ID 或原 CREATE request ID 查询状态 | `ComputeSessionStatus` |
+| `cancel_computing_session(request, ...)` | 按会话 ID 或原 CREATE request ID 取消请求 | `ComputeSessionStatus` |
+| `release_computing_session(request, ...)` | 释放指定正式算力会话 | `ComputeSessionStatus` |
+| `start_video_upload(compute_service_session_id, ..., timeout_seconds=15)` | producer 等待 C-02，创建完整 sendonly Offer，内部完成 Sandbox 协商；`stop()` 自动 DELETE 媒体资源 | `VideoUploadHandle` |
+| `get_processed_video_stream(compute_service_session_id, timeout_seconds=15)` | consumer 等待 C-02，创建完整 recvonly Offer，内部完成 Sandbox 协商；`close()` 自动 DELETE 媒体资源 | `RemoteVideoStream` |
+| `update_recognition_target(compute_service_session_id, request_id, text, language=None, ...)` | consumer 使用 C-02 路径替换当前持续识别目标 | `RecognitionTargetStatus` |
+| `get_recognition_target(compute_service_session_id, ...)` | consumer 读取当前已应用的识别目标 | `RecognitionTargetStatus` |
+| `create_control_action(compute_service_session_id, request, ...)` | consumer 提交文本或结构化运行期动作 | `ControlActionStatus` |
+| `get_control_action(compute_service_session_id, action_id, ...)` | consumer 查询异步动作状态，不重复执行 | `ControlActionStatus` |
 | `close()` | 释放路由、TUN、HTTP/3 和监听服务 | 无 |
 
 ## 7. 常见问题定位
@@ -1057,6 +1225,8 @@ ss -lunp | grep <MASQUE端口>
 | `CONNECT_IP_NEGOTIATION_FAILED` | 外部服务是否支持 HTTP/3 Datagram 和 CONNECT-IP |
 | `GROUP_NOT_ACTIVE` | 是否已收到并成功应用 `acf_group_config` |
 | `TARGET_NOT_IN_GROUP` | `target_agent_id` 是否存在于该群组最新快照 |
+| `MEDIA_NEGOTIATION_FAILED` | 检查 C-02 媒体路径、Sandbox 201/204 响应、Answer SDP、指定编解码器和 ICE 用户面可达性；`retryable=true` 时再次调用同一媒体接口，SDK 会复用未决 request ID/Offer |
+| `SANDBOX_REJECTED` | 检查识别目标路径、consumer 角色、Sandbox HTTP 状态和响应中的上下文回显 |
 | 消息未经过 5GC | 将端侧日志和抓包交给外部 AgentRuntime/MASQUE/5GC 维护方定位；SDK 不包含服务器转发实现 |
 | 日志出现证书校验关闭警告 | 当前为封闭内测安全配置；不得将该构建用于生产网络 |
 

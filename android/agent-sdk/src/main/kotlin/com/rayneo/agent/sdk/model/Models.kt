@@ -99,28 +99,159 @@ data class DiscoveredAgent(
     val priority: Int,
 )
 
-data class OffloadingSession(
-    val sessionId: String,
-    val state: String,
-    val expiresAt: Instant?,
-    val producer: VideoUploadEndpoint? = null,
-    val processedStream: ProcessedVideoEndpoint? = null,
+@Serializable
+enum class ComputeRequestType { CREATE, QUERY, CANCEL, RELEASE }
+
+@Serializable
+enum class ComputeInputFormat { NATURAL_LANGUAGE, STRUCTURED }
+
+@Serializable
+enum class ComputeRole { consumer, producer }
+
+@Serializable
+data class AcnContext(
+    @SerialName("group_id") val groupId: String,
+    @SerialName("requester_agent_id") val requesterAgentId: String,
+    @SerialName("target_agent_id") val targetAgentId: String,
 )
 
-data class SandboxSpec(
-    val vcpus: Int,
-    val memoryMb: Int,
+@Serializable
+data class ComputeResources(
+    @SerialName("cpu_millicores") val cpuMillicores: Long? = null,
+    @SerialName("memory_mib") val memoryMib: Long? = null,
+    @SerialName("gpu_count") val gpuCount: Long? = null,
+    @SerialName("gpu_model") val gpuModel: String? = null,
 )
 
-data class VideoUploadEndpoint(
-    val videoServerIp: String,
-    val sourceStartUrl: String,
-    val sourceStopUrl: String,
+@Serializable
+data class ComputeConstraints(
+    @SerialName("capability_id") val capabilityId: String,
+    @SerialName("api_version") val apiVersion: String? = null,
+    @SerialName("image_id") val imageId: String? = null,
+    val resources: ComputeResources? = null,
+    val dnn: String? = null,
+    val snssai: String? = null,
+    @SerialName("allow_base_qos") val allowBaseQos: Boolean? = null,
+    @SerialName("max_duration_ms") val maxDurationMs: Long? = null,
+    @SerialName("placement_region") val placementRegion: String? = null,
+    @SerialName("data_residency_region") val dataResidencyRegion: String? = null,
 )
 
-data class ProcessedVideoEndpoint(
-    val videoServerIp: String,
-    val offerUrl: String,
-    val protocol: String = "webrtc",
-    val signaling: String = "non-trickle",
+@Serializable
+data class ComputeSessionRequest(
+    @SerialName("message_type") val messageType: String,
+    @SerialName("request_type") val requestType: ComputeRequestType,
+    @SerialName("input_format") val inputFormat: ComputeInputFormat,
+    @SerialName("request_id") val requestId: String,
+    @SerialName("acn_context") val acnContext: AcnContext? = null,
+    val text: String? = null,
+    val constraints: ComputeConstraints? = null,
+    @SerialName("compute_service_session_id")
+    val computeServiceSessionId: String? = null,
+    @SerialName("target_request_id") val targetRequestId: String? = null,
+    @SerialName("ui_locale") val uiLocale: String? = null,
+)
+
+data class ComputeSessionStatus(
+    val messageType: String,
+    val requestId: String,
+    val status: String,
+    val cause: String,
+    val computeServiceSessionId: String? = null,
+    val statusRevision: String? = null,
+    val missingFields: List<String> = emptyList(),
+    val result: JsonObject? = null,
+)
+
+data class Snssai(
+    val sst: Int,
+    val sd: String? = null,
+)
+
+data class RuntimeDataPlane(
+    val accessType: String,
+    val sessionSelection: String,
+)
+
+data class ComputeNetworkBinding(
+    val pduSessionId: Int,
+    val dnn: String,
+    val snssai: Snssai,
+    val ueIpv4: String,
+    val runtimeDataPlane: RuntimeDataPlane,
+)
+
+data class ComputeConnectionParameters(
+    val mediaConnectionsPath: String,
+    val transport: String,
+    val recognitionTargetPathTemplate: String? = null,
+    val videoCodec: String? = null,
+)
+
+data class ComputingSession(
+    val computeServiceSessionId: String,
+    val computeInstanceId: String,
+    val bindingRef: String,
+    val role: ComputeRole,
+    val receiverAgentId: String,
+    val serviceEndpoint: String,
+    val networkBinding: ComputeNetworkBinding,
+    val connectionParameters: ComputeConnectionParameters,
+    val expiresAt: Instant? = null,
+)
+
+data class ComputingContext(
+    val computeServiceSessionId: String,
+    val computeInstanceId: String,
+    val bindingRef: String,
+    val role: ComputeRole,
+    val agentId: String,
+)
+
+data class RecognitionTarget(
+    val label: String,
+    val prompt: String,
+)
+
+data class RecognitionTargetStatus(
+    val requestId: String,
+    val computingContext: ComputingContext,
+    val status: String,
+    val targetRevision: String,
+    val target: RecognitionTarget,
+)
+
+@Serializable
+enum class ControlInputType { TEXT, STRUCTURED }
+
+@Serializable
+enum class ControlAction { movement, grab, search_object }
+
+@Serializable
+enum class ControlTargetRole { producer, sandbox }
+
+data class ControlActionTarget(
+    val role: ControlTargetRole,
+    val agentId: String? = null,
+)
+
+data class ControlActionRequest(
+    val requestId: String,
+    val inputType: ControlInputType,
+    val action: ControlAction? = null,
+    val text: String? = null,
+    val language: String? = null,
+    val parameters: JsonObject? = null,
+    val target: ControlActionTarget? = null,
+)
+
+data class ControlActionStatus(
+    val requestId: String,
+    val actionId: String,
+    val status: String,
+    val cause: String,
+    val computingContext: ComputingContext? = null,
+    val normalizedAction: ControlAction? = null,
+    val normalizedParameters: JsonObject? = null,
+    val result: JsonObject? = null,
 )

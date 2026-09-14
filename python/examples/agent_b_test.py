@@ -1,8 +1,10 @@
-"""Agent B: publish a capability, accept Agent A's group, and receive messages.
+"""Agent B: publish a capability and run the producer side of video offload.
 
 Outbound SDK operations run continuously by default. Use ``--prompt`` for
 manual stepping. Network-initiated group messages are handled immediately; an
-invitation is accepted without prompting.
+invitation is accepted without prompting. The A2A callback queues a computing
+session ID and returns immediately, while the main task performs WebRTC setup.
+The bundled local MP4 is the default source; a V4L2 camera remains optional.
 """
 
 from __future__ import annotations
@@ -11,7 +13,8 @@ import argparse
 import asyncio
 import json
 import signal
-from typing import Any
+from pathlib import Path
+from typing import Any, NamedTuple
 
 from agent_sdk import (
     AgentLifecycleState,
@@ -20,6 +23,16 @@ from agent_sdk import (
     NetworkMessageType,
 )
 from interactive_linux_agent import EnterStepGate, InteractiveDemoAborted
+
+
+COMPUTE_SESSION_ID_FIELD = "compute_service_session_id"
+DEFAULT_TEST_VIDEO = Path(__file__).with_name("assets") / "video-offload-test.mp4"
+
+
+class ComputeNotification(NamedTuple):
+    group_id: str
+    sender_agent_id: str
+    compute_service_session_id: str
 
 
 def _emit(event: str, **fields: Any) -> None:
@@ -31,6 +44,13 @@ def _emit(event: str, **fields: Any) -> None:
         ),
         flush=True,
     )
+
+
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be greater than or equal to zero")
+    return parsed
 
 
 async def _before_step(
@@ -59,9 +79,12 @@ class AgentBNetworkListener:
 
 
 class AgentBGroupListener:
-    def __init__(self, message_event: asyncio.Event) -> None:
-        self.message_event = message_event
+    def __init__(
+        self, session_notifications: asyncio.Queue[ComputeNotification]
+    ) -> None:
+        self.session_notifications = session_notifications
         self.last_message: dict[str, Any] | None = None
+        self._queued_notifications: set[tuple[str, str, str]] = set()
 
     async def on_group_message(self, group_id, sender_agent_id, payload):
         self.last_message = {
@@ -70,7 +93,85 @@ class AgentBGroupListener:
             "payload": dict(payload),
         }
         _emit("B_MESSAGE_RECEIVED", **self.last_message)
-        self.message_event.set()
+        if COMPUTE_SESSION_ID_FIELD not in payload:
+            return
+        session_id = payload.get(COMPUTE_SESSION_ID_FIELD)
+        if not isinstance(session_id, str) or not session_id:
+            _emit(
+                "COMPUTING_SESSION_NOTIFICATION_REJECTED",
+                group_id=group_id,
+                sender_agent_id=sender_agent_id,
+                cause="missing-or-invalid-compute-service-session-id",
+            )
+            return
+        key = (group_id, sender_agent_id, session_id)
+        if key in self._queued_notifications:
+            _emit(
+                "COMPUTING_SESSION_NOTIFICATION_DUPLICATE",
+                group_id=group_id,
+                sender_agent_id=sender_agent_id,
+                compute_service_session_id=session_id,
+            )
+            return
+        self._queued_notifications.add(key)
+        self.session_notifications.put_nowait(
+            ComputeNotification(group_id, sender_agent_id, session_id)
+        )
+        _emit(
+            "COMPUTING_SESSION_NOTIFICATION_QUEUED",
+            group_id=group_id,
+            sender_agent_id=sender_agent_id,
+            compute_service_session_id=session_id,
+        )
+
+
+async def _next_notification(
+    notifications: asyncio.Queue[ComputeNotification],
+    *,
+    stop_event: asyncio.Event | None,
+    timeout: float,
+) -> ComputeNotification | None:
+    if stop_event is not None and stop_event.is_set():
+        return None
+    notification_task = asyncio.create_task(notifications.get())
+    stop_task = (
+        asyncio.create_task(stop_event.wait()) if stop_event is not None else None
+    )
+    waiters = {notification_task}
+    if stop_task is not None:
+        waiters.add(stop_task)
+    try:
+        done, _ = await asyncio.wait(
+            waiters,
+            timeout=timeout if timeout > 0 else None,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            raise TimeoutError("timed out waiting for a computing session notification")
+        if notification_task in done:
+            return notification_task.result()
+        return None
+    finally:
+        for task in waiters:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
+
+
+async def _wait_for_upload_close(
+    upload: Any,
+    *,
+    stop_event: asyncio.Event | None,
+    timeout: float,
+) -> bool:
+    deadline = asyncio.get_running_loop().time() + timeout if timeout > 0 else None
+    while upload.state != "STOPPED":
+        if stop_event is not None and stop_event.is_set():
+            return False
+        if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError("timed out waiting for COMPUTE_SESSION_CLOSE (C-05)")
+        await asyncio.sleep(0.2)
+    return True
 
 
 async def run_agent_b(
@@ -80,12 +181,30 @@ async def run_agent_b(
     gate: EnterStepGate | None = None,
     stop_event: asyncio.Event | None = None,
 ) -> dict[str, Any]:
-    client = sdk or AgentSdk()
-    message_event = stop_event or asyncio.Event()
-    message_listener = AgentBGroupListener(message_event)
+    video_file: Path | None = None
+    if sdk is not None:
+        client = sdk
+    elif args.video_source == "file":
+        from agent_sdk.webrtc import AiortcMediaOffloadAdapter
+
+        video_file = Path(args.video_file).expanduser().resolve()
+        if not video_file.is_file():
+            raise RuntimeError(f"local test video does not exist: {video_file}")
+        client = AgentSdk(
+            _media_offload_adapter=AiortcMediaOffloadAdapter(
+                video_file_path=video_file,
+                loop_video_file=args.loop_video,
+            )
+        )
+    else:
+        client = AgentSdk()
+    session_notifications: asyncio.Queue[ComputeNotification] = asyncio.Queue()
+    message_listener = AgentBGroupListener(session_notifications)
     unregister_network = lambda: None
     unregister_group = lambda: None
     profile = None
+    active_upload = None
+    completed_sessions: list[str] = []
 
     try:
         await _before_step(
@@ -232,36 +351,114 @@ async def run_agent_b(
             "B_READY",
             agent_id=profile.agent_id,
             capability=args.capability,
+            video_source=args.video_source,
+            video_file=str(video_file) if video_file is not None else None,
             agent_tun_cidr=initialized.agent_tun_cidr,
             listen_endpoint=initialized.agent_tcp_endpoint,
         )
         print(
-            "Agent B 已就绪：现在启动 Agent A，B 会自动接受邀请并打印收到的消息。",
+            "Agent B 已就绪：现在启动 Agent A；B 会自动接受邀请，收到 session ID "
+            "后上传摄像头视频。",
             flush=True,
         )
 
-        if args.wait_timeout > 0:
-            await asyncio.wait_for(
-                message_event.wait(), timeout=args.wait_timeout
+        while args.max_sessions == 0 or len(completed_sessions) < args.max_sessions:
+            notification = await _next_notification(
+                session_notifications,
+                stop_event=stop_event,
+                timeout=args.wait_timeout,
             )
-        else:
-            await message_event.wait()
+            if notification is None:
+                _emit("STOP_EVENT_RECEIVED")
+                break
+            snapshot = await client.get_group_snapshot(notification.group_id)
+            if snapshot is None:
+                raise RuntimeError(
+                    "computing session notification references an unknown group: "
+                    f"{notification.group_id}"
+                )
+            if notification.sender_agent_id not in snapshot.members_by_agent_id:
+                raise RuntimeError(
+                    "computing session notification sender is not in the group: "
+                    f"{notification.sender_agent_id}"
+                )
+            if profile.agent_id not in snapshot.members_by_agent_id:
+                raise RuntimeError(
+                    "local Agent B is absent from the computing notification group: "
+                    f"{profile.agent_id}"
+                )
 
-        if args.exit_after_message:
-            _emit("EXIT_AFTER_MESSAGE")
-        else:
-            _emit("FIRST_MESSAGE_RECEIVED_KEEP_RUNNING")
-            await asyncio.Event().wait()
+            session_id = notification.compute_service_session_id
+            await _before_step(
+                gate,
+                "sdk.start_video_upload",
+                "等待 SDK 内部 producer C-02，并用缓存的 Sandbox 端点完成 WebRTC "
+                f"协商；session_id={session_id}。",
+            )
+            active_upload = await client.start_video_upload(
+                session_id,
+                camera_id=args.camera_id,
+                width=args.video_width,
+                height=args.video_height,
+                fps=args.video_fps,
+                bitrate_kbps=args.video_bitrate_kbps,
+                timeout_seconds=args.media_timeout,
+            )
+            _emit(
+                "VIDEO_UPLOAD_STARTED",
+                compute_service_session_id=session_id,
+                track_id=active_upload.track_id,
+                state=active_upload.state,
+                video_source=args.video_source,
+                video_file=str(video_file) if video_file is not None else None,
+                camera_id=args.camera_id,
+                width=args.video_width,
+                height=args.video_height,
+                fps=args.video_fps,
+                bitrate_kbps=args.video_bitrate_kbps,
+            )
+
+            remotely_closed = await _wait_for_upload_close(
+                active_upload,
+                stop_event=stop_event,
+                timeout=args.session_close_timeout,
+            )
+            if not remotely_closed:
+                _emit(
+                    "VIDEO_UPLOAD_STOP_REQUESTED",
+                    compute_service_session_id=session_id,
+                )
+                break
+            completed_sessions.append(session_id)
+            _emit(
+                "COMPUTING_SESSION_CLOSED",
+                compute_service_session_id=session_id,
+                completed_session_count=len(completed_sessions),
+            )
+            active_upload = None
 
         return {
             "agent_id": profile.agent_id,
             "capability": args.capability,
             "last_message": message_listener.last_message,
+            "completed_sessions": completed_sessions,
         }
     finally:
         unregister_group()
         unregister_network()
         try:
+            if active_upload is not None and active_upload.state != "STOPPED":
+                try:
+                    await active_upload.stop()
+                    _emit(
+                        "VIDEO_UPLOAD_STOPPED_DURING_CLEANUP",
+                        track_id=active_upload.track_id,
+                    )
+                except Exception as exc:
+                    _emit(
+                        "VIDEO_UPLOAD_CLEANUP_FAILED",
+                        error=str(exc) or repr(exc),
+                    )
             if args.deregister_on_exit and profile is not None:
                 deregistered = await client.deregister_identity(
                     profile.agent_id, reason="retired"
@@ -280,7 +477,8 @@ async def run_agent_b(
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(
         description=(
-            "Agent B publishes a capability, accepts Agent A's group, and receives a message."
+            "Agent B publishes a capability, accepts Agent A's group and uploads "
+            "camera video for a computing session."
         )
     )
     value.add_argument("--runtime-ip", required=True)
@@ -294,9 +492,9 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--tun-mtu", type=int, default=1280)
     value.add_argument("--agent-name", default="Agent-B")
     value.add_argument("--owner", default="ab-test-owner-b")
-    value.add_argument("--description", default="Agent B capability provider test")
+    value.add_argument("--description", default="Agent B video offload producer test")
     value.add_argument("--region", default="CN")
-    value.add_argument("--capability", default="text")
+    value.add_argument("--capability", default="video_rendering")
     value.add_argument("--priority", type=int, default=1)
     value.add_argument(
         "--third-party-private-key",
@@ -318,15 +516,45 @@ def parser() -> argparse.ArgumentParser:
         help="wait for Enter before each outbound SDK setup operation",
     )
     value.add_argument(
-        "--exit-after-message",
-        action="store_true",
-        help="close Agent B after the first received A2A message",
-    )
-    value.add_argument(
         "--wait-timeout",
         type=float,
         default=0,
-        help="seconds to wait for the first message; 0 waits indefinitely",
+        help="seconds to wait for each computing session ID; 0 waits indefinitely",
+    )
+    value.add_argument(
+        "--video-source",
+        choices=("file", "camera"),
+        default="file",
+        help="use the bundled local MP4 by default, or a Linux V4L2 camera",
+    )
+    value.add_argument(
+        "--video-file",
+        default=str(DEFAULT_TEST_VIDEO),
+        help="local video used when --video-source=file",
+    )
+    value.add_argument(
+        "--loop-video",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="loop the local video until the computing session is closed",
+    )
+    value.add_argument("--camera-id", type=int, default=0)
+    value.add_argument("--video-width", type=int, default=1280)
+    value.add_argument("--video-height", type=int, default=720)
+    value.add_argument("--video-fps", type=int, default=30)
+    value.add_argument("--video-bitrate-kbps", type=int, default=2500)
+    value.add_argument("--media-timeout", type=float, default=30.0)
+    value.add_argument(
+        "--session-close-timeout",
+        type=float,
+        default=60.0,
+        help="seconds to wait for C-05 after upload starts; 0 waits indefinitely",
+    )
+    value.add_argument(
+        "--max-sessions",
+        type=_non_negative_int,
+        default=1,
+        help="number of remotely closed sessions required for success; 0 keeps serving",
     )
     value.add_argument(
         "--fresh-registration",

@@ -16,10 +16,16 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from agent_sdk import (
+    AcnContext,
     AgentSdk,
+    ComputeConstraints,
+    ComputeInputFormat,
+    ComputeRequestType,
+    ComputeResources,
+    ComputeSessionRequest,
     NetworkMessageAction,
     NetworkMessageType,
-    SandboxSpec,
+    RuntimeHttpResponse,
 )
 from agent_sdk.routes import MemoryRouteBackend
 from agent_sdk.security import (
@@ -66,29 +72,62 @@ class DemoMasque:
 
 
 class DemoRuntime:
-    """Returns the original unmodified AgentRuntime wire contracts."""
+    """Returns the formal AgentRuntime wire contracts."""
 
     def __init__(self) -> None:
         self.requests: list[tuple[str, str, Mapping[str, Any]]] = []
         self.downlink_handler = None
 
-    async def get_ue_agent_ip(self) -> str:
-        return "8.8.8.7"
+    async def get_ue_info(self) -> Mapping[str, Any]:
+        return {
+            "identity": {"supi": "imsi-001010000000001"},
+            "nas": {
+                "registered": True,
+                "state": "session_ready",
+                "security_context": True,
+            },
+            "pdu_sessions": [
+                {
+                    "pdu_session_id": 1,
+                    "state": "active",
+                    "type": "IPv4",
+                    "dnn": "internet",
+                    "snssai": {"sst": 1, "sd": "010203"},
+                    "ipv4": "8.8.8.7",
+                    "default_route": True,
+                }
+            ],
+            "data_plane_accesses": [
+                {
+                    "access_type": "HTTP3_CONNECT_IP",
+                    "endpoint_template": (
+                        "https://192.168.3.10:4433/masque/{pdu_session_id}"
+                    ),
+                    "session_selection": "EXACT_PDU_SESSION_ID",
+                }
+            ],
+        }
 
-    async def start_downlink(self, handler) -> None:
+    async def get_acn_status(self) -> Mapping[str, Any]:
+        return {"ready": True}
+
+    async def start_downlink(self, handler, on_reconnected=None) -> None:
         self.downlink_handler = handler
+        self.on_reconnected = on_reconnected
 
     async def push_invitation(self) -> NetworkMessageAction:
         assert self.downlink_handler is not None
-        return await self.downlink_handler(
+        response = await self.downlink_handler(
             "ACN_AGENT_GROUPING_INVITATION",
             48,
             {"notification_type": "group_invitation", "group_id": "g-demo"},
         )
+        assert response is not None
+        return NetworkMessageAction(response["result"])
 
     async def push_group_config(self) -> NetworkMessageAction:
         assert self.downlink_handler is not None
-        return await self.downlink_handler(
+        response = await self.downlink_handler(
             "ACN_AGENT_GROUPING_NOTIFICATION",
             49,
             {
@@ -115,6 +154,39 @@ class DemoRuntime:
                 "proof": {"jws": "demo-group-proof"},
             },
         )
+        assert response is not None
+        return NetworkMessageAction(response["result"])
+
+    async def push_compute_config(self) -> Mapping[str, Any]:
+        assert self.downlink_handler is not None
+        response = await self.downlink_handler(
+            "COMPUTE_CONNECT_CONFIG",
+            50,
+            {
+                "compute_service_session_id": "css-demo",
+                "compute_instance_id": "ci-demo",
+                "binding_ref": "binding-css-demo",
+                "role": "consumer",
+                "receiver_agent_id": LOCAL_AGENT_ID,
+                "service_endpoint": "http://8.8.8.9:8788",
+                "network_binding": {
+                    "pdu_session_id": 1,
+                    "dnn": "internet",
+                    "snssai": {"sst": 1, "sd": "010203"},
+                    "ue_ipv4": "8.8.8.7",
+                    "runtime_data_plane": {
+                        "access_type": "HTTP3_CONNECT_IP",
+                        "session_selection": "EXACT_PDU_SESSION_ID",
+                    },
+                },
+                "connection_parameters": {
+                    "media_connections_path": "/v1/media-connections",
+                    "transport": "WEBRTC",
+                },
+            },
+        )
+        assert response is not None
+        return response
 
     async def request(
         self, method: str, path: str, body: Mapping[str, Any]
@@ -163,28 +235,25 @@ class DemoRuntime:
             }
         if path == "/acf/v1/agents-grouping":
             return {"status": "grouped", "group_id": "g-demo"}
-        if path == "/compute/v1/offloading-sessions":
-            return {
-                "session_id": "session-demo",
-                "state": "ALLOCATED",
-                "producer": {
-                    "video_server_ip": "8.8.8.9",
-                    "source_start_url": "https://8.8.8.9:28500/v1/source-pulls",
-                    "source_stop_url": (
-                        "https://8.8.8.9:28500/v1/source-pulls/session-demo"
-                    ),
-                },
-                "processed_stream": {
-                    "video_server_ip": "8.8.8.9",
-                    "offer_url": "https://8.8.8.9:28500/v1/processed/offer",
-                    "protocol": "webrtc",
-                    "signaling": "non-trickle",
-                },
-                "expires_at": (
-                    datetime.now(timezone.utc) + timedelta(minutes=30)
-                ).isoformat().replace("+00:00", "Z"),
-            }
         return {"success": True, "operation_id": "operation-demo"}
+
+    async def request_with_status(
+        self, method: str, path: str, body: Mapping[str, Any]
+    ) -> RuntimeHttpResponse:
+        if path != "/v1/computing/session-requests":
+            return RuntimeHttpResponse(200, await self.request(method, path, body))
+        self.requests.append((method, path, dict(body)))
+        return RuntimeHttpResponse(
+            202,
+            {
+                "message_type": "COMPUTE_SESSION_STATUS",
+                "request_id": body["request_id"],
+                "compute_service_session_id": "css-demo",
+                "status_revision": "1",
+                "status": "ACCEPTED",
+                "cause": "",
+            },
+        )
 
     async def close(self) -> None:
         return None
@@ -266,21 +335,72 @@ class DemoVideoStream:
     async def recv(self):
         return b"processed-demo-frame"
 
+    async def close(self):
+        return None
+
+
+class DemoPreparedMedia:
+    def __init__(self, result) -> None:
+        self.offer_sdp = (
+            "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+            "a=recvonly\r\n"
+            "a=candidate:1 1 UDP 1 8.8.8.7 50000 typ host\r\n"
+        )
+        self.result = result
+
+    async def apply_answer(self, answer_sdp, timeout_seconds):
+        del answer_sdp, timeout_seconds
+        return self.result
+
+    async def abort(self):
+        return None
+
 
 class DemoMediaAdapter:
     def __init__(self) -> None:
         self.upload = DemoVideoUpload()
         self.stream = DemoVideoStream()
 
-    async def start_video_upload(self, session, **kwargs):
-        del session, kwargs
-        return self.upload
+    def supports_video_codec(self, codec):
+        return codec.upper() in {"H264", "VP8"}
 
-    async def get_processed_video_stream(self, session, timeout_seconds):
-        del session, timeout_seconds
-        return self.stream
+    async def prepare_video_upload(self, session, **kwargs):
+        del session, kwargs
+        prepared = DemoPreparedMedia(self.upload)
+        prepared.offer_sdp = prepared.offer_sdp.replace("a=recvonly", "a=sendonly")
+        return prepared
+
+    async def prepare_processed_video(self, session):
+        del session
+        return DemoPreparedMedia(self.stream)
 
     async def close(self) -> None:
+        return None
+
+
+class DemoSandboxTransport:
+    async def request_with_status(
+        self, method, url, body, timeout_seconds, source_ipv4
+    ):
+        del url, timeout_seconds, source_ipv4
+        if method == "DELETE":
+            return RuntimeHttpResponse(204, {})
+        context = body["computing_context"]
+        return RuntimeHttpResponse(201, {
+            "request_id": body["request_id"],
+            "computing_context": context,
+            "media_connection_id": "media-demo",
+            "answer": {
+                "type": "answer",
+                "sdp": (
+                    "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+                    "a=sendonly\r\n"
+                    "a=candidate:2 1 UDP 1 8.8.8.9 51000 typ host\r\n"
+                ),
+            },
+        })
+
+    async def close(self):
         return None
 
 
@@ -319,7 +439,8 @@ async def run_demo(
         runtime_factory=lambda host, port: runtime,
         server_factory=lambda: local_server,
         route_backend_factory=lambda config, device: route_backend,
-        media_offload_adapter=media,
+        _media_offload_adapter=media,
+        _sandbox_transport=DemoSandboxTransport(),
         agent_state_directory=(
             Path(log_file_path).resolve().parent
             / f"{Path(log_file_path).stem}-agent-state"
@@ -411,40 +532,41 @@ async def run_demo(
         await local_server.push_a2a_message()
         show("10 receive message", group_listener.received[-1][2])
 
-        session = await sdk.create_offloading_session(
-            workload_type="video_rendering",
-            sandbox_spec=SandboxSpec(vcpus=2, memory_mb=4096),
+        status = await sdk.create_computing_session(
+            ComputeSessionRequest(
+                message_type="COMPUTE_SESSION_REQUEST",
+                request_type=ComputeRequestType.CREATE,
+                input_format=ComputeInputFormat.STRUCTURED,
+                request_id="create-demo",
+                acn_context=AcnContext(
+                    group_id=group.group_id,
+                    requester_agent_id=profile.agent_id,
+                    target_agent_id=discovered[0].agent_id,
+                ),
+                constraints=ComputeConstraints(
+                    capability_id="video_rendering",
+                    resources=ComputeResources(
+                        cpu_millicores=2000,
+                        memory_mib=4096,
+                    ),
+                    dnn="internet",
+                    allow_base_qos=True,
+                ),
+            )
         )
-        assert session.processed_stream is not None
+        assert status.compute_service_session_id == "css-demo"
+        config_ack = await runtime.push_compute_config()
+        assert config_ack["accepted"] is True
         await sdk.send_message(
             group.group_id,
             discovered[0].agent_id,
-            {
-                "type": "processed_video_session",
-                "session_id": session.session_id,
-                "processed_stream": {
-                    "video_server_ip": session.processed_stream.video_server_ip,
-                    "offer_url": session.processed_stream.offer_url,
-                    "protocol": session.processed_stream.protocol,
-                    "signaling": session.processed_stream.signaling,
-                },
-            },
-            message_type="processed_video_session",
+            {"compute_service_session_id": status.compute_service_session_id},
+            message_type="computing_video_session",
             task_id="task-demo",
         )
-        upload = await sdk.start_video_upload(
-            session,
-            width=1280,
-            height=720,
-            fps=30,
-            bitrate_kbps=2500,
-        )
-        await upload.pause()
-        await upload.resume()
-        stream = await sdk.get_processed_video_stream(session)
+        stream = await sdk.get_processed_video_stream(status.compute_service_session_id)
         frame = await stream.recv()
-        await upload.stop()
-        show("11 media offload", f"{session.state}, frame={frame!r}")
+        show("11 media offload", f"{status.status}, frame={frame!r}")
 
         deregistration = await sdk.deregister_identity(profile.agent_id)
         show("12 deregister_identity", deregistration.success)
@@ -457,7 +579,7 @@ async def run_demo(
             "received_message_count": len(group_listener.received),
             "invitation_action": invitation_action.value,
             "message_delivered": receipt.delivered,
-            "media_state": upload.state,
+            "media_state": "STREAM_READY",
         }
         assert summary == {
             "runtime_request_count": 8,
@@ -467,7 +589,7 @@ async def run_demo(
             "received_message_count": 1,
             "invitation_action": "ACCEPT",
             "message_delivered": True,
-            "media_state": "STOPPED",
+            "media_state": "STREAM_READY",
         }
         if verbose:
             print("FULL FLOW DEMO PASSED")

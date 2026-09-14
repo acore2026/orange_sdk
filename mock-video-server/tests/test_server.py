@@ -143,6 +143,125 @@ class MockVideoServerTest(unittest.IsolatedAsyncioTestCase):
         error = await response.json()
         self.assertEqual(error["error"], "INVALID_ARGUMENT")
 
+    async def test_formal_media_connections_are_role_scoped_and_idempotent(self) -> None:
+        consumer_pc = RTCPeerConnection()
+        self.peer_connections.append(consumer_pc)
+        received = asyncio.get_running_loop().create_future()
+
+        @consumer_pc.on("track")
+        def on_track(track) -> None:
+            if not received.done():
+                received.set_result(track)
+
+        consumer_pc.addTransceiver("video", direction="recvonly")
+        consumer_offer = await consumer_pc.createOffer()
+        await consumer_pc.setLocalDescription(consumer_offer)
+        await wait_ice(consumer_pc)
+        base_context = {
+            "compute_service_session_id": "css-formal-1",
+            "compute_instance_id": "ci-formal-1",
+            "binding_ref": "binding-formal-1",
+        }
+        consumer_body = {
+            "request_id": "media-consumer-1",
+            "computing_context": {
+                **base_context,
+                "role": "consumer",
+                "agent_id": "agent-a",
+            },
+            "offer": {
+                "type": "offer",
+                "sdp": consumer_pc.localDescription.sdp,
+            },
+        }
+        response = await self.http.post(
+            f"{self.base}/v1/media-connections",
+            json=consumer_body,
+        )
+        self.assertEqual(response.status, 201, await response.text())
+        consumer_result = await response.json()
+        self.assertEqual(consumer_result["request_id"], consumer_body["request_id"])
+        self.assertEqual(
+            consumer_result["computing_context"],
+            consumer_body["computing_context"],
+        )
+        self.assertEqual(consumer_result["answer"]["type"], "answer")
+        await consumer_pc.setRemoteDescription(
+            RTCSessionDescription(**consumer_result["answer"])
+        )
+        track = await asyncio.wait_for(received, 8)
+        placeholder = await asyncio.wait_for(track.recv(), 8)
+        self.assertLess(int(placeholder.to_ndarray(format="bgr24")[2, 2, 0]), 100)
+
+        repeated = await self.http.post(
+            f"{self.base}/v1/media-connections",
+            json=consumer_body,
+        )
+        self.assertEqual(repeated.status, 201)
+        self.assertEqual(
+            (await repeated.json())["media_connection_id"],
+            consumer_result["media_connection_id"],
+        )
+        conflict_body = {
+            **consumer_body,
+            "offer": {"type": "offer", "sdp": consumer_body["offer"]["sdp"] + "\r\n"},
+        }
+        conflict = await self.http.post(
+            f"{self.base}/v1/media-connections",
+            json=conflict_body,
+        )
+        self.assertEqual(conflict.status, 409)
+
+        producer_pc = RTCPeerConnection()
+        self.peer_connections.append(producer_pc)
+        producer_pc.addTrack(SyntheticVideoTrack())
+        producer_offer = await producer_pc.createOffer()
+        await producer_pc.setLocalDescription(producer_offer)
+        await wait_ice(producer_pc)
+        producer_body = {
+            "request_id": "media-producer-1",
+            "computing_context": {
+                **base_context,
+                "role": "producer",
+                "agent_id": "agent-b",
+            },
+            "offer": {
+                "type": "offer",
+                "sdp": producer_pc.localDescription.sdp,
+            },
+        }
+        response = await self.http.post(
+            f"{self.base}/v1/media-connections",
+            json=producer_body,
+        )
+        self.assertEqual(response.status, 201, await response.text())
+        producer_result = await response.json()
+        await producer_pc.setRemoteDescription(
+            RTCSessionDescription(**producer_result["answer"])
+        )
+
+        async def wait_for_source_frame() -> VideoFrame:
+            while True:
+                candidate = await track.recv()
+                image = candidate.to_ndarray(format="bgr24")
+                if int(image[2, 2, 0]) > 100:
+                    return candidate
+
+        self.assertIsNotNone(await asyncio.wait_for(wait_for_source_frame(), 8))
+
+        for connection_id in (
+            producer_result["media_connection_id"],
+            consumer_result["media_connection_id"],
+        ):
+            deleted = await self.http.delete(
+                f"{self.base}/v1/media-connections/{connection_id}"
+            )
+            self.assertEqual(deleted.status, 204)
+            repeated_delete = await self.http.delete(
+                f"{self.base}/v1/media-connections/{connection_id}"
+            )
+            self.assertEqual(repeated_delete.status, 204)
+
     async def test_end_to_end_source_and_consumer(self) -> None:
         response = await self.http.post(
             f"{self.base}/compute/v1/offloading-sessions",
@@ -155,8 +274,13 @@ class MockVideoServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 201)
         allocated = await response.json()
         session_id = allocated["session_id"]
-        self.assertNotIn("access_token", allocated["producer"])
-        self.assertNotIn("access_ticket", allocated["processed_stream"])
+        self.assertEqual(
+            set(allocated),
+            {"session_id", "state", "expires_at", "video_server_ip"},
+        )
+        self.assertEqual(allocated["video_server_ip"], "127.0.0.1")
+        self.assertNotIn("producer", allocated)
+        self.assertNotIn("processed_stream", allocated)
 
         response = await self.http.post(
             f"{self.base}/video/v1/sessions/{session_id}/source",
@@ -206,7 +330,7 @@ class MockVideoServerTest(unittest.IsolatedAsyncioTestCase):
         await consumer_pc.setLocalDescription(consumer_offer)
         await wait_ice(consumer_pc)
         response = await self.http.post(
-            allocated["processed_stream"]["offer_url"],
+            f"{self.base}/video/v1/sessions/{session_id}/processed",
             json={
                 "sdp_offer": {
                     "type": consumer_pc.localDescription.type,
@@ -260,7 +384,7 @@ class MockVideoServerTest(unittest.IsolatedAsyncioTestCase):
         await consumer_pc.setLocalDescription(consumer_offer)
         await wait_ice(consumer_pc)
         response = await self.http.post(
-            allocated["processed_stream"]["offer_url"],
+            f"{self.base}/video/v1/sessions/{session_id}/processed",
             json={
                 "sdp_offer": {
                     "type": consumer_pc.localDescription.type,

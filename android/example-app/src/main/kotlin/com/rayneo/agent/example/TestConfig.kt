@@ -25,8 +25,6 @@ data class TestConfig(
     val dnn: String,
     val groupName: String,
     val message: String,
-    val computeControlIp: String = "172.30.0.10",
-    val computeControlPort: Int = 28500,
 ) {
     val masqueServerUrl: String
         get() = "https://$serverIp:$masquePort${normalizedMasquePath()}"
@@ -38,12 +36,10 @@ data class TestConfig(
             "MASQUE QUIC 端口" to masquePort,
             "本地 TCP 端口" to localTcpPort,
             "本地 UDP 端口" to localUdpPort,
-            "Mock Video Server 端口" to computeControlPort,
         ).forEach { (name, port) ->
             if (port !in 1..65535) add("$name 必须在 1..65535")
         }
         if (masquePath.isBlank()) add("MASQUE 路径不能为空")
-        if (computeControlIp.isBlank()) add("Mock Video Server IP 不能为空")
         if (owner.isBlank()) add("Owner 不能为空")
         if (agentName.isBlank()) add("Agent 名称不能为空")
         if (capability.isBlank()) add("发现能力不能为空")
@@ -73,7 +69,7 @@ object RayNeoX3ProDeployment {
         masqueToken = masqueToken?.takeIf(String::isNotBlank),
         owner = "rayneo-x3-pro-owner-a",
         agentName = "RayNeo-X3-Pro-A",
-        capability = "text",
+        capability = "dog-vision",
         dnn = "internet",
         groupName = "rayneo-x3-pro-ab-group",
         message = "hello Agent B from RayNeo X3 Pro",

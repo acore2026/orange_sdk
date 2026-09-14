@@ -20,6 +20,54 @@ The Android library mirrors the Python SDK's group-cache and endpoint rules:
 - Runtime downlink uses a client WebSocket with Ping-based failure detection and bounded
   exponential reconnect; A2A uses the Agent TUN HTTP listener.
 
+## Callback registration APIs
+
+The SDK exposes two independent callback-registration APIs. They are not callback
+parameters of `initialize` or `sendMessage`. Register both immediately after creating
+`AgentSdk` and before calling `initialize`, so that application handlers are already
+available when initialization starts the Runtime downlink WebSocket and local
+`/A2A/message` service.
+
+```kotlin
+val sdk = AgentSdk.create(vpnService)
+
+val networkRegistration = sdk.registerNetworkMessageListener(
+    NetworkMessageListener { messageType, payload ->
+        when (messageType) {
+            // Returning ACCEPT or REJECT decides whether this Agent accepts the invitation.
+            NetworkMessageType.GROUP_INVITATION -> NetworkMessageAction.ACCEPT
+
+            // The SDK has already committed the group cache and routes before this callback.
+            NetworkMessageType.GROUP_CONFIG -> NetworkMessageAction.ACK
+            NetworkMessageType.UNKNOWN -> NetworkMessageAction.REJECT
+        }
+    },
+)
+
+val groupRegistration = sdk.registerGroupMessageListener(
+    GroupMessageListener { groupId, senderAgentId, payload ->
+        // Receives the business JSON sent by the peer's sendMessage call.
+    },
+)
+
+sdk.initialize(/* AgentRuntime, local ports, and MASQUE configuration */)
+
+// When the application no longer needs callbacks:
+groupRegistration.close()
+networkRegistration.close()
+```
+
+`registerNetworkMessageListener` handles both incoming group invitations and committed
+group-configuration notifications. It allows one active listener; registering another
+before closing the existing handle returns `LISTENER_ALREADY_REGISTERED`. An invitation
+received without this listener is rejected. A valid group configuration received without
+it is still committed and ACKed, but the application is not notified.
+
+`registerGroupMessageListener` receives peer A2A messages after the SDK validates the
+target, group membership, and message structure. If no group listener is registered, the
+incoming request fails and the sender does not receive a successful delivery receipt.
+Both methods return `AutoCloseable`; calling `close()` unregisters that listener.
+
 ## Build and test
 
 ```bash
@@ -365,112 +413,199 @@ sdk.sendMessage(
 The wire body contains `src_agent_id`, `dst_agent_id`, `type`, `task_id`, and
 `payload`; the receiver returns `{"status":"OK"}` after validation.
 
-Camera/WebRTC calls use the `MediaOffloadAdapter` SPI. Source Agent C requests a
-network-assigned Sandbox by resource specification, then calls `startVideoUpload`.
-The upload call only starts media; it does not choose consumers or send A2A
-messages:
+## Computing session APIs
+
+CREATE, QUERY, CANCEL, and RELEASE all use the AgentRuntime configured by
+`initialize()`:
+
+```text
+POST http://{agentRuntimeIp}:{agentRuntimePort}/v1/computing/session-requests
+```
+
+Before each operation, the SDK checks `/v1/acn/status` and `/v1/ue/info` for
+NAS readiness, an active IPv4 PDU session, and an
+`HTTP3_CONNECT_IP + EXACT_PDU_SESSION_ID` access. CREATE also requires the
+referenced local group to be `ACTIVE`, the requester to match the local Agent,
+and the target Agent to be a member.
 
 ```kotlin
-val session = sdk.createOffloadingSession(
-    workloadType = "video_rendering",
-    sandboxSpec = SandboxSpec(vcpus = 2, memoryMb = 4096),
+val createStatus = sdk.createComputingSession(
+    ComputeSessionRequest(
+        messageType = "COMPUTE_SESSION_REQUEST",
+        requestType = ComputeRequestType.CREATE,
+        inputFormat = ComputeInputFormat.STRUCTURED,
+        requestId = "create-glasses-001",
+        acnContext = AcnContext(
+            groupId = group.groupId,
+            requesterAgentId = profile.agentId,
+            targetAgentId = peer.agentId,
+        ),
+        constraints = ComputeConstraints(
+            capabilityId = "video_rendering",
+            resources = ComputeResources(
+                cpuMillicores = 2000,
+                memoryMib = 4096,
+            ),
+            dnn = "internet",
+            allowBaseQos = true,
+        ),
+    ),
 )
+val sessionId = requireNotNull(createStatus.computeServiceSessionId)
+```
+
+The synchronous result is `ComputeSessionStatus`. HTTP 202 for CREATE means the
+request was accepted for asynchronous processing; it does not contain a Sandbox
+address or a media URL. Natural-language CREATE uses
+`inputFormat = NATURAL_LANGUAGE` with non-empty `text`; structured CREATE uses
+non-empty `constraints`. A retry of the same operation must reuse the same
+`requestId` and request body.
+
+The remaining lifecycle calls accept the same model and endpoint:
+
+```kotlin
+val queryStatus = sdk.queryComputingSession(
+    ComputeSessionRequest(
+        messageType = "COMPUTE_SESSION_REQUEST",
+        requestType = ComputeRequestType.QUERY,
+        inputFormat = ComputeInputFormat.STRUCTURED,
+        requestId = "query-001",
+        targetRequestId = "create-glasses-001",
+    ),
+)
+val cancelStatus = sdk.cancelComputingSession(
+    ComputeSessionRequest(
+        messageType = "COMPUTE_SESSION_REQUEST",
+        requestType = ComputeRequestType.CANCEL,
+        inputFormat = ComputeInputFormat.STRUCTURED,
+        requestId = "cancel-001",
+        targetRequestId = "create-glasses-001",
+    ),
+)
+val releaseStatus = sdk.releaseComputingSession(
+    ComputeSessionRequest(
+        messageType = "COMPUTE_SESSION_REQUEST",
+        requestType = ComputeRequestType.RELEASE,
+        inputFormat = ComputeInputFormat.STRUCTURED,
+        requestId = "release-001",
+        computeServiceSessionId = sessionId,
+    ),
+)
+```
+
+`initialize()` registers the common WebSocket handler internally. It consumes
+`COMPUTE_CONNECT_CONFIG`, `COMPUTE_SESSION_STATUS`, and
+`COMPUTE_SESSION_CLOSE`; applications do not register compute listeners. For
+C-02, the SDK validates `receiver_agent_id`, PDU Session ID, DNN, S-NSSAI,
+`ue_ipv4`, and Runtime data-plane capability. It installs the Sandbox endpoint
+route, caches `service_endpoint`, `binding_ref`, role, and interface paths,
+then automatically returns C-03. C-04 is deduplicated by `status_revision`.
+C-05 closes the SDK-owned media objects and route, then automatically returns
+C-06. C-02 has no `group_id`, so the SDK trusts the CA group authorization and
+revalidates only local identity and network binding.
+
+Media calls accept only `computeServiceSessionId`. They wait for C-02 and build
+the internal URL from its cached `service_endpoint + media_connections_path`.
+The requester is the consumer:
+
+```kotlin
+val stream = sdk.getProcessedVideoStream(sessionId, timeoutSeconds = 15.0)
+val track = stream.track
+// 页面不再使用视频时：
+stream.close()
+```
+
+The CREATE target is the producer:
+
+```kotlin
 val upload = sdk.startVideoUpload(
-    session = session,
+    computeServiceSessionId = sessionId,
     cameraId = "0",
     width = 640,
     height = 480,
     fps = 30,
     bitrateKbps = 2400,
+    timeoutSeconds = 15.0,
 )
 ```
 
-The public creation call contains no `agentId`, `groupId`, or `sandboxId`.
-The allocation response contains both producer and processed-stream endpoints,
-and `OffloadingSession` contains no local Agent/group/Sandbox identity fields.
-The same Agent may therefore upload and consume its own processed stream:
+SDK 模块内置 libwebrtc 媒体适配器，并通过 Gradle 声明
+`io.github.webrtc-sdk:android:150.7871.01` 传递依赖。应用不传媒体 adapter、Sandbox URL、端口、SDP、
+`binding_ref` 或 `media_connection_id`。两端都主动生成完整非 Trickle ICE Offer：
+producer 为 `sendonly`，consumer 为 `recvonly`。SDK 等待 ICE 收集完成后 POST C-02
+媒体集合路径，校验 HTTP 201 的 `request_id/computing_context` 回显和 Answer，再设置
+远端描述。WebRTC 网络优先级固定为 VPN；本地 Offer 必须包含 C-02 `ue_ipv4`，其他物理网
+host candidate 会被移除并由核心层拒绝。Answer 中的 IPv4 候选在应用前加入 CONNECT-IP
+路由。`upload.stop()`、`stream.close()`、C-05 和 `sdk.close()` 负责本地关闭，主动关闭
+同时发送 `DELETE /v1/media-connections/{media_connection_id}` 并要求 HTTP 204。
+
+consumer 通过同一份 C-02 配置更新或读取持续识别目标：
 
 ```kotlin
-val track = sdk.getProcessedVideoStream(session)
+val target = sdk.updateRecognitionTarget(
+    computeServiceSessionId = sessionId,
+    requestId = "recognition-001",
+    text = "寻找红色玩偶",
+    language = "zh",
+)
+check(target.status == "APPLIED")
+println("${target.targetRevision}: ${target.target.label}")
+
+val current = sdk.getRecognitionTarget(sessionId)
 ```
 
-To let receiver E consume a stream produced by C, the application may serialize
-the necessary session fields and send them with the existing `sendMessage` API.
-It may also choose not to send them. E parses that application message into an
-`OffloadingSession` and calls `getProcessedVideoStream(session)`; this is an app
-protocol and does not add an SDK accept API. The Video Server sends a 30 fps
-placeholder until the producer's first processed source frame is ready, then switches the
-same monotonic-RTP track without another SDP exchange.
+SDK 内部展开 `recognition_target_path_template`，自动加入完整
+`computing_context`，并校验 HTTP 200、上下文回显、`target_revision` 和目标内容。
+应用重试同一更新时复用原 `requestId` 和原文本。
 
-Both `startVideoUpload(session, ...)` and `getProcessedVideoStream(session, ...)`
-read the Video Server IP, port/URL, and session ID from their session argument.
-The SDK contains no fixed Video Server address and no A/B role dependency. All
-required producer and processed-stream fields originate in the
-`createOffloadingSession` result and can be carried between arbitrary Agents.
+运行期动作使用 Sandbox 的固定控制资源；SDK 自动注入 consumer 上下文并通过同一个
+UE IPv4 发送：
 
-When the Video Server creates the source Offer, the Android producer is the
-Answerer. It must apply that remote Offer first, bind the camera Track to the
-video transceiver created for the offered MID, set it to `SEND_ONLY`, and only
-then create the Answer. Pre-creating an independent source transceiver can
-produce an ICE-connected session whose negotiated video section is inactive.
+```kotlin
+val action = sdk.createControlAction(
+    sessionId,
+    ControlActionRequest(
+        requestId = "control-search-001",
+        inputType = ControlInputType.TEXT,
+        text = "寻找杯子",
+        language = "zh",
+    ),
+)
+val current = sdk.getControlAction(sessionId, action.actionId)
+```
 
-The App uses `io.github.webrtc-sdk:android:150.7871.01`. Its source encoder
-factory supplements the upstream component-name gate with Android's actual
-`MediaCodecInfo.profileLevels`: it advertises H.264 High `64001f` only when a
-hardware encoder reports `AVCProfileHigh` Level 3.1 or newer, explicitly starts
-that encoder in High mode, and checks the profile-level-id in the first encoded
-SPS. The B flow log therefore contains the selected encoder and a
-`H264 High SPS 已校验` event. A device without that capability fails before SDP
-or camera startup instead of silently negotiating Baseline.
+`createControlAction` 固定调用 `POST /v1/control-actions` 并要求 HTTP 202；
+`getControlAction` 调用 `GET /v1/control-actions/{action_id}` 并要求 HTTP 200。
+Sandbox 到 producer Runtime 的动作转发由 Runtime 内部处理，不新增应用回调。
 
-WebRTC endpoints and signaling carry no business token, ticket, Bearer header,
-or proof. Agent identity is authenticated by the core-network session; ICE,
-DTLS, and SRTP remain enabled as intrinsic WebRTC protocol security. The
-application supplies an adapter backed by its chosen Android WebRTC
-distribution; unit tests use a deterministic fake so no camera or emulator is
-required.
+If the requester tells the producer to start, the application sends only
+`compute_service_session_id` through the existing `sendMessage` API. It does
+not send a Sandbox address, port, URL, binding, or credential. The producer SDK
+receives its full endpoint configuration through its own C-02.
+
+Computing HTTP calls always reuse the `agentRuntimeIp/agentRuntimePort` passed
+to `initialize`; the SDK no longer exposes a separate compute-control target.
 
 ### N6 / DN Mock 算力视频联调
 
 仓库的 [`mock-video-server`](../mock-video-server/README.md) 已部署到 free6GC 的
-`compose_n6`，默认地址 `172.30.0.10:28500`。Generic App 配置页预填该地址；SDK
-初始化时为它安装 Agent VPN 主机路由，因此控制请求、WebRTC 信令和媒体包均走
-`Agent TUN → MASQUE → UPF → N6`，而不是手机 Wi-Fi 直接访问 Docker 网段。
+`compose_n6`，默认地址 `172.30.0.10:28500`。该地址不再由 App 配置。算网控制面需要在
+C-02 中把 `service_endpoint` 下发为该地址，并把 `media_connections_path` 下发为
+`/v1/media-connections`；SDK 据此安装路由并发起 Sandbox 信令。
 
 联调顺序：
 
 1. 启动 A（手机或 RayNeo）和 Generic App 角色 B，等双方日志显示群组已就绪。
-2. 在 B 点击“开始视频算力测试”，首次使用允许摄像头权限。
-3. B 日志出现 `COMPUTE CREATE` 后，应用先用 `sendMessage` 发送无凭据的 session
-   信息，再启动上传；A 可以在 B 首帧到达前完成下行 WebRTC，并先看到占位流。
-4. A 无需点击按钮，会自动处理应用定义的 `processed_video_session`。出现
-   `VIDEO STREAM` 和 `VIDEO FRAME frames=1` 后，“PROCESSED VIDEO”预览窗会直接
-   显示处理后画面；右上角 `LIVE` 来自实际绘制首帧回调。RayNeo 和非 Huawei
-   Generic 使用共享 EGL 上下文的 `TextureView` + WebRTC `EglRenderer`，解码纹理直接送入
-   独立 GL 渲染线程，不再经过 I420/JPEG/Bitmap；RayNeo 镜像界面继续使用
-   `SurfaceViewRenderer`，但与解码器共享同一个 EGL 根上下文。
+2. 在 A 点击“申请算力会话并接收视频”；RayNeo 上使用主操作按钮。A 调用
+   `createComputingSession`，收到 HTTP 202 后只把 `compute_service_session_id` 发给 B，
+   随后等待自己的 consumer C-02 并调用 `getProcessedVideoStream(sessionId)`。
+3. B 收到会话 ID 后自动进入上传流程；首次使用只需确认 Android 摄像头权限。B 等待
+   自己的 producer C-02，然后调用 `startVideoUpload(sessionId)`。用户不填写或处理
+   Sandbox IP、端口、URL、角色、`binding_ref` 或 SDP。
+4. A 可以在 B 首帧到达前完成 consumer WebRTC 并先看到占位流。出现 `VIDEO STREAM`
+   和 `VIDEO FRAME frames=1` 后，预览窗显示处理后画面；右上角 `LIVE` 来自实际绘制首帧回调。
 5. 在 DN 查看 `curl http://172.30.0.10:28500/debug/v1/sessions`，可以按 consumer
    核对 `frames_processed`、`packets_sent`、`bytes_sent`、`codec`、首帧状态和
-   `keyframes_requested`；Server 会在 Answer 就绪、consumer 建连和占位流切换到
-   source 时主动补关键帧，并优先协商 H264。
-6. A 的 Dump 包含 `[WEBRTC INBOUND RTP]`，其中
-   `packetsReceived/bytesReceived/framesDecoded/framesDropped` 是 libwebrtc 单调计数；
-   `decoded_sink_callbacks` 用于确认解码后的 Java `VideoSink` 回调是否真正执行。
-7. A 的 Dump 还包含 `[VIDEO PREVIEW RENDERER]`，记录实际 renderer、是否已显示首帧
-   及最近分辨率；Huawei 兼容路径还会记录提交/显示/限速计数与转换错误，可直接区分
-   解码回调与页面显示状态。
-
-App 使用可选初始化参数指向 Mock；不传时生产默认行为不变，算力请求仍发往
-AgentRuntime：
-
-```kotlin
-sdk.initialize(
-    agentRuntimeIp = runtimeIp,
-    agentRuntimePort = runtimePort,
-    localTcpPort = 4001,
-    localUdpPort = 28443,
-    masqueServerUrl = masqueUrl,
-    computeControlIp = "172.30.0.10",
-    computeControlPort = 28500,
-)
-```
+   `keyframes_requested`。停止 App 时，A 先调用 RELEASE，双方媒体连接由 SDK 清理。
+6. 可直接运行 `python3 mock-video-server/smoke_client.py`，验证正式 U-MEDIA 的
+   consumer 先建连、producer 后建连、原 Track 切换处理帧以及 DELETE 清理。

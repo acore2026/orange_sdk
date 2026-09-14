@@ -1,60 +1,27 @@
 #!/usr/bin/env python3
-"""Synthetic WebRTC end-to-end probe for a deployed Mock Video Server."""
+"""Synthetic U-MEDIA WebRTC probe for a deployed Mock Video Sandbox."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import fractions
 import json
 
 import numpy as np
 from aiohttp import ClientSession
-from aiortc import RTCPeerConnection, RTCRtpSender, RTCSessionDescription
-from aiortc.mediastreams import MediaStreamTrack
-from av import CodecContext, VideoFrame
-
-from server import H264_HIGH_PROFILE_LEVEL_IDS, register_h264_high_profiles
+from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+from av import VideoFrame
 
 
-register_h264_high_profiles()
-
-
-class HighProfilePacketTrack(MediaStreamTrack):
-    """Generate real Annex-B H264 High Profile packets for the source smoke path."""
-
-    kind = "video"
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._codec = CodecContext.create("libx264", "w")
-        self._codec.width = 320
-        self._codec.height = 180
-        self._codec.bit_rate = 300_000
-        self._codec.pix_fmt = "yuv420p"
-        self._codec.framerate = fractions.Fraction(15, 1)
-        self._codec.time_base = fractions.Fraction(1, 15)
-        self._codec.options = {
-            "level": "31",
-            "profile": "high",
-            "preset": "medium",
-            "tune": "zerolatency",
-        }
-        self._frame_number = 0
-
-    async def recv(self):
-        if self._frame_number:
-            await asyncio.sleep(1 / 15)
-        while True:
-            image = np.zeros((180, 320, 3), dtype=np.uint8)
-            image[:, :] = (20, 40, 60)
-            frame = VideoFrame.from_ndarray(image, format="bgr24")
-            frame.pts = self._frame_number
-            frame.time_base = fractions.Fraction(1, 15)
-            self._frame_number += 1
-            packets = self._codec.encode(frame)
-            if packets:
-                return packets[0]
+class SyntheticVideoTrack(VideoStreamTrack):
+    async def recv(self) -> VideoFrame:
+        pts, time_base = await self.next_timestamp()
+        image = np.zeros((180, 320, 3), dtype=np.uint8)
+        image[:, :] = (20, 40, 60)
+        frame = VideoFrame.from_ndarray(image, format="bgr24")
+        frame.pts = pts
+        frame.time_base = time_base
+        return frame
 
 
 async def wait_ice(pc: RTCPeerConnection) -> None:
@@ -70,43 +37,52 @@ async def wait_ice(pc: RTCPeerConnection) -> None:
     await asyncio.wait_for(ready.wait(), 8)
 
 
-def prefer_h264_baseline(transceiver) -> None:
-    codecs = RTCRtpSender.getCapabilities("video").codecs
-    h264 = [
-        codec
-        for codec in codecs
-        if codec.mimeType.lower() == "video/h264"
-        and str(codec.parameters.get("profile-level-id", "")).lower()
-        not in H264_HIGH_PROFILE_LEVEL_IDS
-    ]
-    retransmission = [codec for codec in codecs if codec.mimeType.lower() == "video/rtx"]
-    fallback = [
-        codec
-        for codec in codecs
-        if codec.mimeType.lower() not in {"video/h264", "video/rtx"}
-    ]
-    if h264:
-        transceiver.setCodecPreferences(h264 + retransmission + fallback)
+async def create_media_connection(
+    http: ClientSession,
+    base_url: str,
+    pc: RTCPeerConnection,
+    *,
+    request_id: str,
+    context: dict[str, str],
+) -> dict[str, object]:
+    offer = await pc.createOffer()
+    await pc.setLocalDescription(offer)
+    await wait_ice(pc)
+    response = await http.post(
+        f"{base_url}/v1/media-connections",
+        json={
+            "request_id": request_id,
+            "computing_context": context,
+            "offer": {
+                "type": "offer",
+                "sdp": pc.localDescription.sdp,
+            },
+        },
+    )
+    response.raise_for_status()
+    result = await response.json()
+    if result.get("request_id") != request_id:
+        raise RuntimeError("Sandbox did not echo request_id")
+    if result.get("computing_context") != context:
+        raise RuntimeError("Sandbox did not echo computing_context")
+    answer = result.get("answer")
+    if not isinstance(answer, dict) or answer.get("type") != "answer":
+        raise RuntimeError("Sandbox response does not contain an SDP Answer")
+    await pc.setRemoteDescription(RTCSessionDescription(**answer))
+    return result
 
 
 async def run(base_url: str) -> dict[str, object]:
     base_url = base_url.rstrip("/")
     peers: list[RTCPeerConnection] = []
+    connection_ids: list[str] = []
+    base_context = {
+        "compute_service_session_id": "css-smoke-001",
+        "compute_instance_id": "ci-smoke-001",
+        "binding_ref": "binding-smoke-001",
+    }
     async with ClientSession() as http:
         try:
-            response = await http.post(
-                f"{base_url}/compute/v1/offloading-sessions",
-                json={
-                    "request_id": "smoke-create",
-                    "workload_type": "video_relay",
-                    "sandbox_spec": {"vcpus": 2, "memory_mb": 4096},
-                },
-            )
-            response.raise_for_status()
-            session = await response.json()
-            session_id = session["session_id"]
-            producer = session["producer"]
-            processed_stream = session["processed_stream"]
             consumer_pc = RTCPeerConnection()
             peers.append(consumer_pc)
             track_ready = asyncio.get_running_loop().create_future()
@@ -116,29 +92,21 @@ async def run(base_url: str) -> dict[str, object]:
                 if not track_ready.done():
                     track_ready.set_result(track)
 
-            consumer_transceiver = consumer_pc.addTransceiver("video", direction="recvonly")
-            prefer_h264_baseline(consumer_transceiver)
-            offer = await consumer_pc.createOffer()
-            await consumer_pc.setLocalDescription(offer)
-            await wait_ice(consumer_pc)
-            response = await http.post(
-                processed_stream["offer_url"],
-                json={
-                    "sdp_offer": {
-                        "type": consumer_pc.localDescription.type,
-                        "sdp": consumer_pc.localDescription.sdp,
-                    }
-                },
+            consumer_pc.addTransceiver("video", direction="recvonly")
+            consumer_result = await create_media_connection(
+                http,
+                base_url,
+                consumer_pc,
+                request_id="media-consumer-smoke",
+                context={**base_context, "role": "consumer", "agent_id": "agent-a"},
             )
-            response.raise_for_status()
-            remote_answer = (await response.json())["sdp_answer"]
-            await consumer_pc.setRemoteDescription(RTCSessionDescription(**remote_answer))
+            connection_ids.append(str(consumer_result["media_connection_id"]))
             remote_track = await asyncio.wait_for(track_ready, 8)
             original_track_id = remote_track.id
             placeholder = await asyncio.wait_for(remote_track.recv(), 8)
             placeholder_image = placeholder.to_ndarray(format="bgr24")
             if int(placeholder_image[2, 2, 0]) >= 100:
-                raise RuntimeError("consumer did not receive a placeholder before source startup")
+                raise RuntimeError("consumer did not receive a placeholder before producer startup")
 
             async def wait_for_processed_frame() -> tuple[VideoFrame, list[int]]:
                 while True:
@@ -149,53 +117,43 @@ async def run(base_url: str) -> dict[str, object]:
                         return candidate, marker
 
             processed_frame_task = asyncio.create_task(wait_for_processed_frame())
-
-            response = await http.post(
-                producer["source_start_url"],
-                json={"action": "create_offer"},
+            producer_pc = RTCPeerConnection()
+            peers.append(producer_pc)
+            producer_pc.addTrack(SyntheticVideoTrack())
+            producer_result = await create_media_connection(
+                http,
+                base_url,
+                producer_pc,
+                request_id="media-producer-smoke",
+                context={**base_context, "role": "producer", "agent_id": "agent-b"},
             )
-            response.raise_for_status()
-            source_offer = (await response.json())["sdp_offer"]
-            if not all(
-                f"profile-level-id={profile_level_id}" in source_offer["sdp"]
-                for profile_level_id in H264_HIGH_PROFILE_LEVEL_IDS
-            ):
-                raise RuntimeError("source offer does not require H264 High Profile")
-            source_pc = RTCPeerConnection()
-            peers.append(source_pc)
-            source_pc.addTrack(HighProfilePacketTrack())
-            await source_pc.setRemoteDescription(RTCSessionDescription(**source_offer))
-            answer = await source_pc.createAnswer()
-            await source_pc.setLocalDescription(answer)
-            await wait_ice(source_pc)
-            response = await http.post(
-                producer["source_start_url"],
-                json={
-                    "sdp_answer": {
-                        "type": source_pc.localDescription.type,
-                        "sdp": source_pc.localDescription.sdp,
-                    }
-                },
-            )
-            response.raise_for_status()
-            source_state = await response.json()
+            connection_ids.append(str(producer_result["media_connection_id"]))
 
             frame, marker = await asyncio.wait_for(processed_frame_task, 8)
             if remote_track.id != original_track_id:
-                raise RuntimeError("processed source switch unexpectedly replaced the consumer track")
-            if marker[0] < 150 or marker[2] < 150:
-                raise RuntimeError(f"processed frame marker is missing: {marker}")
+                raise RuntimeError("processed source switch replaced the consumer track")
             return {
                 "ok": True,
-                "session_id": session_id,
-                "source_state": source_state["state"],
+                "compute_service_session_id": base_context["compute_service_session_id"],
+                "consumer_media_connection_id": connection_ids[0],
+                "producer_media_connection_id": connection_ids[1],
                 "placeholder_frame": f"{placeholder.width}x{placeholder.height}",
                 "processed_frame": f"{frame.width}x{frame.height}",
                 "processed_marker_bgr": marker,
                 "consumer_track_reused": True,
             }
         finally:
-            await asyncio.gather(*(pc.close() for pc in peers), return_exceptions=True)
+            try:
+                for connection_id in reversed(connection_ids):
+                    response = await http.delete(
+                        f"{base_url}/v1/media-connections/{connection_id}"
+                    )
+                    if response.status != 204:
+                        raise RuntimeError(
+                            f"failed to delete media connection {connection_id}: HTTP {response.status}"
+                        )
+            finally:
+                await asyncio.gather(*(pc.close() for pc in peers), return_exceptions=True)
 
 
 def main() -> None:

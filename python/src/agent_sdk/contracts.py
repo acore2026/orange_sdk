@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Protocol
 
 from .models import (
+    ComputingSession,
     NetworkMessageAction,
     NetworkMessageType,
-    OffloadingSession,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeHttpResponse:
+    status_code: int
+    body: Mapping[str, Any]
 
 
 class ProofVerifier(Protocol):
@@ -30,18 +37,40 @@ class ControlRequestAuthenticator(Protocol):
 
 
 class RuntimeTransport(Protocol):
-    async def get_ue_agent_ip(self) -> str: ...
+    async def get_ue_info(self) -> Mapping[str, Any]: ...
+
+    async def get_acn_status(self) -> Mapping[str, Any]: ...
 
     async def start_downlink(
         self,
         handler: Callable[
-            [str, int, Mapping[str, Any]], Awaitable[NetworkMessageAction]
+            [str, int, Mapping[str, Any]], Awaitable[Mapping[str, Any] | None]
         ],
+        on_reconnected: Callable[[], Awaitable[None]] | None = None,
     ) -> None: ...
 
     async def request(
         self, method: str, path: str, body: Mapping[str, Any]
     ) -> Mapping[str, Any]: ...
+
+    async def request_with_status(
+        self, method: str, path: str, body: Mapping[str, Any]
+    ) -> RuntimeHttpResponse: ...
+
+    async def close(self) -> None: ...
+
+
+class SandboxTransport(Protocol):
+    """HTTP transport for C-02 Sandbox user-plane endpoints."""
+
+    async def request_with_status(
+        self,
+        method: str,
+        url: str,
+        body: Mapping[str, Any] | None,
+        timeout_seconds: float,
+        source_ipv4: str,
+    ) -> RuntimeHttpResponse: ...
 
     async def close(self) -> None: ...
 
@@ -120,30 +149,52 @@ class RemoteVideoStream(Protocol):
 
     async def recv(self) -> Any: ...
 
+    async def close(self) -> None: ...
+
+
+class PreparedVideoUpload(Protocol):
+    """A local send-only PeerConnection whose non-Trickle Offer is ready."""
+
+    offer_sdp: str
+
+    async def apply_answer(
+        self, answer_sdp: str, timeout_seconds: float
+    ) -> VideoUploadHandle: ...
+
+    async def abort(self) -> None: ...
+
+
+class PreparedProcessedVideo(Protocol):
+    """A local receive-only PeerConnection whose non-Trickle Offer is ready."""
+
+    offer_sdp: str
+
+    async def apply_answer(
+        self, answer_sdp: str, timeout_seconds: float
+    ) -> RemoteVideoStream: ...
+
+    async def abort(self) -> None: ...
+
 
 class MediaOffloadAdapter(Protocol):
-    """Platform WebRTC adapter; implementations own camera and PeerConnections.
+    """Platform WebRTC adapter; HTTP signaling is owned by AgentSdk."""
 
-    ``start_video_upload`` must not return until the Video Server has started
-    pulling the source track. Session distribution is an application concern;
-    the SDK never selects consumers or sends invitations from this adapter.
-    """
+    def supports_video_codec(self, codec: str) -> bool: ...
 
-    async def start_video_upload(
+    async def prepare_video_upload(
         self,
-        session: OffloadingSession,
+        session: ComputingSession,
         *,
         camera_id: int,
         width: int,
         height: int,
         fps: int,
         bitrate_kbps: int,
-    ) -> VideoUploadHandle: ...
+    ) -> PreparedVideoUpload: ...
 
-    async def get_processed_video_stream(
+    async def prepare_processed_video(
         self,
-        session: OffloadingSession,
-        timeout_seconds: float,
-    ) -> RemoteVideoStream: ...
+        session: ComputingSession,
+    ) -> PreparedProcessedVideo: ...
 
     async def close(self) -> None: ...

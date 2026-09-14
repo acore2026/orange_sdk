@@ -118,31 +118,184 @@ class DiscoveredAgent:
     priority: int
 
 
-@dataclass(slots=True)
-class OffloadingSession:
-    session_id: str
-    state: str
+class ComputeRequestType(str, Enum):
+    CREATE = "CREATE"
+    QUERY = "QUERY"
+    CANCEL = "CANCEL"
+    RELEASE = "RELEASE"
+
+
+class ComputeInputFormat(str, Enum):
+    NATURAL_LANGUAGE = "NATURAL_LANGUAGE"
+    STRUCTURED = "STRUCTURED"
+
+
+class ComputeRole(str, Enum):
+    CONSUMER = "consumer"
+    PRODUCER = "producer"
+
+
+@dataclass(frozen=True, slots=True)
+class AcnContext:
+    group_id: str
+    requester_agent_id: str
+    target_agent_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ComputeResources:
+    cpu_millicores: int | None = None
+    memory_mib: int | None = None
+    gpu_count: int | None = None
+    gpu_model: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ComputeConstraints:
+    capability_id: str
+    api_version: str | None = None
+    image_id: str | None = None
+    resources: ComputeResources | None = None
+    dnn: str | None = None
+    snssai: str | None = None
+    allow_base_qos: bool | None = None
+    max_duration_ms: int | None = None
+    placement_region: str | None = None
+    data_residency_region: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ComputeSessionRequest:
+    message_type: str
+    request_type: ComputeRequestType
+    input_format: ComputeInputFormat
+    request_id: str
+    acn_context: AcnContext | None = None
+    text: str | None = None
+    constraints: ComputeConstraints | None = None
+    compute_service_session_id: str | None = None
+    target_request_id: str | None = None
+    ui_locale: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ComputeSessionStatus:
+    message_type: str
+    request_id: str
+    status: str
+    cause: str
+    compute_service_session_id: str | None = None
+    status_revision: str | None = None
+    missing_fields: tuple[str, ...] = ()
+    result: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Snssai:
+    sst: int
+    sd: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeDataPlane:
+    access_type: str
+    session_selection: str
+
+
+@dataclass(frozen=True, slots=True)
+class ComputeNetworkBinding:
+    pdu_session_id: int
+    dnn: str
+    snssai: Snssai
+    ue_ipv4: str
+    runtime_data_plane: RuntimeDataPlane
+
+
+@dataclass(frozen=True, slots=True)
+class ComputeConnectionParameters:
+    media_connections_path: str
+    transport: str
+    recognition_target_path_template: str | None = None
+    video_codec: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ComputingSession:
+    compute_service_session_id: str
+    compute_instance_id: str
+    binding_ref: str
+    role: ComputeRole
+    receiver_agent_id: str
+    service_endpoint: str
+    network_binding: ComputeNetworkBinding
+    connection_parameters: ComputeConnectionParameters
     expires_at: datetime | None = None
-    producer: "VideoUploadEndpoint | None" = None
-    processed_stream: "ProcessedVideoEndpoint | None" = None
 
 
 @dataclass(frozen=True, slots=True)
-class SandboxSpec:
-    vcpus: int
-    memory_mb: int
+class ComputingContext:
+    compute_service_session_id: str
+    compute_instance_id: str
+    binding_ref: str
+    role: ComputeRole
+    agent_id: str
 
 
 @dataclass(frozen=True, slots=True)
-class VideoUploadEndpoint:
-    video_server_ip: str
-    source_start_url: str
-    source_stop_url: str
+class RecognitionTarget:
+    label: str
+    prompt: str
 
 
 @dataclass(frozen=True, slots=True)
-class ProcessedVideoEndpoint:
-    video_server_ip: str
-    offer_url: str
-    protocol: str = "webrtc"
-    signaling: str = "non-trickle"
+class RecognitionTargetStatus:
+    request_id: str
+    computing_context: ComputingContext
+    status: str
+    target_revision: str
+    target: RecognitionTarget
+
+
+class ControlInputType(str, Enum):
+    TEXT = "TEXT"
+    STRUCTURED = "STRUCTURED"
+
+
+class ControlAction(str, Enum):
+    MOVEMENT = "movement"
+    GRAB = "grab"
+    SEARCH_OBJECT = "search_object"
+
+
+class ControlTargetRole(str, Enum):
+    PRODUCER = "producer"
+    SANDBOX = "sandbox"
+
+
+@dataclass(frozen=True, slots=True)
+class ControlActionTarget:
+    role: ControlTargetRole
+    agent_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ControlActionRequest:
+    request_id: str
+    input_type: ControlInputType
+    action: ControlAction | None = None
+    text: str | None = None
+    language: str | None = None
+    parameters: Mapping[str, Any] | None = None
+    target: ControlActionTarget | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ControlActionStatus:
+    request_id: str
+    action_id: str
+    status: str
+    cause: str
+    computing_context: ComputingContext | None = None
+    normalized_action: ControlAction | None = None
+    normalized_parameters: Mapping[str, Any] | None = None
+    result: Mapping[str, Any] | None = None

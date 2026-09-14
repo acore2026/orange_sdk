@@ -13,11 +13,115 @@ from aiohttp import ClientSession, ClientTimeout, ClientWebSocketResponse, WSMsg
 
 from .errors import AgentSdkError, ErrorCode
 from .logging_utils import log_event
+from .contracts import RuntimeHttpResponse
 from .models import NetworkMessageAction
 
 
 DOWNLINK_WEBSOCKET_PATH = "/v1/acn/downlink-websocket"
 UE_INFO_PATH = "/v1/ue/info"
+ACN_STATUS_PATH = "/v1/acn/status"
+
+
+class HttpSandboxTransport:
+    """Absolute-URL JSON transport used for Sandbox user-plane APIs."""
+
+    def __init__(
+        self,
+        *,
+        verify: bool | str = True,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self._verify = verify
+        self._clients: dict[str, httpx.AsyncClient] = {}
+        self._logger = logger or logging.getLogger(__name__)
+
+    async def request_with_status(
+        self,
+        method: str,
+        url: str,
+        body: Mapping[str, Any] | None,
+        timeout_seconds: float,
+        source_ipv4: str,
+    ) -> RuntimeHttpResponse:
+        request_id = uuid.uuid4().hex
+        log_event(
+            self._logger,
+            logging.INFO,
+            "http_request",
+            request_id=request_id,
+            direction="outbound",
+            peer="Sandbox",
+            method=method,
+            url=url,
+            body=body,
+        )
+        try:
+            client = self._clients.get(source_ipv4)
+            if client is None:
+                client = httpx.AsyncClient(
+                    transport=httpx.AsyncHTTPTransport(
+                        verify=self._verify,
+                        local_address=source_ipv4,
+                        trust_env=False,
+                    ),
+                    trust_env=False,
+                )
+                self._clients[source_ipv4] = client
+            response = await client.request(
+                method,
+                url,
+                json=dict(body) if body is not None else None,
+                headers={"Content-Type": "application/json"} if body is not None else None,
+                timeout=timeout_seconds,
+            )
+        except httpx.TimeoutException as exc:
+            raise AgentSdkError(
+                ErrorCode.TIMEOUT,
+                "Sandbox media request timed out",
+                retryable=True,
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise AgentSdkError(
+                ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                f"Sandbox media request failed: {exc}",
+                retryable=True,
+            ) from exc
+        if not response.content:
+            payload: Mapping[str, Any] = {}
+        else:
+            try:
+                decoded = response.json()
+            except ValueError as exc:
+                raise AgentSdkError(
+                    ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                    "Sandbox response must be a JSON object or empty HTTP 204",
+                ) from exc
+            if not isinstance(decoded, Mapping):
+                raise AgentSdkError(
+                    ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                    "Sandbox response must be a JSON object",
+                )
+            payload = decoded
+        log_event(
+            self._logger,
+            logging.INFO,
+            "http_response",
+            request_id=request_id,
+            direction="inbound",
+            peer="Sandbox",
+            method=method,
+            url=url,
+            status_code=response.status_code,
+            body=payload,
+        )
+        return RuntimeHttpResponse(response.status_code, payload)
+
+    async def close(self) -> None:
+        clients, self._clients = self._clients, {}
+        await asyncio.gather(
+            *(client.aclose() for client in clients.values()),
+            return_exceptions=True,
+        )
 
 
 class HttpRuntimeTransport:
@@ -55,8 +159,9 @@ class HttpRuntimeTransport:
     async def start_downlink(
         self,
         handler: Callable[
-            [str, int, Mapping[str, Any]], Awaitable[NetworkMessageAction]
+            [str, int, Mapping[str, Any]], Awaitable[Mapping[str, Any] | None]
         ],
+        on_reconnected: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if self._downlink_task is not None:
             raise AgentSdkError(
@@ -75,7 +180,7 @@ class HttpRuntimeTransport:
             raise
         self._downlink_socket = socket
         self._downlink_task = asyncio.create_task(
-            self._run_downlink(socket, handler),
+            self._run_downlink(socket, handler, on_reconnected),
             name="agent-runtime-downlink-websocket",
         )
 
@@ -126,8 +231,9 @@ class HttpRuntimeTransport:
         self,
         initial_socket: ClientWebSocketResponse,
         handler: Callable[
-            [str, int, Mapping[str, Any]], Awaitable[NetworkMessageAction]
+            [str, int, Mapping[str, Any]], Awaitable[Mapping[str, Any] | None]
         ],
+        on_reconnected: Callable[[], Awaitable[None]] | None,
     ) -> None:
         socket = initial_socket
         retry_delay = 0.5
@@ -166,6 +272,8 @@ class HttpRuntimeTransport:
                     socket = await self._open_downlink_socket()
                     self._downlink_socket = socket
                     retry_delay = 0.5
+                    if on_reconnected is not None:
+                        await on_reconnected()
                     break
                 except AgentSdkError:
                     retry_delay = min(retry_delay * 2, 10.0)
@@ -175,21 +283,26 @@ class HttpRuntimeTransport:
         socket: ClientWebSocketResponse,
         raw_message: str,
         handler: Callable[
-            [str, int, Mapping[str, Any]], Awaitable[NetworkMessageAction]
+            [str, int, Mapping[str, Any]], Awaitable[Mapping[str, Any] | None]
         ],
     ) -> None:
         request_id: str | None = None
-        group_id: str | None = None
+        kind: str | None = None
         try:
             message = json.loads(raw_message)
             if not isinstance(message, Mapping):
                 raise ValueError("WebSocket message must be a JSON object")
+            raw_kind = message.get("kind")
+            if raw_kind not in {"request", "event"}:
+                raise ValueError("kind must be request or event")
+            kind = raw_kind
             raw_request_id = message.get("request_id")
-            if not isinstance(raw_request_id, str) or not raw_request_id:
-                raise ValueError("request_id must be a non-empty string")
-            request_id = raw_request_id
-            if message.get("kind") != "request":
-                raise ValueError("kind must be request")
+            if kind == "request":
+                if not isinstance(raw_request_id, str) or not raw_request_id:
+                    raise ValueError("request_id must be a non-empty string for request")
+                request_id = raw_request_id
+            elif raw_request_id is not None:
+                raise ValueError("request_id must be omitted for event")
             message_type = message.get("message_type")
             if not isinstance(message_type, str) or not message_type:
                 raise ValueError("message_type must be a non-empty string")
@@ -197,25 +310,12 @@ class HttpRuntimeTransport:
             if (
                 isinstance(transaction_id, bool)
                 or not isinstance(transaction_id, int)
-                or transaction_id < 0
+                or not 1 <= transaction_id <= 255
             ):
-                raise ValueError("transaction_id must be a non-negative integer")
+                raise ValueError("transaction_id must be an integer in 1..255")
             payload = message.get("payload")
             if not isinstance(payload, Mapping):
                 raise ValueError("payload must be a JSON object")
-            if message_type == "ACN_AGENT_GROUPING_INVITATION":
-                group_info = payload.get("group_info")
-                raw_group_id = (
-                    group_info.get("group_id")
-                    if isinstance(group_info, Mapping)
-                    else None
-                )
-            elif message_type == "ACN_AGENT_GROUPING_NOTIFICATION":
-                raw_group_id = payload.get("group_id")
-            else:
-                raw_group_id = None
-            if isinstance(raw_group_id, str) and raw_group_id:
-                group_id = raw_group_id
             log_event(
                 self._logger,
                 logging.INFO,
@@ -227,9 +327,9 @@ class HttpRuntimeTransport:
                 transaction_id=transaction_id,
                 body=payload,
             )
-            action = await handler(message_type, transaction_id, payload)
-            if not isinstance(action, NetworkMessageAction):
-                raise TypeError("downlink handler must return NetworkMessageAction")
+            response_payload = await handler(message_type, transaction_id, payload)
+            if kind == "request" and not isinstance(response_payload, Mapping):
+                raise TypeError("request downlink handler must return a response object")
         except Exception as exc:
             log_event(
                 self._logger,
@@ -242,16 +342,13 @@ class HttpRuntimeTransport:
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
-            action = NetworkMessageAction.REJECT
-        if request_id is None:
+            response_payload = {"result": NetworkMessageAction.REJECT.value}
+        if kind != "request" or request_id is None:
             return
-        response_payload = {"result": action.value}
-        if group_id is not None:
-            response_payload = {"group_id": group_id, **response_payload}
         response = {
             "kind": "response",
             "request_id": request_id,
-            "payload": response_payload,
+            "payload": dict(response_payload),
         }
         try:
             async with self._downlink_send_lock:
@@ -277,12 +374,12 @@ class HttpRuntimeTransport:
                 error=str(exc),
             )
 
-    async def _request_json(
+    async def _request_json_with_status(
         self,
         method: str,
         path: str,
         body: Mapping[str, Any] | None,
-    ) -> Mapping[str, Any]:
+    ) -> RuntimeHttpResponse:
         request_id = uuid.uuid4().hex
         url = f"{self._base_url}{path}"
         log_event(
@@ -303,7 +400,6 @@ class HttpRuntimeTransport:
             if body is not None:
                 request_arguments["json"] = dict(body)
             response = await self._client.request(method, path, **request_arguments)
-            response.raise_for_status()
         except httpx.TimeoutException as exc:
             log_event(
                 self._logger,
@@ -320,24 +416,6 @@ class HttpRuntimeTransport:
             )
             raise AgentSdkError(
                 ErrorCode.TIMEOUT, f"Runtime request timed out: {path}", retryable=True
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            log_event(
-                self._logger,
-                logging.ERROR,
-                "http_response",
-                request_id=request_id,
-                direction="inbound",
-                peer="AgentRuntime",
-                method=method,
-                url=url,
-                status_code=exc.response.status_code,
-                body=self._response_body(exc.response),
-            )
-            raise AgentSdkError(
-                ErrorCode.RUNTIME_REJECTED,
-                f"Runtime rejected {path}: HTTP {exc.response.status_code}",
-                details={"response": exc.response.text[:1024]},
             ) from exc
         except httpx.HTTPError as exc:
             log_event(
@@ -372,7 +450,7 @@ class HttpRuntimeTransport:
             body=response_body,
         )
         if response_body is None:
-            return {}
+            return RuntimeHttpResponse(response.status_code, {})
         if isinstance(response_body, str):
             raise AgentSdkError(
                 ErrorCode.RUNTIME_REJECTED,
@@ -383,10 +461,31 @@ class HttpRuntimeTransport:
             raise AgentSdkError(
                 ErrorCode.RUNTIME_REJECTED, "Runtime response must be a JSON object"
             )
-        return payload
+        return RuntimeHttpResponse(response.status_code, payload)
+
+    async def _request_json(
+        self,
+        method: str,
+        path: str,
+        body: Mapping[str, Any] | None,
+    ) -> Mapping[str, Any]:
+        response = await self._request_json_with_status(method, path, body)
+        if not 200 <= response.status_code < 300:
+            raise AgentSdkError(
+                ErrorCode.RUNTIME_REJECTED,
+                f"Runtime rejected {path}: HTTP {response.status_code}",
+                details={"response": dict(response.body)},
+            )
+        return response.body
+
+    async def get_ue_info(self) -> Mapping[str, Any]:
+        return await self._request_json("GET", UE_INFO_PATH, None)
 
     async def get_ue_agent_ip(self) -> str:
-        payload = await self._request_json("GET", UE_INFO_PATH, None)
+        return self.select_ue_agent_ip(await self.get_ue_info())
+
+    @staticmethod
+    def select_ue_agent_ip(payload: Mapping[str, Any]) -> str:
         nas = payload.get("nas")
         if not isinstance(nas, Mapping):
             raise AgentSdkError(
@@ -462,10 +561,18 @@ class HttpRuntimeTransport:
             )
         return defaults[0]
 
+    async def get_acn_status(self) -> Mapping[str, Any]:
+        return await self._request_json("GET", ACN_STATUS_PATH, None)
+
     async def request(
         self, method: str, path: str, body: Mapping[str, Any]
     ) -> Mapping[str, Any]:
         return await self._request_json(method, path, body)
+
+    async def request_with_status(
+        self, method: str, path: str, body: Mapping[str, Any]
+    ) -> RuntimeHttpResponse:
+        return await self._request_json_with_status(method, path, body)
 
     async def close(self) -> None:
         self._downlink_closing = True

@@ -41,6 +41,28 @@ if ! ip -o addr show | awk '{print $4}' | cut -d/ -f1 | grep -Fqx "${LOCAL_VLAN_
 fi
 
 AGENT_LOG_FILE="${AGENT_LOG_FILE:-/var/log/agent-sdk/agent-b.log}"
+AGENT_CAMERA_ID="${AGENT_CAMERA_ID:-0}"
+AGENT_VIDEO_SOURCE="${AGENT_VIDEO_SOURCE:-file}"
+AGENT_VIDEO_FILE="${AGENT_VIDEO_FILE:-/opt/agent-sdk/examples/assets/video-offload-test.mp4}"
+case "${AGENT_VIDEO_SOURCE}" in
+    file)
+        if [ ! -f "${AGENT_VIDEO_FILE}" ]; then
+            printf 'local test video is unavailable: %s\n' "${AGENT_VIDEO_FILE}" >&2
+            exit 1
+        fi
+        ;;
+    camera)
+        if [ ! -c "/dev/video${AGENT_CAMERA_ID}" ]; then
+            printf 'camera is unavailable inside the container: /dev/video%s\n' "${AGENT_CAMERA_ID}" >&2
+            printf '%s\n' 'Map a V4L2 camera into the container before starting Agent B.' >&2
+            exit 1
+        fi
+        ;;
+    *)
+        printf 'AGENT_VIDEO_SOURCE must be file or camera: %s\n' "${AGENT_VIDEO_SOURCE}" >&2
+        exit 2
+        ;;
+esac
 mkdir -p "$(dirname -- "${AGENT_LOG_FILE}")" "${XDG_STATE_HOME:-/var/lib/agent-sdk}"
 
 set -- \
@@ -54,11 +76,21 @@ set -- \
     --tun-mtu "${AGENT_TUN_MTU:-1280}" \
     --agent-name "${AGENT_NAME:-Agent-B}" \
     --owner "${AGENT_OWNER:-ab-test-owner-b}" \
-    --description "${AGENT_DESCRIPTION:-Agent B capability provider test}" \
+    --description "${AGENT_DESCRIPTION:-Agent B video offload producer test}" \
     --region "${AGENT_REGION:-CN}" \
-    --capability "${AGENT_CAPABILITY:-text}" \
+    --capability "${AGENT_CAPABILITY:-video_rendering}" \
     --priority "${AGENT_PRIORITY:-1}" \
     --wait-timeout "${AGENT_WAIT_TIMEOUT:-0}" \
+    --video-source "${AGENT_VIDEO_SOURCE}" \
+    --video-file "${AGENT_VIDEO_FILE}" \
+    --camera-id "${AGENT_CAMERA_ID}" \
+    --video-width "${AGENT_VIDEO_WIDTH:-1280}" \
+    --video-height "${AGENT_VIDEO_HEIGHT:-720}" \
+    --video-fps "${AGENT_VIDEO_FPS:-30}" \
+    --video-bitrate-kbps "${AGENT_VIDEO_BITRATE_KBPS:-2500}" \
+    --media-timeout "${AGENT_MEDIA_TIMEOUT:-30}" \
+    --session-close-timeout "${AGENT_SESSION_CLOSE_TIMEOUT:-60}" \
+    --max-sessions "${AGENT_MAX_SESSIONS:-1}" \
     --log-file "${AGENT_LOG_FILE}" \
     --log-level "${AGENT_LOG_LEVEL:-INFO}"
 
@@ -68,8 +100,8 @@ fi
 if [ -n "${AGENT_THIRD_PARTY_PRIVATE_KEY:-}" ]; then
     set -- "$@" --third-party-private-key "${AGENT_THIRD_PARTY_PRIVATE_KEY}"
 fi
-if is_true "${AGENT_EXIT_AFTER_MESSAGE:-false}"; then
-    set -- "$@" --exit-after-message
+if ! is_true "${AGENT_LOOP_VIDEO:-true}"; then
+    set -- "$@" --no-loop-video
 fi
 if is_true "${AGENT_FRESH_REGISTRATION:-true}"; then
     set -- "$@" --fresh-registration

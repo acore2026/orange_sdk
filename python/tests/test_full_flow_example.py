@@ -24,7 +24,7 @@ async def test_full_flow_example_calls_every_primary_api(capsys, tmp_path):
     assert summary["installed_route"] is True
     assert summary["received_message_count"] == 1
     assert summary["message_delivered"] is True
-    assert summary["media_state"] == "STOPPED"
+    assert summary["media_state"] == "STREAM_READY"
     assert "FULL FLOW DEMO PASSED" in capsys.readouterr().out
     log_text = log_path.read_text(encoding="utf-8")
     assert '"event":"function_enter","function":"init"' in log_text

@@ -138,6 +138,20 @@ class ConsumerConnection:
     stats_task: asyncio.Task[None] | None = None
 
 
+@dataclass
+class MediaConnectionRecord:
+    media_connection_id: str
+    request_id: str
+    computing_context: dict[str, str]
+    offer_sdp: str
+    answer_sdp: str
+    role: str
+    session: "VideoSession"
+    pc: RTCPeerConnection
+    consumer: ConsumerConnection | None = None
+    deleted: bool = False
+
+
 async def refresh_consumer_stats(connection: ConsumerConnection) -> None:
     """Capture monotonic outbound RTP counters before a connection disappears."""
     try:
@@ -502,10 +516,12 @@ class MockVideoServer:
         self.source_wait_seconds = source_wait_seconds
         self.output_fps = output_fps or float(os.getenv("MOCK_VIDEO_OUTPUT_FPS", "30"))
         self.sessions: dict[str, VideoSession] = {}
-
-    @property
-    def base_url(self) -> str:
-        return f"http://{self.public_ip}:{self.port}"
+        self.binding_sessions: dict[str, VideoSession] = {}
+        self.binding_facts: dict[str, tuple[str, str]] = {}
+        self.binding_agents: dict[tuple[str, str], str] = {}
+        self.media_connections: dict[str, MediaConnectionRecord] = {}
+        self.media_requests: dict[tuple[str, str, str], MediaConnectionRecord] = {}
+        self.active_media: dict[tuple[str, str], str] = {}
 
     def create_app(self) -> web.Application:
         app = web.Application(
@@ -515,6 +531,11 @@ class MockVideoServer:
         app.router.add_get("/healthz", self.health)
         app.router.add_get("/debug/v1/sessions", self.list_sessions)
         app.router.add_post("/compute/v1/offloading-sessions", self.create_session)
+        app.router.add_post("/v1/media-connections", self.create_media_connection)
+        app.router.add_delete(
+            "/v1/media-connections/{media_connection_id}",
+            self.delete_media_connection,
+        )
         app.router.add_post("/video/v1/sessions/{session_id}/source", self.source)
         app.router.add_post("/video/v1/sessions/{session_id}/source/stop", self.stop_source)
         app.router.add_post("/video/v1/sessions/{session_id}/processed", self.processed)
@@ -618,20 +639,282 @@ class MockVideoServer:
                 "session_id": session_id,
                 "state": session.state,
                 "expires_at": rfc3339(session.expires_at),
-                "producer": {
-                    "video_server_ip": self.public_ip,
-                    "source_start_url": f"{self.base_url}/video/v1/sessions/{session_id}/source",
-                    "source_stop_url": f"{self.base_url}/video/v1/sessions/{session_id}/source/stop",
-                },
-                "processed_stream": {
-                    "video_server_ip": self.public_ip,
-                    "offer_url": f"{self.base_url}/video/v1/sessions/{session_id}/processed",
-                    "protocol": "webrtc",
-                    "signaling": "non-trickle",
-                },
+                "video_server_ip": self.public_ip,
             },
             status=201,
         )
+
+    async def create_media_connection(self, request: web.Request) -> web.Response:
+        """Answer the terminal-created Offer defined by U-MEDIA."""
+        body = await self._json(request)
+        request_id = self._required_string(body, "request_id")
+        offer = body.get("offer")
+        if not isinstance(offer, dict):
+            raise ApiError(400, "INVALID_ARGUMENT", "offer must be an object")
+        if offer.get("type") != "offer":
+            raise ApiError(400, "INVALID_ARGUMENT", "offer.type must be offer")
+        offer_sdp = self._required_string(offer, "sdp", "offer")
+        context = self._computing_context(body)
+        role = context["role"]
+        binding_ref = context["binding_ref"]
+        request_key = (binding_ref, role, request_id)
+        previous = self.media_requests.get(request_key)
+
+        if previous is not None:
+            if previous.computing_context != context or previous.offer_sdp != offer_sdp:
+                raise ApiError(
+                    409,
+                    "idempotency-conflict",
+                    "the request_id was already used with different content",
+                )
+            return web.json_response(self._media_response(previous), status=201)
+
+        active_key = (binding_ref, role)
+        if active_key in self.active_media:
+            raise ApiError(
+                409,
+                "MEDIA_CONNECTION_EXISTS",
+                f"an active {role} media connection already exists for this binding",
+            )
+
+        session = self._binding_session(context)
+        connection_id = f"media-{uuid.uuid4()}"
+        pc = RTCPeerConnection()
+        self.active_media[active_key] = connection_id
+        consumer: ConsumerConnection | None = None
+        try:
+            if role == "producer":
+                answer_sdp = await self._answer_producer_offer(session, pc, offer_sdp)
+            else:
+                consumer, answer_sdp = await self._answer_consumer_offer(
+                    session,
+                    pc,
+                    connection_id,
+                    offer_sdp,
+                )
+        except Exception:
+            self.active_media.pop(active_key, None)
+            await pc.close()
+            raise
+
+        record = MediaConnectionRecord(
+            media_connection_id=connection_id,
+            request_id=request_id,
+            computing_context=context,
+            offer_sdp=offer_sdp,
+            answer_sdp=answer_sdp,
+            role=role,
+            session=session,
+            pc=pc,
+            consumer=consumer,
+        )
+        self.media_connections[connection_id] = record
+        self.media_requests[request_key] = record
+        LOG.info(
+            "U-MEDIA connection created id=%s session=%s binding=%s role=%s",
+            connection_id,
+            session.session_id,
+            binding_ref,
+            role,
+        )
+        return web.json_response(self._media_response(record), status=201)
+
+    async def delete_media_connection(self, request: web.Request) -> web.Response:
+        connection_id = request.match_info["media_connection_id"]
+        record = self.media_connections.get(connection_id)
+        if record is None:
+            raise ApiError(404, "MEDIA_CONNECTION_NOT_FOUND", "media connection was not found")
+        if record.deleted:
+            return web.Response(status=204)
+        record.deleted = True
+        binding_ref = record.computing_context["binding_ref"]
+        self.active_media.pop((binding_ref, record.role), None)
+        if record.consumer is not None:
+            await refresh_consumer_stats(record.consumer)
+            if record.consumer.stats_task is not None:
+                record.consumer.stats_task.cancel()
+                await asyncio.gather(record.consumer.stats_task, return_exceptions=True)
+            record.consumer.state = "closed"
+        if record.role == "producer" and record.session.producer_pc is record.pc:
+            if record.session.source_probe_task is not None:
+                record.session.source_probe_task.cancel()
+                await asyncio.gather(record.session.source_probe_task, return_exceptions=True)
+                record.session.source_probe_task = None
+            if record.session.source_keyframe_task is not None:
+                record.session.source_keyframe_task.cancel()
+                await asyncio.gather(record.session.source_keyframe_task, return_exceptions=True)
+                record.session.source_keyframe_task = None
+            record.session.producer_pc = None
+            record.session.source_track = None
+            record.session.source_ready.clear()
+            record.session.output_track.clear_source()
+            record.session.state = "WAITING_FOR_SOURCE"
+        await record.pc.close()
+        LOG.info("U-MEDIA connection deleted id=%s role=%s", connection_id, record.role)
+        return web.Response(status=204)
+
+    async def _answer_producer_offer(
+        self,
+        session: VideoSession,
+        pc: RTCPeerConnection,
+        offer_sdp: str,
+    ) -> str:
+        if session.producer_pc is not None and session.producer_pc is not pc:
+            await session.producer_pc.close()
+        session.source_ready.clear()
+        session.source_track = None
+        session.source_codec = "<pending>"
+        session.output_track.clear_source()
+        session.state = "WAITING_FOR_SOURCE"
+        session.producer_pc = pc
+
+        @pc.on("track")
+        def on_track(track: MediaStreamTrack) -> None:
+            if track.kind != "video":
+                return
+            session.source_track = track
+            session.output_track.set_source(session.relay.subscribe(track, buffered=False))
+            session.source_probe_task = asyncio.create_task(
+                self._probe_source(session, session.relay.subscribe(track, buffered=False))
+            )
+            LOG.info("U-MEDIA producer track negotiated id=%s track=%s", session.session_id, track.id)
+
+        @pc.on("connectionstatechange")
+        async def on_state_change() -> None:
+            LOG.info("U-MEDIA producer pc id=%s state=%s", session.session_id, pc.connectionState)
+            if pc.connectionState in {"failed", "closed"}:
+                if session.producer_pc is pc and session.state != "STOPPED":
+                    session.state = "SOURCE_ENDED"
+            elif pc.connectionState == "connected" and session.source_keyframe_task is None:
+                receiver = next(
+                    (
+                        transceiver.receiver
+                        for transceiver in pc.getTransceivers()
+                        if transceiver.kind == "video"
+                    ),
+                    None,
+                )
+                if receiver is not None:
+                    session.source_keyframe_task = asyncio.create_task(
+                        self._request_source_keyframes(session, receiver)
+                    )
+
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=offer_sdp, type="offer"))
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        await self._wait_ice_gathering(pc)
+        local = pc.localDescription
+        session.source_codec = selected_video_codec(local.sdp)
+        return local.sdp
+
+    async def _answer_consumer_offer(
+        self,
+        session: VideoSession,
+        pc: RTCPeerConnection,
+        connection_id: str,
+        offer_sdp: str,
+    ) -> tuple[ConsumerConnection, str]:
+        connection = ConsumerConnection(pc=pc)
+        session.consumer_connections.append(connection)
+
+        @pc.on("connectionstatechange")
+        async def on_state_change() -> None:
+            connection.state = pc.connectionState
+            LOG.info(
+                "U-MEDIA consumer pc id=%s connection=%s state=%s",
+                session.session_id,
+                connection_id,
+                pc.connectionState,
+            )
+            if pc.connectionState in {"failed", "closed"}:
+                await refresh_consumer_stats(connection)
+            elif pc.connectionState == "connected":
+                self._request_consumer_keyframe_if_ready(
+                    session,
+                    connection,
+                    connection_id,
+                    reason="connected-and-source-ready",
+                )
+
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=offer_sdp, type="offer"))
+        relayed = session.output_relay.subscribe(session.output_track, buffered=False)
+        connection.sender = pc.addTrack(
+            ConsumerVideoTrack(
+                relayed,
+                session.output_track,
+                session.session_id,
+                connection_id,
+                connection,
+            )
+        )
+        transceiver = next(
+            item for item in pc.getTransceivers() if item.sender is connection.sender
+        )
+        prefer_h264_baseline(transceiver)
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        await self._wait_ice_gathering(pc)
+        local = pc.localDescription
+        connection.codec = selected_video_codec(local.sdp)
+        connection.stats_task = asyncio.create_task(self._poll_consumer_stats(connection))
+        return connection, local.sdp
+
+    def _computing_context(self, body: dict[str, Any]) -> dict[str, str]:
+        raw = body.get("computing_context")
+        if not isinstance(raw, dict):
+            raise ApiError(400, "INVALID_ARGUMENT", "computing_context must be an object")
+        context = {
+            field_name: self._required_string(raw, field_name, "computing_context")
+            for field_name in (
+                "compute_service_session_id",
+                "compute_instance_id",
+                "binding_ref",
+                "role",
+                "agent_id",
+            )
+        }
+        if context["role"] not in {"producer", "consumer"}:
+            raise ApiError(400, "INVALID_ARGUMENT", "computing_context.role is invalid")
+        binding_ref = context["binding_ref"]
+        facts = (
+            context["compute_service_session_id"],
+            context["compute_instance_id"],
+        )
+        known_facts = self.binding_facts.setdefault(binding_ref, facts)
+        if known_facts != facts:
+            raise ApiError(409, "BINDING_CONTEXT_MISMATCH", "binding compute identifiers changed")
+        agent_key = (binding_ref, context["role"])
+        known_agent = self.binding_agents.setdefault(agent_key, context["agent_id"])
+        if known_agent != context["agent_id"]:
+            raise ApiError(409, "BINDING_CONTEXT_MISMATCH", "binding role Agent changed")
+        return context
+
+    def _binding_session(self, context: dict[str, str]) -> VideoSession:
+        binding_ref = context["binding_ref"]
+        session = self.binding_sessions.get(binding_ref)
+        if session is None:
+            session_id = context["compute_service_session_id"]
+            session = VideoSession(
+                session_id=session_id,
+                workload_type="formal-computing-session",
+                sandbox_vcpus=0,
+                sandbox_memory_mb=0,
+                expires_at=utc_now() + timedelta(hours=2),
+                output_fps=self.output_fps,
+            )
+            self.binding_sessions[binding_ref] = session
+            self.sessions.setdefault(session_id, session)
+            LOG.info("U-MEDIA binding initialized session=%s binding=%s", session_id, binding_ref)
+        return session
+
+    @staticmethod
+    def _media_response(record: MediaConnectionRecord) -> dict[str, Any]:
+        return {
+            "request_id": record.request_id,
+            "computing_context": record.computing_context,
+            "media_connection_id": record.media_connection_id,
+            "answer": {"type": "answer", "sdp": record.answer_sdp},
+        }
 
     async def source(self, request: web.Request) -> web.Response:
         session = self._session(request)
@@ -932,7 +1215,9 @@ class MockVideoServer:
         await asyncio.wait_for(ready.wait(), timeout=8.0)
 
     async def shutdown(self, _: web.Application) -> None:
-        await asyncio.gather(*(session.close() for session in self.sessions.values()), return_exceptions=True)
+        sessions = {id(session): session for session in self.sessions.values()}
+        sessions.update({id(session): session for session in self.binding_sessions.values()})
+        await asyncio.gather(*(session.close() for session in sessions.values()), return_exceptions=True)
 
     def _session(self, request: web.Request) -> VideoSession:
         session = self.sessions.get(request.match_info["session_id"])
@@ -951,10 +1236,16 @@ class MockVideoServer:
             raise ApiError(400, "INVALID_JSON", "request body must be a JSON object")
         return value
 
-    def _required_string(self, body: dict[str, Any], field_name: str) -> str:
+    def _required_string(
+        self,
+        body: dict[str, Any],
+        field_name: str,
+        prefix: str = "",
+    ) -> str:
         value = body.get(field_name)
+        qualified = f"{prefix}.{field_name}" if prefix else field_name
         if not isinstance(value, str) or not value.strip():
-            raise ApiError(400, "INVALID_ARGUMENT", f"{field_name} must be a non-empty string")
+            raise ApiError(400, "INVALID_ARGUMENT", f"{qualified} must be a non-empty string")
         return value
 
     def _required_positive_int(

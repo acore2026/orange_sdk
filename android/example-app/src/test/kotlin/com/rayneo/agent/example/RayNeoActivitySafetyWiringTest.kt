@@ -23,7 +23,8 @@ class RayNeoActivitySafetyWiringTest {
         assertTrue(source.contains("lifecycleScope.launch(Dispatchers.IO)"))
         assertTrue(source.contains("cleanupScope.launch"))
         assertTrue(source.contains("withContext(Dispatchers.IO)"))
-        assertTrue(source.contains("activeRunner?.resetAgent() ?: activeSdk.resetAgent()"))
+        assertTrue(source.contains("activeRunner.resetAgent()"))
+        assertTrue(source.contains("activeRunner.stopComputingSession()"))
         assertFalse(source.contains("runBlocking"))
     }
 

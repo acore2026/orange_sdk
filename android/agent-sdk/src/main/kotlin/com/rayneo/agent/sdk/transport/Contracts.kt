@@ -2,7 +2,7 @@ package com.rayneo.agent.sdk.transport
 
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import com.rayneo.agent.sdk.model.NetworkMessageType
-import com.rayneo.agent.sdk.model.OffloadingSession
+import com.rayneo.agent.sdk.model.ComputingSession
 import kotlinx.serialization.json.JsonObject
 import java.net.URI
 
@@ -28,13 +28,36 @@ internal interface MessageSignatureVerifier {
 }
 
 interface RuntimeTransport {
-    suspend fun getUeAgentIp(): String
+    suspend fun getUeInfo(): JsonObject
+    suspend fun getAcnStatus(): JsonObject
     suspend fun startDownlink(
-        handler: suspend (String, Int, JsonObject) -> NetworkMessageAction,
+        onReconnected: suspend () -> Unit = {},
+        handler: suspend (String, Int, JsonObject) -> JsonObject?,
     )
     suspend fun request(method: String, path: String, body: JsonObject): JsonObject
+    suspend fun requestWithStatus(
+        method: String,
+        path: String,
+        body: JsonObject,
+    ): RuntimeHttpResponse = RuntimeHttpResponse(200, request(method, path, body))
     suspend fun close()
 }
+
+internal interface SandboxTransport {
+    suspend fun requestWithStatus(
+        method: String,
+        url: String,
+        body: JsonObject?,
+        timeoutSeconds: Double,
+        sourceIpv4: String,
+    ): RuntimeHttpResponse
+    suspend fun close()
+}
+
+data class RuntimeHttpResponse(
+    val statusCode: Int,
+    val body: JsonObject,
+)
 
 data class TunnelConfiguration(
     val agentTunCidr: String,
@@ -126,21 +149,40 @@ interface VideoTrack {
     fun removeSink(sink: Any)
 }
 
-interface MediaOffloadAdapter {
-    /** Return only after the Video Server has started pulling the source track. */
-    suspend fun startVideoUpload(
-        session: OffloadingSession,
+interface ProcessedVideoStream {
+    val track: VideoTrack
+    val state: String
+    suspend fun close()
+}
+
+internal interface LocalProcessedVideo {
+    val track: VideoTrack
+    suspend fun close()
+}
+
+internal interface PreparedMediaConnection<T> {
+    val offerSdp: String
+    suspend fun applyAnswer(answerSdp: String, timeoutSeconds: Double): T
+    suspend fun abort()
+}
+
+internal interface MediaOffloadAdapter {
+    fun supportsVideoCodec(codec: String): Boolean
+
+    suspend fun prepareVideoUpload(
+        session: ComputingSession,
         cameraId: String,
         width: Int,
         height: Int,
         fps: Int,
         bitrateKbps: Int,
-    ): VideoUploadHandle
-
-    suspend fun getProcessedVideoTrack(
-        session: OffloadingSession,
         timeoutSeconds: Double,
-    ): VideoTrack
+    ): PreparedMediaConnection<VideoUploadHandle>
+
+    suspend fun prepareProcessedVideo(
+        session: ComputingSession,
+        timeoutSeconds: Double,
+    ): PreparedMediaConnection<LocalProcessedVideo>
 
     suspend fun close()
 }

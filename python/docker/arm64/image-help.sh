@@ -18,6 +18,7 @@ printf '%s\n' \
     '' \
     'Required Docker options for the real SDK flow:' \
     '  --cap-add NET_ADMIN --device /dev/net/tun' \
+    '  Agent B loops the bundled local MP4; a V4L2 camera is optional.' \
     '  Give every Agent its own bridge/container network namespace.' \
     '  Do not use --network host when A and B run on the same host.' \
     '' \

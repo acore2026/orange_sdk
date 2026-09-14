@@ -79,6 +79,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     private var resetArmed = false
     private var resetInProgress = false
     private var stopInProgress = false
+    private var computeAvailable = false
+    private var computeStarting = false
     private val videoRenderers = CopyOnWriteArraySet<SurfaceViewRenderer>()
     @Volatile
     private var videoEglBase: EglBase? = null
@@ -269,11 +271,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         // the glasses UI.
         runnerJob = lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val mediaAdapter = AndroidWebRtcMediaOffloadAdapter(
-                    context = service,
-                    sharedEglContext = videoEglBase?.eglBaseContext,
-                ) { event -> appendLog(LabLogLevel.INFO, "WEBRTC", event) }
-                val sdkValue = AgentSdk.create(service, mediaOffloadAdapter = mediaAdapter)
+                val sdkValue = AgentSdk.create(service)
                 val flow = AgentTestRunner(
                     sdk = sdkValue,
                     config = config,
@@ -281,6 +279,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                     onStatus = ::setRunnerStatus,
                     onManualMessageSession = ::setManualMessageSession,
                     onResetAvailability = ::setResetAvailable,
+                    onComputeActionAvailability = ::setComputeActionAvailable,
                     processedVideoRenderSinks = ::processedVideoRenderSinks,
                     onProcessedVideoStatus = ::setProcessedVideoStatus,
                 )
@@ -302,6 +301,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         runOnUiThread {
             setStatus(status.title, status.detail)
             when {
+                computeAvailable -> setPrimaryAction(PrimaryMode.COMPUTE, "申请算力会话")
                 messageSession != null -> setPrimaryAction(PrimaryMode.SEND, "发送测试消息")
                 status.canRetry -> setPrimaryAction(PrimaryMode.RETRY, "重试当前步骤")
                 else -> setPrimaryAction(PrimaryMode.BUSY, "流程执行中…")
@@ -318,7 +318,21 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 }
             } else {
                 setStatus("群组已就绪 · 可发送", "目标 ${session.targetAgentName} · 单击发送预置测试消息")
-                setPrimaryAction(PrimaryMode.SEND, "发送测试消息")
+                if (computeAvailable) {
+                    setPrimaryAction(PrimaryMode.COMPUTE, "申请算力会话")
+                } else {
+                    setPrimaryAction(PrimaryMode.SEND, "发送测试消息")
+                }
+            }
+        }
+    }
+
+    private fun setComputeActionAvailable(available: Boolean) {
+        runOnUiThread {
+            computeAvailable = available
+            if (available && !computeStarting) {
+                setStatus("群组已就绪 · 可申请算力", "单击后由 SDK 等待 consumer C-02 并连接处理流")
+                setPrimaryAction(PrimaryMode.COMPUTE, "申请算力会话")
             }
         }
     }
@@ -458,7 +472,12 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         lifecycleScope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
-                    activeRunner?.resetAgent() ?: activeSdk.resetAgent()
+                    if (activeRunner != null) {
+                        runCatching { activeRunner.stopComputingSession() }
+                        activeRunner.resetAgent()
+                    } else {
+                        activeSdk.resetAgent()
+                    }
                 }
                 runnerJob = null
                 activeJob?.cancelAndJoin()
@@ -517,6 +536,33 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 }
             }
             PrimaryMode.SEND -> sendTestMessage()
+            PrimaryMode.COMPUTE -> startComputeVideo()
+        }
+    }
+
+    private fun startComputeVideo() {
+        val activeRunner = runner ?: return
+        if (!computeAvailable || computeStarting) return
+        computeStarting = true
+        setPrimaryAction(PrimaryMode.BUSY, "正在建立视频链路…")
+        setStatus("正在申请算力会话", "等待 C-01 响应、C-02 配置和 Sandbox WebRTC Answer")
+        lifecycleScope.launch {
+            try {
+                activeRunner.startVideoOffload()
+                computeAvailable = false
+                setStatus("处理流已连接", "等待 Sandbox 返回第一帧")
+                setPrimaryAction(PrimaryMode.SEND, "发送测试消息")
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                computeAvailable = true
+                val detail = error.message ?: error::class.java.simpleName
+                appendLog(LabLogLevel.ERROR, "COMPUTE VIDEO", "启动失败：$detail")
+                setStatus("视频算力测试失败", detail)
+                setPrimaryAction(PrimaryMode.COMPUTE, "重试算力会话")
+            } finally {
+                computeStarting = false
+            }
         }
     }
 
@@ -651,6 +697,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             try {
                 withContext(Dispatchers.IO) {
                     if (activeRunner != null) {
+                        runCatching { activeRunner.stopComputingSession() }
                         activeRunner.deregisterAgentForStop()
                     } else {
                         deregisterIdentityForStop(activeSdk, ::appendLog)
@@ -699,7 +746,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         super.onDestroy()
     }
 
-    private enum class PrimaryMode { BUSY, RETRY, SEND }
+    private enum class PrimaryMode { BUSY, RETRY, SEND, COMPUTE }
     private enum class ActionTarget { PRIMARY, RESET, DUMP, STOP }
 
     private companion object {

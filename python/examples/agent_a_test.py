@@ -1,8 +1,9 @@
-"""Agent A: discover Agent B by capability, create a group, and send a message.
+"""Agent A: create an ACN group and run the consumer side of video offload.
 
 Outbound SDK operations run continuously by default. Use ``--prompt`` when
 manual step-by-step execution is needed. AgentRuntime downlink callbacks are
-always handled immediately so grouping is not blocked by terminal input.
+always handled immediately. Computing downlink is handled inside ``AgentSdk``;
+this script only passes the session ID to Agent B and consumes processed frames.
 """
 
 from __future__ import annotations
@@ -11,16 +12,28 @@ import argparse
 import asyncio
 import json
 import signal
+import uuid
 from collections.abc import Mapping
 from typing import Any
 
 from agent_sdk import (
+    AcnContext,
     AgentLifecycleState,
     AgentSdk,
+    ComputeConstraints,
+    ComputeInputFormat,
+    ComputeRequestType,
+    ComputeResources,
+    ComputeSessionRequest,
     NetworkMessageAction,
     NetworkMessageType,
 )
 from interactive_linux_agent import EnterStepGate, InteractiveDemoAborted
+
+
+COMPUTE_REQUEST_MESSAGE_TYPE = "COMPUTE_SESSION_REQUEST"
+COMPUTE_SESSION_MESSAGE_TYPE = "computing_video_session"
+COMPUTE_SESSION_ID_FIELD = "compute_service_session_id"
 
 
 def _emit(event: str, **fields: Any) -> None:
@@ -42,6 +55,98 @@ def _json_object(value: str) -> Mapping[str, Any]:
     if not isinstance(parsed, dict):
         raise argparse.ArgumentTypeError("message must be a JSON object")
     return parsed
+
+
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be greater than or equal to zero")
+    return parsed
+
+
+def _create_compute_request(
+    args: argparse.Namespace,
+    *,
+    group_id: str,
+    requester_agent_id: str,
+    target_agent_id: str,
+) -> ComputeSessionRequest:
+    resources = ComputeResources(
+        cpu_millicores=args.compute_cpu_millicores,
+        memory_mib=args.compute_memory_mib,
+        gpu_count=args.compute_gpu_count,
+        gpu_model=args.compute_gpu_model,
+    )
+    return ComputeSessionRequest(
+        message_type=COMPUTE_REQUEST_MESSAGE_TYPE,
+        request_type=ComputeRequestType.CREATE,
+        input_format=ComputeInputFormat.STRUCTURED,
+        request_id=args.compute_request_id or str(uuid.uuid4()),
+        acn_context=AcnContext(
+            group_id=group_id,
+            requester_agent_id=requester_agent_id,
+            target_agent_id=target_agent_id,
+        ),
+        constraints=ComputeConstraints(
+            capability_id=args.compute_capability_id,
+            api_version=args.compute_api_version,
+            image_id=args.compute_image_id,
+            resources=resources,
+            dnn=args.dnn,
+            snssai=args.compute_snssai,
+            allow_base_qos=args.allow_base_qos,
+            max_duration_ms=args.compute_max_duration_ms,
+            placement_region=args.compute_placement_region,
+            data_residency_region=args.compute_data_residency_region,
+        ),
+        ui_locale=args.compute_ui_locale,
+    )
+
+
+def _compute_control_request(
+    request_type: ComputeRequestType, compute_service_session_id: str
+) -> ComputeSessionRequest:
+    return ComputeSessionRequest(
+        message_type=COMPUTE_REQUEST_MESSAGE_TYPE,
+        request_type=request_type,
+        input_format=ComputeInputFormat.STRUCTURED,
+        request_id=str(uuid.uuid4()),
+        compute_service_session_id=compute_service_session_id,
+    )
+
+
+def _compute_session_message(compute_service_session_id: str) -> Mapping[str, str]:
+    return {COMPUTE_SESSION_ID_FIELD: compute_service_session_id}
+
+
+def _frame_details(frame: Any) -> Mapping[str, Any]:
+    details: dict[str, Any] = {"frame_type": type(frame).__name__}
+    for field in ("width", "height", "pts", "time_base"):
+        value = getattr(frame, field, None)
+        if value is not None:
+            details[field] = str(value) if field == "time_base" else value
+    if isinstance(frame, (bytes, bytearray, memoryview)):
+        details["size_bytes"] = len(frame)
+    return details
+
+
+async def _receive_processed_frames(
+    stream: Any,
+    *,
+    frame_count: int,
+    frame_timeout: float,
+) -> int:
+    received = 0
+    while frame_count == 0 or received < frame_count:
+        frame = await asyncio.wait_for(stream.recv(), timeout=frame_timeout)
+        received += 1
+        if received == 1 or received % 120 == 0 or received == frame_count:
+            _emit(
+                "PROCESSED_VIDEO_FRAME",
+                frame_number=received,
+                **_frame_details(frame),
+            )
+    return received
 
 
 async def _before_step(
@@ -112,6 +217,9 @@ async def run_agent_a(
     unregister_group = lambda: None
     profile = None
     completed = False
+    compute_session_id: str | None = None
+    processed_stream = None
+    terminal_request_sent = False
 
     try:
         await _before_step(
@@ -290,7 +398,7 @@ async def run_agent_a(
         candidates = [
             item
             for item in candidates
-            if not item.skills or args.target_capability in item.skills
+            if args.target_capability in item.skills
         ]
         if not candidates:
             expected = args.target_agent_id or args.target_capability
@@ -364,17 +472,198 @@ async def run_agent_a(
             target_agent_id=target.agent_id,
         )
 
+        create_request = _create_compute_request(
+            args,
+            group_id=group.group_id,
+            requester_agent_id=profile.agent_id,
+            target_agent_id=target.agent_id,
+        )
+        await _before_step(
+            gate,
+            "sdk.create_computing_session",
+            "POST /v1/computing/session-requests 提交 CREATE；"
+            f"group_id={group.group_id}，target_agent_id={target.agent_id}，"
+            f"capability_id={args.compute_capability_id}。",
+        )
+        create_status = await client.create_computing_session(
+            create_request,
+            timeout_seconds=args.compute_timeout,
+        )
+        compute_session_id = create_status.compute_service_session_id
+        if not compute_session_id:
+            raise RuntimeError(
+                "CREATE response does not contain compute_service_session_id: "
+                f"status={create_status.status}, cause={create_status.cause}"
+            )
+        _emit(
+            "COMPUTING_SESSION_CREATED",
+            request_id=create_request.request_id,
+            compute_service_session_id=compute_session_id,
+            status=create_status.status,
+            status_revision=create_status.status_revision,
+            cause=create_status.cause,
+        )
+
+        await _before_step(
+            gate,
+            "sdk.send_message",
+            "仅通过 A2A 向 B 发送 compute_service_session_id；"
+            "Sandbox 地址、端口和接口路径不进入应用消息。",
+        )
+        compute_receipt = await client.send_message(
+            group.group_id,
+            target.agent_id,
+            _compute_session_message(compute_session_id),
+            timeout_seconds=args.message_timeout,
+            message_type=COMPUTE_SESSION_MESSAGE_TYPE,
+            task_id=f"computing:{compute_session_id}",
+        )
+        if not compute_receipt.delivered:
+            raise RuntimeError(
+                "compute_service_session_id was not accepted by Agent B: "
+                f"message_id={compute_receipt.message_id}"
+            )
+        _emit(
+            "COMPUTING_SESSION_NOTIFIED",
+            message_id=compute_receipt.message_id,
+            compute_service_session_id=compute_session_id,
+        )
+
+        if args.query_session:
+            query_request = _compute_control_request(
+                ComputeRequestType.QUERY, compute_session_id
+            )
+            await _before_step(
+                gate,
+                "sdk.query_computing_session",
+                "POST /v1/computing/session-requests 查询正式算力会话状态。",
+            )
+            query_status = await client.query_computing_session(
+                query_request,
+                timeout_seconds=args.compute_timeout,
+            )
+            _emit(
+                "COMPUTING_SESSION_QUERIED",
+                request_id=query_request.request_id,
+                compute_service_session_id=compute_session_id,
+                status=query_status.status,
+                status_revision=query_status.status_revision,
+                cause=query_status.cause,
+            )
+
+        await _before_step(
+            gate,
+            "sdk.get_processed_video_stream",
+            "等待 SDK 内部 consumer C-02，使用缓存的 Sandbox 端点完成 WebRTC 协商。",
+        )
+        processed_stream = await client.get_processed_video_stream(
+            compute_session_id,
+            timeout_seconds=args.media_timeout,
+        )
+        _emit(
+            "PROCESSED_VIDEO_CONNECTED",
+            compute_service_session_id=compute_session_id,
+        )
+        received_frames = await _receive_processed_frames(
+            processed_stream,
+            frame_count=args.frame_count,
+            frame_timeout=args.frame_timeout,
+        )
+        _emit(
+            "PROCESSED_VIDEO_VERIFIED",
+            compute_service_session_id=compute_session_id,
+            received_frames=received_frames,
+        )
+
+        terminal_status = None
+        if args.terminal_action != "none":
+            request_type = (
+                ComputeRequestType.RELEASE
+                if args.terminal_action == "release"
+                else ComputeRequestType.CANCEL
+            )
+            terminal_request = _compute_control_request(
+                request_type, compute_session_id
+            )
+            method_name = (
+                "sdk.release_computing_session"
+                if request_type is ComputeRequestType.RELEASE
+                else "sdk.cancel_computing_session"
+            )
+            await _before_step(
+                gate,
+                method_name,
+                "POST /v1/computing/session-requests 结束算力会话；"
+                "后续 C-05 由 SDK 自动关闭媒体连接并回复 C-06。",
+            )
+            if request_type is ComputeRequestType.RELEASE:
+                terminal_status = await client.release_computing_session(
+                    terminal_request,
+                    timeout_seconds=args.compute_timeout,
+                )
+            else:
+                terminal_status = await client.cancel_computing_session(
+                    terminal_request,
+                    timeout_seconds=args.compute_timeout,
+                )
+            terminal_request_sent = True
+            _emit(
+                "COMPUTING_SESSION_TERMINATED",
+                action=args.terminal_action,
+                request_id=terminal_request.request_id,
+                compute_service_session_id=compute_session_id,
+                status=terminal_status.status,
+                status_revision=terminal_status.status_revision,
+                cause=terminal_status.cause,
+            )
+
         completed = True
         return {
             "agent_id": profile.agent_id,
             "target_agent_id": target.agent_id,
             "group_id": group.group_id,
             "message_id": receipt.message_id,
+            "compute_message_id": compute_receipt.message_id,
+            "compute_service_session_id": compute_session_id,
+            "received_frames": received_frames,
+            "terminal_status": terminal_status,
         }
     finally:
         unregister_group()
         unregister_network()
         try:
+            if (
+                compute_session_id is not None
+                and args.terminal_action != "none"
+                and not terminal_request_sent
+            ):
+                try:
+                    cleanup_request = _compute_control_request(
+                        ComputeRequestType.RELEASE, compute_session_id
+                    )
+                    await client.release_computing_session(
+                        cleanup_request,
+                        timeout_seconds=args.compute_timeout,
+                    )
+                    _emit(
+                        "COMPUTING_SESSION_RELEASED_DURING_CLEANUP",
+                        compute_service_session_id=compute_session_id,
+                    )
+                except Exception as exc:
+                    _emit(
+                        "COMPUTING_SESSION_CLEANUP_FAILED",
+                        compute_service_session_id=compute_session_id,
+                        error=str(exc) or repr(exc),
+                    )
+            if processed_stream is not None:
+                try:
+                    await processed_stream.close()
+                except Exception as exc:
+                    _emit(
+                        "PROCESSED_VIDEO_CLOSE_FAILED",
+                        compute_service_session_id=compute_session_id,
+                        error=str(exc) or repr(exc),
+                    )
             if args.deregister_on_exit and profile is not None:
                 deregistered = await client.deregister_identity(
                     profile.agent_id, reason="retired"
@@ -399,7 +688,8 @@ async def run_agent_a(
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(
         description=(
-            "Agent A discovers B by capability, creates a group, and sends a message."
+            "Agent A discovers B, creates an ACN group and verifies the consumer "
+            "side of a computing video session."
         )
     )
     value.add_argument("--runtime-ip", required=True)
@@ -413,14 +703,14 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--tun-mtu", type=int, default=1280)
     value.add_argument("--agent-name", default="Agent-A")
     value.add_argument("--owner", default="ab-test-owner-a")
-    value.add_argument("--description", default="Agent A capability discovery test")
+    value.add_argument("--description", default="Agent A video offload consumer test")
     value.add_argument("--region", default="CN")
-    value.add_argument("--target-capability", default="text")
+    value.add_argument("--target-capability", default="video_rendering")
     value.add_argument("--target-agent-id")
     value.add_argument("--priority", type=int, default=1)
     value.add_argument("--task-id", default="agent-a-to-b-test")
     value.add_argument(
-        "--task-description", default="discover a text-capable Agent B"
+        "--task-description", default="discover a video offload Agent B"
     )
     value.add_argument("--discovery-scope", default="intra_plmn")
     value.add_argument("--max-results", type=int, default=10)
@@ -435,6 +725,45 @@ def parser() -> argparse.ArgumentParser:
     )
     value.add_argument("--message-type", default="text")
     value.add_argument("--message-timeout", type=float, default=10.0)
+    value.add_argument("--compute-capability-id", default="video_rendering")
+    value.add_argument("--compute-api-version")
+    value.add_argument("--compute-image-id")
+    value.add_argument("--compute-cpu-millicores", type=int, default=2000)
+    value.add_argument("--compute-memory-mib", type=int, default=4096)
+    value.add_argument("--compute-gpu-count", type=_non_negative_int)
+    value.add_argument("--compute-gpu-model")
+    value.add_argument("--compute-snssai")
+    value.add_argument("--compute-max-duration-ms", type=_non_negative_int)
+    value.add_argument("--compute-placement-region")
+    value.add_argument("--compute-data-residency-region")
+    value.add_argument("--compute-ui-locale")
+    value.add_argument("--compute-request-id")
+    value.add_argument("--compute-timeout", type=float, default=30.0)
+    value.add_argument(
+        "--allow-base-qos",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    value.add_argument(
+        "--query-session",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="query the created session before opening the processed stream",
+    )
+    value.add_argument(
+        "--terminal-action",
+        choices=("release", "cancel", "none"),
+        default="release",
+        help="action sent after the requested number of processed frames",
+    )
+    value.add_argument("--media-timeout", type=float, default=30.0)
+    value.add_argument(
+        "--frame-count",
+        type=_non_negative_int,
+        default=1,
+        help="processed frames required for success; 0 receives until interrupted",
+    )
+    value.add_argument("--frame-timeout", type=float, default=30.0)
     value.add_argument("--log-file", default="./logs/agent-a-test.log")
     value.add_argument(
         "--log-level",

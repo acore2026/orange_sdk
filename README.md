@@ -10,8 +10,8 @@
 - [离线全流程示例](python/examples/full_flow_demo.py)
 - [真实 Linux 全接口调用示例](python/examples/linux_agent.py)
 - [按回车逐接口调用的 Linux 交互示例](python/examples/interactive_linux_agent.py)
-- [Agent A：按能力发现、建组并发送消息](python/examples/agent_a_test.py)
-- [Agent B：发布能力、接受建组并接收消息](python/examples/agent_b_test.py)
+- [Agent A：建组、申请算力会话并验证处理视频](python/examples/agent_a_test.py)
+- [Agent B：发布能力、接受建组并上传本地测试视频](python/examples/agent_b_test.py)
 - [A/B 双实例 MASQUE 消息联调脚本](python/examples/masque_two_instance_test.py)
 - [Android/RayNeoOS 使用说明](android/README.md)
 - [N6 / DN Mock Video Server](mock-video-server/README.md)
@@ -85,6 +85,39 @@ Python `reset_agent()` 与 Android `resetAgent()` 提供参数less 状态重置�
 A2A 消息使用
 `src_agent_id/dst_agent_id/type/task_id/payload`，成功响应为
 `{"status":"OK"}`。
+
+应用创建 SDK 对象后、调用 `init`/`initialize` 前，需要注册两个公开回调接口：
+
+- `register_network_message_listener` / `registerNetworkMessageListener`：收到
+  `GROUP_INVITATION` 时由应用返回 `ACCEPT/REJECT`，决定是否接受群组邀请；收到
+  `GROUP_CONFIG` 时通知应用配置已经由 SDK 提交。
+- `register_group_message_listener` / `registerGroupMessageListener`：接收其他 Agent
+  通过 `send_message` / `sendMessage` 投递的业务 JSON。
+
+这两个接口独立于 `init` 和发送函数；注册动作不发送 HTTP，实际 Runtime 下行
+WebSocket 与本地 `/A2A/message` 服务由初始化启动。完整签名、返回动作和注销方式见
+[Python 使用指南](python/README.md#41-创建-sdk-和注册监听器)与
+[Android 回调注册接口](android/README.md#callback-registration-apis)。
+
+正式算力会话统一调用 AgentRuntime 的
+`POST /v1/computing/session-requests`。Python 接口为
+`create/query/cancel/release_computing_session`，Android 接口为
+`create/query/cancel/releaseComputingSession`。CREATE 引用本地 ACTIVE 群组并返回异步
+状态，不返回 Sandbox 地址。SDK 在初始化时内部处理
+`COMPUTE_CONNECT_CONFIG`、`COMPUTE_SESSION_STATUS` 和
+`COMPUTE_SESSION_CLOSE`，自动完成 C-03/C-06、状态版本去重和媒体连接清理；应用无需
+注册算网回调。媒体接口只接收 `compute_service_session_id`，Sandbox 的
+`service_endpoint`、端口和路径均保存在 SDK 内部。
+
+producer 与 consumer 都由 SDK 创建非 Trickle ICE Offer，并分别固定为
+`sendonly` 和 `recvonly`。SDK 等待 ICE 收集完成后向 C-02 给出的
+`POST {service_endpoint}{media_connections_path}` 发送完整
+`request_id + computing_context + offer`，严格校验 HTTP 201 的上下文回显和 Answer，
+再应用 Answer。Answer 的 ICE 地址会加入该业务的 CONNECT-IP 路由；停止上传或关闭
+处理流时，SDK 自动调用 `DELETE /v1/media-connections/{media_connection_id}`。
+Android SDK 模块内置 libwebrtc 适配器并声明传递依赖，Python wheel 使用内置 aiortc
+适配器；应用不处理
+SDP、Sandbox URL、`binding_ref` 或媒体连接 ID。
 
 快速验证 Python 实现：
 

@@ -24,6 +24,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -31,6 +32,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.InetAddress
+import java.net.Proxy
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
@@ -38,6 +40,86 @@ import kotlin.coroutines.resumeWithException
 
 const val DOWNLINK_WEBSOCKET_PATH = "/v1/acn/downlink-websocket"
 const val UE_INFO_PATH = "/v1/ue/info"
+const val ACN_STATUS_PATH = "/v1/acn/status"
+
+internal class OkHttpSandboxTransport(
+    private val baseClient: OkHttpClient = OkHttpClient(),
+    private val json: Json = Json,
+) : SandboxTransport {
+    override suspend fun requestWithStatus(
+        method: String,
+        url: String,
+        body: JsonObject?,
+        timeoutSeconds: Double,
+        sourceIpv4: String,
+    ): RuntimeHttpResponse = withContext(Dispatchers.IO) {
+        if (sourceIpv4.isBlank()) {
+            throw AgentSdkException(ErrorCode.INVALID_ARGUMENT, "sourceIpv4 is required")
+        }
+        val timeoutMillis = (timeoutSeconds * 1_000).toLong().coerceAtLeast(1)
+        val client = baseClient.newBuilder()
+            .callTimeout(timeoutMillis, TimeUnit.MILLISECONDS)
+            .proxy(Proxy.NO_PROXY)
+            .dns(object : Dns {
+                override fun lookup(hostname: String): List<InetAddress> =
+                    Dns.SYSTEM.lookup(hostname).filter { it.address.size == 4 }
+                        .ifEmpty {
+                            throw java.net.UnknownHostException(
+                                "No IPv4 address for $hostname",
+                            )
+                        }
+            })
+            .build()
+        val builder = Request.Builder().url(url)
+        val requestBody = body?.toString()?.toRequestBody("application/json".toMediaType())
+        when (method.uppercase()) {
+            "POST" -> builder.post(checkNotNull(requestBody))
+            "PUT" -> builder.put(checkNotNull(requestBody))
+            "GET" -> builder.get()
+            "DELETE" -> builder.delete()
+            else -> throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "Unsupported Sandbox HTTP method $method",
+            )
+        }
+        try {
+            client.newCall(builder.build()).execute().use { response ->
+                val text = response.body?.string().orEmpty()
+                val payload = if (text.isBlank()) {
+                    JsonObject(emptyMap())
+                } else {
+                    json.parseToJsonElement(text) as? JsonObject
+                        ?: throw AgentSdkException(
+                            ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                            "Sandbox response must be a JSON object",
+                        )
+                }
+                RuntimeHttpResponse(response.code, payload)
+            }
+        } catch (error: AgentSdkException) {
+            throw error
+        } catch (error: java.net.SocketTimeoutException) {
+            throw AgentSdkException(
+                ErrorCode.TIMEOUT,
+                "Sandbox media request timed out",
+                retryable = true,
+                cause = error,
+            )
+        } catch (error: Exception) {
+            throw AgentSdkException(
+                ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                "Sandbox media request failed",
+                retryable = true,
+                cause = error,
+            )
+        }
+    }
+
+    override suspend fun close() {
+        baseClient.dispatcher.executorService.shutdown()
+        baseClient.connectionPool.evictAll()
+    }
+}
 
 class OkHttpRuntimeTransport(
     host: String,
@@ -57,29 +139,40 @@ class OkHttpRuntimeTransport(
     private val downlinkLock = Any()
     @Volatile private var downlinkSocket: WebSocket? = null
     @Volatile private var downlinkHandler:
-        (suspend (String, Int, JsonObject) -> NetworkMessageAction)? = null
+        (suspend (String, Int, JsonObject) -> JsonObject?)? = null
+    @Volatile private var downlinkReconnectHandler: (suspend () -> Unit)? = null
     private var reconnectJob: Job? = null
     private var reconnectAttempt = 0
 
-    override suspend fun getUeAgentIp(): String = withContext(Dispatchers.IO) {
+    override suspend fun getUeInfo(): JsonObject = getJson(UE_INFO_PATH)
+
+    override suspend fun getAcnStatus(): JsonObject = getJson(ACN_STATUS_PATH)
+
+    suspend fun getUeAgentIp(): String = selectDefaultUeAgentIp(getUeInfo())
+
+    internal fun selectUeAgentIp(payload: JsonObject): String {
+        return selectDefaultUeAgentIp(payload)
+    }
+
+    private suspend fun getJson(path: String): JsonObject = withContext(Dispatchers.IO) {
         val request = Request.Builder()
-            .url(baseUrl + UE_INFO_PATH)
+            .url(baseUrl + path)
             .header("Content-Type", "application/json")
             .get()
             .build()
         val payload = try {
-            Log.i(TAG, "GET $UE_INFO_PATH")
+            Log.i(TAG, "GET $path")
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     throw AgentSdkException(
                         ErrorCode.RUNTIME_REJECTED,
-                        "Runtime returned HTTP ${response.code} for $UE_INFO_PATH",
+                        "Runtime returned HTTP ${response.code} for $path",
                     )
                 }
                 json.parseToJsonElement(response.body?.string() ?: "{}") as? JsonObject
                     ?: throw AgentSdkException(
                         ErrorCode.RUNTIME_REJECTED,
-                        "GET $UE_INFO_PATH response must be a JSON object",
+                        "GET $path response must be a JSON object",
                     )
             }
         } catch (error: AgentSdkException) {
@@ -87,15 +180,15 @@ class OkHttpRuntimeTransport(
         } catch (error: Exception) {
             throw AgentSdkException(
                 ErrorCode.RUNTIME_UNREACHABLE,
-                "GET $UE_INFO_PATH failed",
+                "GET $path failed",
                 retryable = true,
                 cause = error,
             )
         }
-        selectUeAgentIp(payload)
+        payload
     }
 
-    private fun selectUeAgentIp(payload: JsonObject): String {
+    private fun selectDefaultUeAgentIp(payload: JsonObject): String {
         val nas = payload["nas"] as? JsonObject
             ?: ueInfoRejected("response has no valid nas object", "nas")
         if (nas.boolean("registered") != true) {
@@ -178,7 +271,8 @@ class OkHttpRuntimeTransport(
     )
 
     override suspend fun startDownlink(
-        handler: suspend (String, Int, JsonObject) -> NetworkMessageAction,
+        onReconnected: suspend () -> Unit,
+        handler: suspend (String, Int, JsonObject) -> JsonObject?,
     ) {
         if (!downlinkStarted.compareAndSet(false, true)) {
             throw AgentSdkException(
@@ -194,9 +288,15 @@ class OkHttpRuntimeTransport(
         }
         downlinkClosed.set(false)
         downlinkHandler = handler
+        downlinkReconnectHandler = onReconnected
         try {
             suspendCancellableCoroutine<Unit> { continuation ->
-                val socket = connectDownlink(handler, continuation, attempt = 0)
+                val socket = connectDownlink(
+                    handler,
+                    onReconnected,
+                    continuation,
+                    attempt = 0,
+                )
                 continuation.invokeOnCancellation { socket.cancel() }
             }
         } catch (error: Exception) {
@@ -207,7 +307,8 @@ class OkHttpRuntimeTransport(
     }
 
     private fun connectDownlink(
-        handler: suspend (String, Int, JsonObject) -> NetworkMessageAction,
+        handler: suspend (String, Int, JsonObject) -> JsonObject?,
+        onReconnected: suspend () -> Unit,
         initialContinuation: kotlinx.coroutines.CancellableContinuation<Unit>?,
         attempt: Int,
     ): WebSocket {
@@ -240,6 +341,9 @@ class OkHttpRuntimeTransport(
                         "Runtime downlink WebSocket reconnected attempt=$attempt http=${response.code}"
                     },
                 )
+                if (attempt > 0) {
+                    downlinkScope.launch { onReconnected() }
+                }
                 if (initialContinuation?.isActive == true) initialContinuation.resume(Unit)
             }
 
@@ -329,7 +433,12 @@ class OkHttpRuntimeTransport(
                 )
                 delay(delayMillis)
                 if (!downlinkClosed.get()) {
-                    connectDownlink(handler, initialContinuation = null, attempt = attempt)
+                    connectDownlink(
+                        handler,
+                        downlinkReconnectHandler ?: {},
+                        initialContinuation = null,
+                        attempt = attempt,
+                    )
                 }
             }
         }
@@ -354,46 +463,51 @@ class OkHttpRuntimeTransport(
     private suspend fun processDownlinkFrame(
         socket: WebSocket,
         text: String,
-        handler: suspend (String, Int, JsonObject) -> NetworkMessageAction,
+        handler: suspend (String, Int, JsonObject) -> JsonObject?,
     ) {
         var requestId: String? = null
-        var groupId: String? = null
-        val action = try {
+        var kind: String? = null
+        val responsePayload = try {
             val message = json.parseToJsonElement(text) as? JsonObject
                 ?: throw IllegalArgumentException("WebSocket message must be a JSON object")
-            requestId = message["request_id"]?.jsonPrimitive?.contentOrNull
-                ?.takeIf { it.isNotEmpty() }
-                ?: throw IllegalArgumentException("request_id must be a non-empty string")
-            if (message["kind"]?.jsonPrimitive?.contentOrNull != "request") {
-                throw IllegalArgumentException("kind must be request")
+            kind = (message["kind"] as? JsonPrimitive)
+                ?.takeIf(JsonPrimitive::isString)?.contentOrNull
+            if (kind !in setOf("request", "event")) {
+                throw IllegalArgumentException("kind must be request or event")
             }
-            val messageType = message["message_type"]?.jsonPrimitive?.contentOrNull
+            val rawRequestId = (message["request_id"] as? JsonPrimitive)
+                ?.takeIf(JsonPrimitive::isString)?.contentOrNull
+            if (kind == "request") {
+                requestId = rawRequestId?.takeIf { it.isNotEmpty() }
+                    ?: throw IllegalArgumentException(
+                        "request_id must be a non-empty string for request",
+                    )
+            } else if (rawRequestId != null) {
+                throw IllegalArgumentException("request_id must be omitted for event")
+            }
+            val messageType = (message["message_type"] as? JsonPrimitive)
+                ?.takeIf(JsonPrimitive::isString)?.contentOrNull
                 ?.takeIf { it.isNotEmpty() }
                 ?: throw IllegalArgumentException("message_type must be a non-empty string")
             val transactionId = message["transaction_id"]?.jsonPrimitive?.intOrNull
                 ?: throw IllegalArgumentException("transaction_id must be an integer")
+            if (transactionId !in 1..255) {
+                throw IllegalArgumentException("transaction_id must be in 1..255")
+            }
             val payload = message["payload"] as? JsonObject
                 ?: throw IllegalArgumentException("payload must be a JSON object")
-            val rawGroupId = when (messageType) {
-                "ACN_AGENT_GROUPING_INVITATION" ->
-                    (payload["group_info"] as? JsonObject)?.get("group_id")
-                "ACN_AGENT_GROUPING_NOTIFICATION" -> payload["group_id"]
-                else -> null
-            }
-            groupId = rawGroupId?.jsonPrimitive?.contentOrNull
-                ?.takeIf { it.isNotEmpty() }
             handler(messageType, transactionId, payload)
         } catch (error: Exception) {
             Log.e(TAG, "Runtime downlink WebSocket request rejected", error)
-            NetworkMessageAction.REJECT
+            buildJsonObject { put("result", NetworkMessageAction.REJECT.name) }
         }
+        if (kind != "request") return
         val correlatedRequestId = requestId ?: return
         val response = buildJsonObject {
             put("kind", "response")
             put("request_id", correlatedRequestId)
-            put("payload", buildJsonObject {
-                groupId?.let { put("group_id", it) }
-                put("result", action.name)
+            put("payload", responsePayload ?: buildJsonObject {
+                put("result", NetworkMessageAction.REJECT.name)
             })
         }
         if (!socket.send(response.toString())) {
@@ -408,7 +522,11 @@ class OkHttpRuntimeTransport(
         val IPV4_LITERAL = Regex("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}")
     }
 
-    override suspend fun request(method: String, path: String, body: JsonObject): JsonObject =
+    override suspend fun requestWithStatus(
+        method: String,
+        path: String,
+        body: JsonObject,
+    ): RuntimeHttpResponse =
         withContext(Dispatchers.IO) {
             val requestBody = body.toString().toRequestBody("application/json".toMediaType())
             val builder = Request.Builder().url(baseUrl + path)
@@ -420,18 +538,13 @@ class OkHttpRuntimeTransport(
             }
             try {
                 client.newCall(builder.build()).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        throw AgentSdkException(
-                            ErrorCode.RUNTIME_REJECTED,
-                            "Runtime returned HTTP ${response.code}",
-                        )
-                    }
                     val text = response.body?.string() ?: "{}"
-                    json.parseToJsonElement(text) as? JsonObject
+                    val payload = json.parseToJsonElement(text) as? JsonObject
                         ?: throw AgentSdkException(
                             ErrorCode.RUNTIME_REJECTED,
                             "Runtime response must be a JSON object",
                         )
+                    RuntimeHttpResponse(response.code, payload)
                 }
             } catch (error: AgentSdkException) {
                 throw error
@@ -445,6 +558,17 @@ class OkHttpRuntimeTransport(
             }
         }
 
+    override suspend fun request(method: String, path: String, body: JsonObject): JsonObject {
+        val response = requestWithStatus(method, path, body)
+        if (response.statusCode !in 200..299) {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime returned HTTP ${response.statusCode}",
+            )
+        }
+        return response.body
+    }
+
     override suspend fun close() {
         downlinkClosed.set(true)
         val socket = synchronized(downlinkLock) {
@@ -455,6 +579,7 @@ class OkHttpRuntimeTransport(
         socket?.close(NORMAL_CLOSE_CODE, "SDK closed")
         downlinkStarted.set(false)
         downlinkHandler = null
+        downlinkReconnectHandler = null
         downlinkScope.cancel()
     }
 }

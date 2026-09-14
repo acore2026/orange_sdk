@@ -150,7 +150,7 @@ class MainActivity : Activity() {
 
                 addView(eyebrow("AGENT LINK LAB  /  ANDROID"))
                 addView(title("A/B 端到端联调"))
-                addView(body("填写端侧与服务器参数。应用完成身份、能力、发现和建组后，A/B 可通过 MASQUE 手动双向发消息。"))
+                addView(body("填写端侧与服务器参数。应用完成身份、能力、发现和建组后，可验证双向消息及正式异步算力视频流程。"))
                 addView(roleSelector())
 
                 addView(section("01  测试角色"))
@@ -164,10 +164,7 @@ class MainActivity : Activity() {
                 ))
                 addView(field("masque_path", "CONNECT-IP 路径", "/.well-known/masque/ip"))
                 addView(field("masque_token", "MASQUE Token（可选，不保存）", "Bearer token", password = true))
-                addView(twoColumns(
-                    field("compute_ip", "N6 Mock Video Server IP", "172.30.0.10"),
-                    field("compute_port", "Mock 控制/信令端口", "28500", numeric = true),
-                ))
+                addView(body("算力 Sandbox 地址、端口和媒体路径由网侧 C-02 下发，并由 SDK 内部使用。"))
 
                 addView(section("03  Agent 服务端口"))
                 addView(body("MASQUE 外层源地址由 Android 系统路由自动选择，无需填写本机 Wi-Fi 或 VLAN 地址。"))
@@ -179,7 +176,7 @@ class MainActivity : Activity() {
                 addView(section("04  Agent Profile"))
                 addView(field("owner", "Owner", "测试终端归属标识"))
                 addView(field("agent_name", "Agent 名称", "Agent-A"))
-                addView(field("capability", "B 发布 / A 发现的能力", "text"))
+                addView(field("capability", "B 发布 / A 申请的算力能力", "dog-vision"))
 
                 addView(section("05  建组与双向消息"))
                 addView(body("A 端填写建组参数；双方日志页会在群组就绪后显示消息发送区。"))
@@ -334,11 +331,7 @@ class MainActivity : Activity() {
             return
         }
         val config = activeConfig ?: return
-        val mediaAdapter = AndroidWebRtcMediaOffloadAdapter(
-            context = service,
-            sharedEglContext = videoPreviewEglBase?.eglBaseContext,
-        ) { event -> appendLog(LabLogLevel.INFO, "WEBRTC", event) }
-        val value = AgentSdk.create(service, mediaOffloadAdapter = mediaAdapter)
+        val value = AgentSdk.create(service)
         val flow = AgentTestRunner(
             value,
             config,
@@ -346,7 +339,8 @@ class MainActivity : Activity() {
             ::setRunnerStatus,
             ::setManualMessageSession,
             ::setResetAvailable,
-            ::setVideoUploadAvailable,
+            ::setComputeActionAvailable,
+            ::requestProducerVideoStart,
             processedVideoRenderSinks = ::processedVideoRenderSinks,
             onProcessedVideoStatus = ::setProcessedVideoStatus,
         )
@@ -442,12 +436,10 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(12) })
 
-        if (config.role == TestRole.B) {
-            root.addView(computeVideoControls(), LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(12) })
-        }
+        root.addView(computeVideoControls(), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(12) })
 
         logOutput = TextView(this).apply {
             setTextColor(Palette.LOG_TEXT)
@@ -560,14 +552,18 @@ class MainActivity : Activity() {
         visibility = View.GONE
         computeVideoPanel = this
         addView(TextView(this@MainActivity).apply {
-            text = "COMPUTE VIDEO  /  N6 DN MOCK"
+            text = "COMPUTE VIDEO  /  ASYNC SESSION"
             setTextColor(Palette.LINK)
             textSize = 11f
             typeface = Typeface.DEFAULT_BOLD
             letterSpacing = .08f
         })
         addView(TextView(this@MainActivity).apply {
-            text = "B 创建算力会话、开启摄像头；Mock 拉到首帧后通过 P2P 通知 A 拉处理流。"
+            text = if (activeConfig?.role == TestRole.A) {
+                "A 创建正式算力会话并接收处理流；Sandbox 端点由 SDK 等待 C-02 后使用。"
+            } else {
+                "收到 A 的会话 ID 后自动申请摄像头权限，并等待 producer C-02 开始上传。"
+            }
             setTextColor(Palette.INK_MUTED)
             textSize = 12f
             setPadding(0, dp(6), 0, 0)
@@ -740,7 +736,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun setVideoUploadAvailable(available: Boolean) {
+    private fun setComputeActionAvailable(available: Boolean) {
         runOnUiThread {
             computeVideoAvailable = available
             computeVideoPanel?.visibility = if (available || computeVideoStarting) View.VISIBLE else View.GONE
@@ -751,7 +747,8 @@ class MainActivity : Activity() {
     private fun startComputeVideo() {
         val flow = runner ?: return
         if (!computeVideoAvailable || computeVideoStarting) return
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) !=
+        if (activeConfig?.role == TestRole.B &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) !=
             PackageManager.PERMISSION_GRANTED
         ) {
             pendingVideoStart = true
@@ -766,7 +763,13 @@ class MainActivity : Activity() {
             try {
                 flow.startVideoOffload()
                 computeVideoAvailable = false
-                setRunnerStatus(RunnerStatus("视频算力链路已启动", "等待 A 接收 Mock 处理流"))
+                setRunnerStatus(
+                    if (activeConfig?.role == TestRole.A) {
+                        RunnerStatus("处理流已连接", "A 已完成算力申请和 consumer WebRTC 协商")
+                    } else {
+                        RunnerStatus("视频上传已启动", "B 已完成 producer WebRTC 协商")
+                    },
+                )
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -809,8 +812,19 @@ class MainActivity : Activity() {
             text = when {
                 computeVideoStarting -> "正在启动视频链路…"
                 !computeVideoAvailable -> "视频算力链路已启动"
-                else -> "开始视频算力测试"
+                activeConfig?.role == TestRole.A -> "申请算力会话并接收视频"
+                else -> "开始上传视频"
             }
+        }
+    }
+
+    private fun requestProducerVideoStart() {
+        runOnUiThread {
+            if (activeConfig?.role != TestRole.B) return@runOnUiThread
+            computeVideoAvailable = true
+            computeVideoPanel?.visibility = View.VISIBLE
+            updateComputeVideoButton()
+            startComputeVideo()
         }
     }
 
@@ -864,7 +878,12 @@ class MainActivity : Activity() {
         scope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
-                    activeRunner?.resetAgent() ?: activeSdk.resetAgent()
+                    if (activeRunner != null) {
+                        runCatching { activeRunner.stopComputingSession() }
+                        activeRunner.resetAgent()
+                    } else {
+                        activeSdk.resetAgent()
+                    }
                 }
                 runnerJob = null
                 activeJob?.cancelAndJoin()
@@ -1084,6 +1103,7 @@ class MainActivity : Activity() {
                 try {
                     withContext(Dispatchers.IO) {
                         if (activeRunner != null) {
+                            runCatching { activeRunner.stopComputingSession() }
                             activeRunner.deregisterAgentForStop()
                         } else {
                             deregisterIdentityForStop(activeSdk, ::appendLog)
@@ -1134,8 +1154,6 @@ class MainActivity : Activity() {
         dnn = value("dnn"),
         groupName = value("group_name"),
         message = value("message"),
-        computeControlIp = value("compute_ip"),
-        computeControlPort = intValue("compute_port"),
     )
 
     private fun restoreFormValues() {
@@ -1154,15 +1172,16 @@ class MainActivity : Activity() {
             ?: preferences.getString("masque_path", "/.well-known/masque/ip"))
         setValue("tcp_port", intentInt("tcp_port", preferences.getInt("tcp_port", 4001)))
         setValue("udp_port", intentInt("udp_port", preferences.getInt("udp_port", 28443)))
-        setValue("compute_ip", intent.getStringExtra("compute_ip")
-            ?: preferences.getString("compute_ip", "172.30.0.10"))
-        setValue("compute_port", intentInt("compute_port", preferences.getInt("compute_port", 28500)))
         setValue("owner", intent.getStringExtra("owner")
             ?: preferences.getString("owner", "android-test-owner-${selectedRole.name.lowercase()}"))
         setValue("agent_name", intent.getStringExtra("agent_name")
             ?: preferences.getString("agent_name", "Agent-${selectedRole.name}"))
-        setValue("capability", intent.getStringExtra("capability")
-            ?: preferences.getString("capability", "text"))
+        val storedCapability = preferences.getString("capability", "dog-vision")
+        setValue(
+            "capability",
+            intent.getStringExtra("capability")
+                ?: storedCapability?.let { if (it == "text") "dog-vision" else it },
+        )
         setValue("dnn", intent.getStringExtra("dnn") ?: preferences.getString("dnn", "internet"))
         setValue("group_name", intent.getStringExtra("group_name")
             ?: preferences.getString("group_name", "android-ab-test-group"))
@@ -1180,8 +1199,6 @@ class MainActivity : Activity() {
             .putString("masque_path", config.masquePath)
             .putInt("tcp_port", config.localTcpPort)
             .putInt("udp_port", config.localUdpPort)
-            .putString("compute_ip", config.computeControlIp)
-            .putInt("compute_port", config.computeControlPort)
             .putString("owner", config.owner)
             .putString("agent_name", config.agentName)
             .putString("capability", config.capability)

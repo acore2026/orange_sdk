@@ -41,6 +41,7 @@ if ! ip -o addr show | awk '{print $4}' | cut -d/ -f1 | grep -Fqx "${LOCAL_VLAN_
 fi
 
 AGENT_LOG_FILE="${AGENT_LOG_FILE:-/var/log/agent-sdk/agent-a.log}"
+AGENT_COMPUTE_CAPABILITY_ID="${AGENT_COMPUTE_CAPABILITY_ID:-video_rendering}"
 AGENT_MESSAGE_JSON="${AGENT_MESSAGE_JSON:-}"
 if [ -z "${AGENT_MESSAGE_JSON}" ]; then
     AGENT_MESSAGE_JSON='{"type":"text","content":"hello Agent B from Agent A"}'
@@ -58,12 +59,12 @@ set -- \
     --tun-mtu "${AGENT_TUN_MTU:-1280}" \
     --agent-name "${AGENT_NAME:-Agent-A}" \
     --owner "${AGENT_OWNER:-ab-test-owner-a}" \
-    --description "${AGENT_DESCRIPTION:-Agent A capability discovery test}" \
+    --description "${AGENT_DESCRIPTION:-Agent A video offload consumer test}" \
     --region "${AGENT_REGION:-CN}" \
-    --target-capability "${AGENT_TARGET_CAPABILITY:-text}" \
+    --target-capability "${AGENT_TARGET_CAPABILITY:-${AGENT_COMPUTE_CAPABILITY_ID}}" \
     --priority "${AGENT_PRIORITY:-1}" \
     --task-id "${AGENT_TASK_ID:-agent-a-to-b-test}" \
-    --task-description "${AGENT_TASK_DESCRIPTION:-discover a text-capable Agent B}" \
+    --task-description "${AGENT_TASK_DESCRIPTION:-discover a video offload Agent B}" \
     --discovery-scope "${AGENT_DISCOVERY_SCOPE:-intra_plmn}" \
     --max-results "${AGENT_MAX_RESULTS:-10}" \
     --group-name "${AGENT_GROUP_NAME:-agent-a-b-test-group}" \
@@ -73,6 +74,14 @@ set -- \
     --message "${AGENT_MESSAGE_JSON}" \
     --message-type "${AGENT_MESSAGE_TYPE:-text}" \
     --message-timeout "${AGENT_MESSAGE_TIMEOUT:-10}" \
+    --compute-capability-id "${AGENT_COMPUTE_CAPABILITY_ID}" \
+    --compute-cpu-millicores "${AGENT_COMPUTE_CPU_MILLICORES:-2000}" \
+    --compute-memory-mib "${AGENT_COMPUTE_MEMORY_MIB:-4096}" \
+    --compute-timeout "${AGENT_COMPUTE_TIMEOUT:-30}" \
+    --terminal-action "${AGENT_COMPUTE_TERMINAL_ACTION:-release}" \
+    --media-timeout "${AGENT_MEDIA_TIMEOUT:-30}" \
+    --frame-count "${AGENT_PROCESSED_FRAME_COUNT:-1}" \
+    --frame-timeout "${AGENT_PROCESSED_FRAME_TIMEOUT:-30}" \
     --log-file "${AGENT_LOG_FILE}" \
     --log-level "${AGENT_LOG_LEVEL:-INFO}"
 
@@ -81,6 +90,42 @@ if [ -n "${MASQUE_TOKEN:-}" ]; then
 fi
 if [ -n "${AGENT_TARGET_ID:-}" ]; then
     set -- "$@" --target-agent-id "${AGENT_TARGET_ID}"
+fi
+if [ -n "${AGENT_COMPUTE_API_VERSION:-}" ]; then
+    set -- "$@" --compute-api-version "${AGENT_COMPUTE_API_VERSION}"
+fi
+if [ -n "${AGENT_COMPUTE_IMAGE_ID:-}" ]; then
+    set -- "$@" --compute-image-id "${AGENT_COMPUTE_IMAGE_ID}"
+fi
+if [ -n "${AGENT_COMPUTE_GPU_COUNT:-}" ]; then
+    set -- "$@" --compute-gpu-count "${AGENT_COMPUTE_GPU_COUNT}"
+fi
+if [ -n "${AGENT_COMPUTE_GPU_MODEL:-}" ]; then
+    set -- "$@" --compute-gpu-model "${AGENT_COMPUTE_GPU_MODEL}"
+fi
+if [ -n "${AGENT_COMPUTE_SNSSAI:-}" ]; then
+    set -- "$@" --compute-snssai "${AGENT_COMPUTE_SNSSAI}"
+fi
+if [ -n "${AGENT_COMPUTE_MAX_DURATION_MS:-}" ]; then
+    set -- "$@" --compute-max-duration-ms "${AGENT_COMPUTE_MAX_DURATION_MS}"
+fi
+if [ -n "${AGENT_COMPUTE_PLACEMENT_REGION:-}" ]; then
+    set -- "$@" --compute-placement-region "${AGENT_COMPUTE_PLACEMENT_REGION}"
+fi
+if [ -n "${AGENT_COMPUTE_DATA_RESIDENCY_REGION:-}" ]; then
+    set -- "$@" --compute-data-residency-region "${AGENT_COMPUTE_DATA_RESIDENCY_REGION}"
+fi
+if [ -n "${AGENT_COMPUTE_UI_LOCALE:-}" ]; then
+    set -- "$@" --compute-ui-locale "${AGENT_COMPUTE_UI_LOCALE}"
+fi
+if [ -n "${AGENT_COMPUTE_REQUEST_ID:-}" ]; then
+    set -- "$@" --compute-request-id "${AGENT_COMPUTE_REQUEST_ID}"
+fi
+if ! is_true "${AGENT_COMPUTE_ALLOW_BASE_QOS:-true}"; then
+    set -- "$@" --no-allow-base-qos
+fi
+if ! is_true "${AGENT_COMPUTE_QUERY_SESSION:-true}"; then
+    set -- "$@" --no-query-session
 fi
 if is_true "${AGENT_FRESH_REGISTRATION:-true}"; then
     set -- "$@" --fresh-registration

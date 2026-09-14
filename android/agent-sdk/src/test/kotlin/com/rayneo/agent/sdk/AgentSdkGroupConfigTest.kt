@@ -2,6 +2,16 @@ package com.rayneo.agent.sdk
 
 import com.rayneo.agent.sdk.model.AgentProfile
 import com.rayneo.agent.sdk.model.AgentLifecycleState
+import com.rayneo.agent.sdk.model.AcnContext
+import com.rayneo.agent.sdk.model.ComputeConstraints
+import com.rayneo.agent.sdk.model.ComputeInputFormat
+import com.rayneo.agent.sdk.model.ComputeRequestType
+import com.rayneo.agent.sdk.model.ComputeResources
+import com.rayneo.agent.sdk.model.ComputeSessionRequest
+import com.rayneo.agent.sdk.model.ComputingSession
+import com.rayneo.agent.sdk.model.ControlAction
+import com.rayneo.agent.sdk.model.ControlActionRequest
+import com.rayneo.agent.sdk.model.ControlInputType
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import com.rayneo.agent.sdk.model.NetworkMessageType
 import com.rayneo.agent.sdk.transport.LocalServer
@@ -10,6 +20,9 @@ import com.rayneo.agent.sdk.transport.ControlRequestAuthenticator
 import com.rayneo.agent.sdk.transport.DevicePublicKeyProvider
 import com.rayneo.agent.sdk.transport.GroupMessageListener
 import com.rayneo.agent.sdk.transport.MediaOffloadAdapter
+import com.rayneo.agent.sdk.transport.LocalProcessedVideo
+import com.rayneo.agent.sdk.transport.PreparedMediaConnection
+import com.rayneo.agent.sdk.transport.SandboxTransport
 import com.rayneo.agent.sdk.transport.MessageSigner
 import com.rayneo.agent.sdk.transport.MasqueConfiguration
 import com.rayneo.agent.sdk.transport.MasqueTransport
@@ -17,14 +30,11 @@ import com.rayneo.agent.sdk.transport.NetworkMessageListener
 import com.rayneo.agent.sdk.transport.PeerMessenger
 import com.rayneo.agent.sdk.transport.ProofVerifier
 import com.rayneo.agent.sdk.transport.RuntimeTransport
+import com.rayneo.agent.sdk.transport.RuntimeHttpResponse
 import com.rayneo.agent.sdk.transport.TunnelConfiguration
 import com.rayneo.agent.sdk.transport.TunnelController
 import com.rayneo.agent.sdk.transport.VideoTrack
 import com.rayneo.agent.sdk.transport.VideoUploadHandle
-import com.rayneo.agent.sdk.model.OffloadingSession
-import com.rayneo.agent.sdk.model.ProcessedVideoEndpoint
-import com.rayneo.agent.sdk.model.SandboxSpec
-import com.rayneo.agent.sdk.model.VideoUploadEndpoint
 import com.rayneo.agent.sdk.security.TestCapabilityVcIssuer
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
@@ -55,45 +65,38 @@ class AgentSdkGroupConfigTest {
     private lateinit var server: FakeServer
     private lateinit var peer: FakePeer
     private lateinit var media: FakeMedia
+    private lateinit var sandbox: FakeSandbox
     private lateinit var testCapabilityIssuer: TestCapabilityVcIssuer
     private lateinit var addressResolver: FakeLocalAddressResolver
     private lateinit var sdk: AgentSdk
+    private val runtimeTargets = mutableListOf<Pair<String, Int>>()
 
     @Test
-    fun `media API surface has no accept or target distribution`() {
+    fun `computing API replaces legacy offloading API`() {
         val publicMethods = AgentSdk::class.java.methods
-        assertFalse(publicMethods.any { it.name == "acceptOffloadingSession" })
+        assertFalse(publicMethods.any { it.name == "createOffloadingSession" })
         val upload = publicMethods.single { it.name == "startVideoUpload" }
-        assertEquals(7, upload.parameterCount)
-        assertEquals(OffloadingSession::class.java, upload.parameterTypes.first())
+        assertEquals(8, upload.parameterCount)
+        assertEquals(String::class.java, upload.parameterTypes.first())
         val processed = publicMethods.single { it.name == "getProcessedVideoStream" }
-        assertEquals(OffloadingSession::class.java, processed.parameterTypes.first())
-        val create = publicMethods.single { it.name == "createOffloadingSession" }
-        assertEquals(String::class.java, create.parameterTypes[0])
-        assertEquals(SandboxSpec::class.java, create.parameterTypes[1])
+        assertEquals(String::class.java, processed.parameterTypes.first())
+        val create = publicMethods.single { it.name == "createComputingSession" }
+        assertTrue(publicMethods.any { it.name == "updateRecognitionTarget" })
+        assertTrue(publicMethods.any { it.name == "getRecognitionTarget" })
+        assertTrue(publicMethods.any { it.name == "createControlAction" })
+        assertTrue(publicMethods.any { it.name == "getControlAction" })
+        assertEquals(ComputeSessionRequest::class.java, create.parameterTypes[0])
     }
 
     @Test
-    fun `offloading creation rejects invalid sandbox spec`() = runTest {
+    fun `computing creation rejects invalid resource conditions`() = runTest {
         initializeSdk()
 
         val cpuError = runCatching {
-            sdk.createOffloadingSession(
-                workloadType = "video_rendering",
-                sandboxSpec = SandboxSpec(vcpus = 0, memoryMb = 4096),
-            )
+            sdk.createComputingSession(createComputeRequest(cpuMillicores = -1))
         }.exceptionOrNull() as AgentSdkException
         assertEquals(ErrorCode.INVALID_ARGUMENT, cpuError.code)
-        assertEquals("sandboxSpec.vcpus", cpuError.field)
-
-        val memoryError = runCatching {
-            sdk.createOffloadingSession(
-                workloadType = "video_rendering",
-                sandboxSpec = SandboxSpec(vcpus = 2, memoryMb = 0),
-            )
-        }.exceptionOrNull() as AgentSdkException
-        assertEquals(ErrorCode.INVALID_ARGUMENT, memoryError.code)
-        assertEquals("sandboxSpec.memoryMb", memoryError.field)
+        assertEquals("constraints.resources.cpu_millicores", cpuError.field)
     }
 
     @Before
@@ -104,6 +107,7 @@ class AgentSdkGroupConfigTest {
         server = FakeServer()
         peer = FakePeer()
         media = FakeMedia()
+        sandbox = FakeSandbox()
         addressResolver = FakeLocalAddressResolver()
         testCapabilityIssuer = TestCapabilityVcIssuer(
             Files.createTempDirectory("agent-sdk-test-capability-")
@@ -118,10 +122,14 @@ class AgentSdkGroupConfigTest {
             devicePublicKeyProvider = FakeDevicePublicKeyProvider,
             messageSigner = FakeMessageSigner,
             peerMessenger = peer,
-            runtimeFactory = { _, _ -> runtime },
+            runtimeFactory = { host, port ->
+                runtimeTargets += host to port
+                runtime
+            },
             localServerFactory = { server },
             localAddressResolver = addressResolver,
             mediaOffloadAdapter = media,
+            sandboxTransport = sandbox,
             testCapabilityVcIssuer = testCapabilityIssuer,
         )
         sdk.importTestCapabilityIssuerPrivateKey(testPrivateKeyPem())
@@ -300,7 +308,7 @@ class AgentSdkGroupConfigTest {
             },
         )
 
-        assertEquals(NetworkMessageAction.ACCEPT, action)
+        assertEquals("ACCEPT", action!!["result"]!!.jsonPrimitive.content)
         assertEquals(NetworkMessageType.GROUP_INVITATION, receivedType)
     }
 
@@ -431,165 +439,283 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
-    fun `offloading video delegates to configured media adapter`() = runTest {
+    fun `computing create uses formal path and exact body`() = runTest {
         initializeSdk()
         runtime.deliverGroupConfig(groupConfig(includeSecondPeer = true))
 
-        val session = sdk.createOffloadingSession(
-            workloadType = "video_rendering",
-            sandboxSpec = SandboxSpec(vcpus = 2, memoryMb = 4096),
+        val status = sdk.createComputingSession(createComputeRequest())
+
+        assertEquals("css-001", status.computeServiceSessionId)
+        val body = runtime.bodies.getValue("/v1/computing/session-requests")
+        assertEquals("COMPUTE_SESSION_REQUEST", body["message_type"]!!.jsonPrimitive.content)
+        assertEquals("CREATE", body["request_type"]!!.jsonPrimitive.content)
+        assertEquals("STRUCTURED", body["input_format"]!!.jsonPrimitive.content)
+        assertEquals("create-001", body["request_id"]!!.jsonPrimitive.content)
+        assertEquals("g1", body["acn_context"]!!.jsonObject["group_id"]!!.jsonPrimitive.content)
+        assertEquals("dog-vision", body["constraints"]!!.jsonObject["capability_id"]!!.jsonPrimitive.content)
+        assertFalse(body.containsKey("proof"))
+        assertFalse(body.containsKey("timestamp"))
+    }
+
+    @Test
+    fun `computing lifecycle operations use the formal endpoint and target fields`() = runTest {
+        initializeSdk()
+
+        sdk.queryComputingSession(
+            ComputeSessionRequest(
+                messageType = "COMPUTE_SESSION_REQUEST",
+                requestType = ComputeRequestType.QUERY,
+                inputFormat = ComputeInputFormat.STRUCTURED,
+                requestId = "query-001",
+                targetRequestId = "create-001",
+            ),
         )
-        val upload = sdk.startVideoUpload(
-            session,
-            cameraId = "2",
-            width = 1280,
-            height = 720,
-            fps = 30,
-            bitrateKbps = 2500,
+        var body = runtime.bodies.getValue("/v1/computing/session-requests")
+        assertEquals("QUERY", body["request_type"]!!.jsonPrimitive.content)
+        assertEquals("create-001", body["target_request_id"]!!.jsonPrimitive.content)
+        assertFalse(body.containsKey("acn_context"))
+
+        sdk.cancelComputingSession(
+            ComputeSessionRequest(
+                messageType = "COMPUTE_SESSION_REQUEST",
+                requestType = ComputeRequestType.CANCEL,
+                inputFormat = ComputeInputFormat.STRUCTURED,
+                requestId = "cancel-001",
+                computeServiceSessionId = "css-001",
+            ),
         )
-        assertEquals("ALLOCATED", session.state)
-        assertNotNull(session.producer)
-        assertNotNull(session.processedStream)
-        assertFalse(session.toString().contains("access_token"))
-        assertFalse(session.toString().contains("access_ticket"))
+        body = runtime.bodies.getValue("/v1/computing/session-requests")
+        assertEquals("CANCEL", body["request_type"]!!.jsonPrimitive.content)
+        assertEquals("css-001", body["compute_service_session_id"]!!.jsonPrimitive.content)
+
+        sdk.releaseComputingSession(
+            ComputeSessionRequest(
+                messageType = "COMPUTE_SESSION_REQUEST",
+                requestType = ComputeRequestType.RELEASE,
+                inputFormat = ComputeInputFormat.STRUCTURED,
+                requestId = "release-001",
+                computeServiceSessionId = "css-001",
+            ),
+        )
+        body = runtime.bodies.getValue("/v1/computing/session-requests")
+        assertEquals("RELEASE", body["request_type"]!!.jsonPrimitive.content)
+        assertEquals("css-001", body["compute_service_session_id"]!!.jsonPrimitive.content)
+        assertFalse(body.containsKey("target_request_id"))
+    }
+
+    @Test
+    fun `C02 is accepted internally and media uses cached sandbox endpoint`() = runTest {
+        initializeSdk()
+        val ack = runtime.deliverDownlink(
+            "COMPUTE_CONNECT_CONFIG",
+            computeConnectConfig("producer"),
+        )!!
+
+        assertTrue(ack["accepted"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals("", ack["cause"]!!.jsonPrimitive.content)
+        val upload = sdk.startVideoUpload("css-001", cameraId = "2")
         assertEquals("camera-track-1", upload.trackId)
         assertEquals("2", media.cameraId)
+        assertEquals("POST", sandbox.requests.last().first)
         assertEquals(
-            setOf(
-                "request_id", "workload_type", "sandbox_spec",
-                "timestamp", "proof",
-            ),
-            runtime.bodies.getValue("/compute/v1/offloading-sessions").keys,
+            "http://8.8.8.9:8788/v1/media-connections",
+            sandbox.requests.last().second,
         )
+        val body = checkNotNull(sandbox.requests.last().third)
         assertEquals(
-            "video_rendering",
-            runtime.bodies.getValue("/compute/v1/offloading-sessions")
-                .getValue("workload_type").jsonPrimitive.content,
+            "producer",
+            body["computing_context"]!!.jsonObject["role"]!!.jsonPrimitive.content,
         )
+        assertTrue(body["offer"]!!.jsonObject["sdp"]!!.jsonPrimitive.content.contains("a=sendonly"))
         assertEquals(
-            2,
-            runtime.bodies.getValue("/compute/v1/offloading-sessions")
-                .getValue("sandbox_spec").jsonObject
-                .getValue("vcpus").jsonPrimitive.content.toInt(),
+            setOf("8.8.8.9", "8.8.8.10"),
+            tunnel.groupPeers["computing:binding-css-001"],
         )
-        assertEquals(
-            4096,
-            runtime.bodies.getValue("/compute/v1/offloading-sessions")
-                .getValue("sandbox_spec").jsonObject
-                .getValue("memory_mb").jsonPrimitive.content.toInt(),
-        )
-        assertFalse(runtime.bodies.getValue("/compute/v1/offloading-sessions").containsKey("agent_id"))
-        assertFalse(runtime.bodies.getValue("/compute/v1/offloading-sessions").containsKey("group_id"))
-        assertFalse(runtime.bodies.getValue("/compute/v1/offloading-sessions").containsKey("sandbox_id"))
-        UUID.fromString(
-            runtime.bodies.getValue("/compute/v1/offloading-sessions")
-                .getValue("request_id").jsonPrimitive.content,
-        )
-        assertFalse(runtime.bodies.getValue("/compute/v1/offloading-sessions").containsKey("task_type"))
-        assertEquals(
-            "2026-08-21T09:00:00Z",
-            runtime.bodies.getValue("/compute/v1/offloading-sessions")
-                .getValue("timestamp").jsonPrimitive.content,
-        )
-        assertEquals(
-            "test-proof",
-            runtime.bodies.getValue("/compute/v1/offloading-sessions")
-                .getValue("proof").jsonObject["jws"]!!
-                .jsonPrimitive.content,
-        )
-        assertFalse(runtime.paths.any { it.endsWith("/consumers") })
-        assertTrue(peer.bodies.isEmpty())
-        val track = sdk.getProcessedVideoStream(session)
-        assertEquals("processed-track-1", track.trackId)
-        assertEquals(setOf("8.8.8.9"), tunnel.groupPeers["offloading:session-1"])
     }
 
     @Test
-    fun `compute control override installs route and isolates compute requests`() = runTest {
-        val computeRuntime = FakeRuntime()
-        sdk = AgentSdk(
-            tunnelController = tunnel,
-            masqueTransport = masque,
-            proofVerifier = ProofVerifier { },
-            controlRequestAuthenticator = FakeControlAuthenticator,
-            devicePublicKeyProvider = FakeDevicePublicKeyProvider,
-            messageSigner = FakeMessageSigner,
-            peerMessenger = peer,
-            runtimeFactory = { _, port -> if (port == 28500) computeRuntime else runtime },
-            localServerFactory = { server },
-            localAddressResolver = addressResolver,
-            mediaOffloadAdapter = media,
-            testCapabilityVcIssuer = testCapabilityIssuer,
-        )
-        sdk.importTestCapabilityIssuerPrivateKey(testPrivateKeyPem())
-        sdk.initialize(
-            agentRuntimeIp = "192.168.3.10",
-            agentRuntimePort = 8080,
-            localTcpPort = 4001,
-            localUdpPort = 28443,
-            masqueServerUrl = "https://192.168.3.10:4433",
-            computeControlIp = "172.30.0.10",
-            computeControlPort = 28500,
-        )
-        sdk.restoreLocalProfile(
-            AgentProfile(LOCAL_ID, "Agent A", buildJsonObject { put("id", "vc-a") }),
-        )
-        runtime.deliverGroupConfig(groupConfig())
-
-        sdk.createOffloadingSession(
-            "video_rendering",
-            SandboxSpec(vcpus = 2, memoryMb = 4096),
-        )
-
-        assertEquals(setOf("172.30.0.10"), tunnel.groupPeers["compute-control"])
-        assertEquals("/compute/v1/offloading-sessions", computeRuntime.lastPath)
-        assertFalse(runtime.paths.contains("/compute/v1/offloading-sessions"))
-    }
-
-    @Test
-    fun `application supplied remote session gets processed video`() = runTest {
+    fun `consumer uses the same formal media resource and closes it with DELETE`() = runTest {
         initializeSdk()
-        runtime.deliverGroupConfig(groupConfig())
-        val session = OffloadingSession(
-            sessionId = "session-from-b",
-            state = "SOURCE_CONNECTED",
-            expiresAt = Instant.parse("2027-09-01T00:00:00Z"),
-            processedStream = ProcessedVideoEndpoint(
-                videoServerIp = "8.8.8.9",
-                offerUrl = "https://8.8.8.9:28500/v1/processed/offer",
-            ),
-        )
-        val track = sdk.getProcessedVideoStream(session)
+        runtime.deliverDownlink("COMPUTE_CONNECT_CONFIG", computeConnectConfig("consumer"))
 
-        assertEquals("processed-track-1", track.trackId)
-        assertEquals(setOf("8.8.8.9"), tunnel.groupPeers["offloading:session-from-b"])
+        val stream = sdk.getProcessedVideoStream("css-001")
+
+        assertEquals("processed-track-1", stream.track.trackId)
+        val body = checkNotNull(sandbox.requests.last().third)
+        assertEquals(
+            "consumer",
+            body["computing_context"]!!.jsonObject["role"]!!.jsonPrimitive.content,
+        )
+        assertTrue(body["offer"]!!.jsonObject["sdp"]!!.jsonPrimitive.content.contains("a=recvonly"))
+        stream.close()
+        assertEquals("CLOSED", stream.state)
+        assertEquals("DELETE", sandbox.requests.last().first)
+        assertEquals(
+            "http://8.8.8.9:8788/v1/media-connections/media-consumer-001",
+            sandbox.requests.last().second,
+        )
+        assertEquals(setOf("8.8.8.9"), tunnel.groupPeers["computing:binding-css-001"])
     }
 
     @Test
-    fun `application supplied session drives upload endpoints`() = runTest {
+    fun `media retry after public timeout reuses request id and offer`() = runTest {
         initializeSdk()
-        val session = OffloadingSession(
-            sessionId = "session-created-elsewhere",
-            state = "ALLOCATED",
-            expiresAt = null,
-            producer = VideoUploadEndpoint(
-                videoServerIp = "9.9.9.9",
-                sourceStartUrl = "https://9.9.9.9:29500/source",
-                sourceStopUrl = "https://9.9.9.9:29500/source/stop",
-            ),
-            processedStream = ProcessedVideoEndpoint(
-                videoServerIp = "9.9.9.10",
-                offerUrl = "https://9.9.9.10:29501/processed",
-            ),
-        )
+        runtime.deliverDownlink("COMPUTE_CONNECT_CONFIG", computeConnectConfig("producer"))
+        sandbox.failuresRemaining = 2
 
-        val upload = sdk.startVideoUpload(session, fps = 24)
+        val firstError = runCatching { sdk.startVideoUpload("css-001") }.exceptionOrNull()
+            as AgentSdkException
+        assertTrue(firstError.retryable)
+        val upload = sdk.startVideoUpload("css-001")
 
         assertEquals("camera-track-1", upload.trackId)
+        assertEquals(1, media.prepareCount)
+        val posts = sandbox.requests.filter { it.first == "POST" }
+        assertEquals(3, posts.size)
+        assertEquals(posts[0].third, posts[1].third)
+        assertEquals(posts[1].third, posts[2].third)
+    }
+
+    @Test
+    fun `C05 closes media and returns replayable C06`() = runTest {
+        initializeSdk()
+        runtime.deliverDownlink("COMPUTE_CONNECT_CONFIG", computeConnectConfig("producer"))
+        val upload = sdk.startVideoUpload("css-001")
+        val close = buildJsonObject {
+            put("compute_service_session_id", "css-001")
+            put("compute_instance_id", "ci-001")
+            put("binding_ref", "binding-css-001")
+            put("role", "producer")
+            put("receiver_agent_id", LOCAL_ID)
+            put("cause", "released")
+        }
+
+        val first = runtime.deliverDownlink("COMPUTE_SESSION_CLOSE", close)!!
+        val second = runtime.deliverDownlink("COMPUTE_SESSION_CLOSE", close)!!
+
+        assertEquals(first, second)
+        assertTrue(first["closed"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals("STOPPED", upload.state)
+        assertEquals("DELETE", sandbox.requests.last().first)
         assertEquals(
-            setOf("9.9.9.9", "9.9.9.10"),
-            tunnel.groupPeers["offloading:session-created-elsewhere"],
+            "http://8.8.8.9:8788/v1/media-connections/media-producer-001",
+            sandbox.requests.last().second,
         )
+        assertFalse(tunnel.groupPeers.containsKey("computing:binding-css-001"))
+    }
+
+    @Test
+    fun `recognition target uses C02 path and exact consumer context`() = runTest {
+        initializeSdk()
+        runtime.deliverDownlink("COMPUTE_CONNECT_CONFIG", computeConnectConfig("consumer"))
+
+        val updated = sdk.updateRecognitionTarget(
+            computeServiceSessionId = "css-001",
+            requestId = "recognition-001",
+            text = "寻找红色玩偶",
+            language = "zh",
+        )
+        val fetched = sdk.getRecognitionTarget("css-001")
+
+        assertEquals(updated, fetched)
+        assertEquals("APPLIED", updated.status)
+        assertEquals("1", updated.targetRevision)
+        assertEquals("红色玩偶", updated.target.label)
+        val update = sandbox.requests[sandbox.requests.lastIndex - 1]
+        assertEquals("PUT", update.first)
+        assertEquals(
+            "http://8.8.8.9:8788/v1/recognition-targets/css-001",
+            update.second,
+        )
+        val body = checkNotNull(update.third)
+        assertEquals("recognition-001", body["request_id"]!!.jsonPrimitive.content)
+        assertEquals(
+            "consumer",
+            body["computing_context"]!!.jsonObject["role"]!!.jsonPrimitive.content,
+        )
+        assertEquals(
+            "寻找红色玩偶",
+            body["input"]!!.jsonObject["text"]!!.jsonPrimitive.content,
+        )
+        assertEquals("GET", sandbox.requests.last().first)
+        assertEquals(null, sandbox.requests.last().third)
+    }
+
+    @Test
+    fun `C02 rejects recognition path without session placeholder`() = runTest {
+        initializeSdk()
+        val original = computeConnectConfig("consumer")
+        val parameters = original["connection_parameters"]!!.jsonObject.toMutableMap()
+        parameters["recognition_target_path_template"] =
+            JsonPrimitive("/v1/recognition-targets/current")
+        val payload = JsonObject(
+            original.toMutableMap().apply {
+                this["connection_parameters"] = JsonObject(parameters)
+            },
+        )
+
+        val response = runtime.deliverDownlink("COMPUTE_CONNECT_CONFIG", payload)!!
+
+        assertFalse(response["accepted"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals("invalid-request", response["cause"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `text control action uses formal Sandbox resource`() = runTest {
+        initializeSdk()
+        runtime.deliverDownlink("COMPUTE_CONNECT_CONFIG", computeConnectConfig("consumer"))
+
+        val created = sdk.createControlAction(
+            "css-001",
+            ControlActionRequest(
+                requestId = "control-search-001",
+                inputType = ControlInputType.TEXT,
+                text = "寻找杯子",
+                language = "zh",
+            ),
+        )
+        val fetched = sdk.getControlAction("css-001", created.actionId)
+
+        assertEquals("action-001", created.actionId)
+        assertEquals("RUNNING", created.status)
+        assertEquals(ControlAction.search_object, created.normalizedAction)
+        assertEquals("COMPLETED", fetched.status)
+        assertEquals(null, fetched.computingContext)
+        val create = sandbox.requests[sandbox.requests.lastIndex - 1]
+        assertEquals("POST", create.first)
+        assertEquals("http://8.8.8.9:8788/v1/control-actions", create.second)
+        val body = checkNotNull(create.third)
+        assertEquals("control-search-001", body["request_id"]!!.jsonPrimitive.content)
+        assertEquals(
+            "consumer",
+            body["computing_context"]!!.jsonObject["role"]!!.jsonPrimitive.content,
+        )
+        assertEquals("TEXT", body["input"]!!.jsonObject["type"]!!.jsonPrimitive.content)
+        assertEquals("寻找杯子", body["input"]!!.jsonObject["text"]!!.jsonPrimitive.content)
+        assertEquals("GET", sandbox.requests.last().first)
+        assertEquals(
+            "http://8.8.8.9:8788/v1/control-actions/action-001",
+            sandbox.requests.last().second,
+        )
+    }
+
+    @Test
+    fun `structured control action requires parameters`() = runTest {
+        initializeSdk()
+
+        val error = runCatching {
+            sdk.createControlAction(
+                "css-001",
+                ControlActionRequest(
+                    requestId = "control-movement-001",
+                    inputType = ControlInputType.STRUCTURED,
+                    action = ControlAction.movement,
+                ),
+            )
+        }.exceptionOrNull() as AgentSdkException
+
+        assertEquals(ErrorCode.INVALID_ARGUMENT, error.code)
+        assertEquals("parameters", error.field)
     }
 
     @Test
@@ -1003,6 +1129,54 @@ class AgentSdkGroupConfigTest {
         }
     }
 
+    private fun createComputeRequest(cpuMillicores: Long = 2_000): ComputeSessionRequest =
+        ComputeSessionRequest(
+            messageType = "COMPUTE_SESSION_REQUEST",
+            requestType = ComputeRequestType.CREATE,
+            inputFormat = ComputeInputFormat.STRUCTURED,
+            requestId = "create-001",
+            acnContext = AcnContext("g1", LOCAL_ID, PEER_ID),
+            constraints = ComputeConstraints(
+                capabilityId = "dog-vision",
+                resources = ComputeResources(
+                    cpuMillicores = cpuMillicores,
+                    memoryMib = 4_096,
+                ),
+                allowBaseQos = true,
+            ),
+            uiLocale = "zh-CN",
+        )
+
+    private fun computeConnectConfig(role: String): JsonObject = buildJsonObject {
+        put("compute_service_session_id", "css-001")
+        put("compute_instance_id", "ci-001")
+        put("binding_ref", "binding-css-001")
+        put("role", role)
+        put("receiver_agent_id", LOCAL_ID)
+        put("service_endpoint", "http://8.8.8.9:8788")
+        put("network_binding", buildJsonObject {
+            put("pdu_session_id", 1)
+            put("dnn", "internet")
+            put("snssai", buildJsonObject {
+                put("sst", 1)
+                put("sd", "010203")
+            })
+            put("ue_ipv4", "8.8.8.7")
+            put("runtime_data_plane", buildJsonObject {
+                put("access_type", "HTTP3_CONNECT_IP")
+                put("session_selection", "EXACT_PDU_SESSION_ID")
+            })
+        })
+        put("connection_parameters", buildJsonObject {
+            put("media_connections_path", "/v1/media-connections")
+            put("transport", "WEBRTC")
+            put(
+                "recognition_target_path_template",
+                "/v1/recognition-targets/{compute_service_session_id}",
+            )
+        })
+    }
+
     private fun groupConfig(
         peerPort: String = "4001",
         includeSecondPeer: Boolean = false,
@@ -1101,45 +1275,76 @@ class AgentSdkGroupConfigTest {
         val paths = mutableListOf<String>()
         val bodies = mutableMapOf<String, JsonObject>()
         var ueInfoRequests = 0
-        var downlinkHandler: (suspend (String, Int, JsonObject) -> NetworkMessageAction)? = null
+        var downlinkHandler: (suspend (String, Int, JsonObject) -> JsonObject?)? = null
 
-        override suspend fun getUeAgentIp(): String {
+        override suspend fun getUeInfo(): JsonObject {
             ueInfoRequests += 1
-            return "8.8.8.7"
+            return buildJsonObject {
+                put("identity", buildJsonObject { put("supi", "imsi-001010000000001") })
+                put("nas", buildJsonObject {
+                    put("state", "session_ready")
+                    put("registered", true)
+                    put("security_context", true)
+                })
+                put("pdu_sessions", buildJsonArray {
+                    add(buildJsonObject {
+                        put("pdu_session_id", 1)
+                        put("state", "active")
+                        put("type", "IPv4")
+                        put("dnn", "internet")
+                        put("snssai", buildJsonObject {
+                            put("sst", 1)
+                            put("sd", "010203")
+                        })
+                        put("ipv4", "8.8.8.7")
+                        put("default_route", true)
+                    })
+                })
+                put("data_plane_accesses", buildJsonArray {
+                    add(buildJsonObject {
+                        put("access_type", "HTTP3_CONNECT_IP")
+                        put(
+                            "endpoint_template",
+                            "https://runtime.example/masque/{pdu_session_id}",
+                        )
+                        put("session_selection", "EXACT_PDU_SESSION_ID")
+                    })
+                })
+            }
         }
 
+        override suspend fun getAcnStatus(): JsonObject =
+            buildJsonObject { put("ready", true) }
+
         override suspend fun startDownlink(
-            handler: suspend (String, Int, JsonObject) -> NetworkMessageAction,
+            onReconnected: suspend () -> Unit,
+            handler: suspend (String, Int, JsonObject) -> JsonObject?,
         ) { downlinkHandler = handler }
         suspend fun deliverDownlink(
             messageType: String,
             payload: JsonObject,
             transactionId: Int = 49,
-        ): NetworkMessageAction = downlinkHandler!!(messageType, transactionId, payload)
-        suspend fun deliverGroupConfig(payload: JsonObject): NetworkMessageAction =
-            deliverDownlink("ACN_AGENT_GROUPING_NOTIFICATION", payload)
+        ): JsonObject? = downlinkHandler!!(messageType, transactionId, payload)
+        suspend fun deliverGroupConfig(payload: JsonObject): NetworkMessageAction {
+            val response = checkNotNull(
+                deliverDownlink("ACN_AGENT_GROUPING_NOTIFICATION", payload),
+            )
+            return NetworkMessageAction.valueOf(response["result"]!!.jsonPrimitive.content)
+        }
         override suspend fun request(method: String, path: String, body: JsonObject): JsonObject {
             lastMethod = method
             lastPath = path
             paths += path
             lastBody = body
             bodies[path] = body
-            return if (path == "/compute/v1/offloading-sessions") {
+            return if (path == "/v1/computing/session-requests") {
                 buildJsonObject {
-                    put("session_id", "session-1")
-                    put("state", "ALLOCATED")
-                    put("expires_at", "2027-08-18T12:00:00Z")
-                    put("producer", buildJsonObject {
-                        put("video_server_ip", "8.8.8.9")
-                        put("source_start_url", "https://8.8.8.9:28500/v1/source-pulls")
-                        put("source_stop_url", "https://8.8.8.9:28500/v1/source-pulls/session-1")
-                    })
-                    put("processed_stream", buildJsonObject {
-                        put("video_server_ip", "8.8.8.9")
-                        put("offer_url", "https://8.8.8.9:28500/v1/processed/offer")
-                        put("protocol", "webrtc")
-                        put("signaling", "non-trickle")
-                    })
+                    put("message_type", "COMPUTE_SESSION_STATUS")
+                    put("request_id", body["request_id"]!!)
+                    put("compute_service_session_id", "css-001")
+                    put("status_revision", "1")
+                    put("status", "ACCEPTED")
+                    put("cause", "")
                 }
             } else if (path == "/idm/v1/identity-applications") {
                 buildJsonObject {
@@ -1173,6 +1378,17 @@ class AgentSdkGroupConfigTest {
                 buildJsonObject { }
             }
         }
+        override suspend fun requestWithStatus(
+            method: String,
+            path: String,
+            body: JsonObject,
+        ): RuntimeHttpResponse = RuntimeHttpResponse(
+            if (
+                path == "/v1/computing/session-requests" &&
+                body["request_type"]?.jsonPrimitive?.content == "CREATE"
+            ) 202 else 200,
+            request(method, path, body),
+        )
         override suspend fun close() = Unit
     }
 
@@ -1259,32 +1475,164 @@ class AgentSdkGroupConfigTest {
 
     private class FakeMedia : MediaOffloadAdapter {
         var cameraId = ""
+        var prepareCount = 0
 
-        override suspend fun startVideoUpload(
-            session: OffloadingSession,
+        override fun supportsVideoCodec(codec: String): Boolean =
+            codec.uppercase() in setOf("H264", "VP8")
+
+        override suspend fun prepareVideoUpload(
+            session: ComputingSession,
             cameraId: String,
             width: Int,
             height: Int,
             fps: Int,
             bitrateKbps: Int,
-        ): VideoUploadHandle {
+            timeoutSeconds: Double,
+        ): PreparedMediaConnection<VideoUploadHandle> {
             this.cameraId = cameraId
-            return object : VideoUploadHandle {
+            prepareCount += 1
+            val upload = object : VideoUploadHandle {
                 override val trackId = "camera-track-1"
                 override var state = "RUNNING"
                 override suspend fun pause() { state = "PAUSED" }
                 override suspend fun resume() { state = "RUNNING" }
                 override suspend fun stop() { state = "STOPPED" }
             }
+            return FakePrepared("producer", upload)
         }
 
-        override suspend fun getProcessedVideoTrack(
-            session: OffloadingSession,
+        override suspend fun prepareProcessedVideo(
+            session: ComputingSession,
             timeoutSeconds: Double,
-        ): VideoTrack = object : VideoTrack {
-            override val trackId = "processed-track-1"
-            override fun addSink(sink: Any) = Unit
-            override fun removeSink(sink: Any) = Unit
+        ): PreparedMediaConnection<LocalProcessedVideo> {
+            val local = object : LocalProcessedVideo {
+                override val track = object : VideoTrack {
+                    override val trackId = "processed-track-1"
+                    override fun addSink(sink: Any) = Unit
+                    override fun removeSink(sink: Any) = Unit
+                }
+                override suspend fun close() = Unit
+            }
+            return FakePrepared("consumer", local)
+        }
+
+        override suspend fun close() = Unit
+    }
+
+    private class FakePrepared<T>(role: String, private val result: T) :
+        PreparedMediaConnection<T> {
+        override val offerSdp =
+            "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n" +
+                "a=${if (role == "producer") "sendonly" else "recvonly"}\r\n" +
+                "a=candidate:1 1 UDP 1 8.8.8.7 50000 typ host\r\n" +
+                "a=end-of-candidates\r\n"
+        override suspend fun applyAnswer(answerSdp: String, timeoutSeconds: Double): T = result
+        override suspend fun abort() = Unit
+    }
+
+    private class FakeSandbox : SandboxTransport {
+        val requests = mutableListOf<Triple<String, String, JsonObject?>>()
+        var failuresRemaining = 0
+        var recognitionTarget: JsonObject? = null
+        var controlAction: JsonObject? = null
+
+        override suspend fun requestWithStatus(
+            method: String,
+            url: String,
+            body: JsonObject?,
+            timeoutSeconds: Double,
+            sourceIpv4: String,
+        ): RuntimeHttpResponse {
+            requests += Triple(method, url, body)
+            if (method == "DELETE") return RuntimeHttpResponse(204, JsonObject(emptyMap()))
+            if ("/v1/recognition-targets/" in url) {
+                if (method == "PUT") {
+                    val request = checkNotNull(body)
+                    recognitionTarget = buildJsonObject {
+                        put("request_id", request["request_id"]!!)
+                        put("computing_context", request["computing_context"]!!)
+                        put("status", "APPLIED")
+                        put("target_revision", "1")
+                        put("target", buildJsonObject {
+                            put("label", "红色玩偶")
+                            put("prompt", "red toy")
+                        })
+                    }
+                    return RuntimeHttpResponse(200, checkNotNull(recognitionTarget))
+                }
+                if (method == "GET" && recognitionTarget != null) {
+                    return RuntimeHttpResponse(200, checkNotNull(recognitionTarget))
+                }
+                return RuntimeHttpResponse(404, buildJsonObject {
+                    put("error", buildJsonObject {
+                        put("code", "recognition-target-not-set")
+                        put("message", "not set")
+                    })
+                })
+            }
+            if ("/v1/control-actions" in url) {
+                if (method == "POST") {
+                    val request = checkNotNull(body)
+                    val input = request["input"]!!.jsonObject
+                    val isText = input["type"]!!.jsonPrimitive.content == "TEXT"
+                    controlAction = buildJsonObject {
+                        put("request_id", request["request_id"]!!)
+                        put("action_id", "action-001")
+                        put("computing_context", request["computing_context"]!!)
+                        put(
+                            "normalized_action",
+                            if (isText) "search_object"
+                            else request["action"]!!.jsonPrimitive.content,
+                        )
+                        put(
+                            "normalized_parameters",
+                            if (isText) buildJsonObject { put("query", "cup") }
+                            else request["parameters"]!!.jsonObject,
+                        )
+                        put("status", "RUNNING")
+                        put("result", buildJsonObject { put("phase", "started") })
+                        put("cause", "")
+                    }
+                    return RuntimeHttpResponse(202, checkNotNull(controlAction))
+                }
+                if (method == "GET" && controlAction != null) {
+                    val result = checkNotNull(controlAction).toMutableMap()
+                    result.remove("computing_context")
+                    result["status"] = JsonPrimitive("COMPLETED")
+                    return RuntimeHttpResponse(200, JsonObject(result))
+                }
+                return RuntimeHttpResponse(404, buildJsonObject {
+                    put("error", buildJsonObject {
+                        put("code", "action-not-found")
+                        put("message", "not found")
+                    })
+                })
+            }
+            if (failuresRemaining > 0) {
+                failuresRemaining -= 1
+                throw AgentSdkException(
+                    ErrorCode.TIMEOUT,
+                    "unknown POST result",
+                    retryable = true,
+                )
+            }
+            val request = checkNotNull(body)
+            val context = request["computing_context"]!!.jsonObject
+            val role = context["role"]!!.jsonPrimitive.content
+            return RuntimeHttpResponse(201, buildJsonObject {
+                put("request_id", request["request_id"]!!)
+                put("computing_context", context)
+                put("media_connection_id", "media-$role-001")
+                put("answer", buildJsonObject {
+                    put("type", "answer")
+                    put(
+                        "sdp",
+                        "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n" +
+                            "a=${if (role == "producer") "recvonly" else "sendonly"}\r\n" +
+                            "a=candidate:2 1 UDP 1 8.8.8.10 51000 typ host\r\n",
+                    )
+                })
+            })
         }
 
         override suspend fun close() = Unit

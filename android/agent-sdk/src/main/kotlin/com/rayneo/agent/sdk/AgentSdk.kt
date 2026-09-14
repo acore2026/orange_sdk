@@ -5,7 +5,24 @@ import com.rayneo.agent.sdk.group.GroupMemberCache
 import com.rayneo.agent.sdk.masque.NativeMasqueTransport
 import com.rayneo.agent.sdk.masque.NativeMasqueBridge
 import com.rayneo.agent.sdk.model.AgentProfile
+import com.rayneo.agent.sdk.model.AcnContext
 import com.rayneo.agent.sdk.model.AgentLifecycleState
+import com.rayneo.agent.sdk.model.ComputeConnectionParameters
+import com.rayneo.agent.sdk.model.ComputeConstraints
+import com.rayneo.agent.sdk.model.ComputeInputFormat
+import com.rayneo.agent.sdk.model.ComputeNetworkBinding
+import com.rayneo.agent.sdk.model.ComputeRequestType
+import com.rayneo.agent.sdk.model.ComputeResources
+import com.rayneo.agent.sdk.model.ComputeRole
+import com.rayneo.agent.sdk.model.ComputeSessionRequest
+import com.rayneo.agent.sdk.model.ComputeSessionStatus
+import com.rayneo.agent.sdk.model.ComputingContext
+import com.rayneo.agent.sdk.model.ComputingSession
+import com.rayneo.agent.sdk.model.ControlAction
+import com.rayneo.agent.sdk.model.ControlActionRequest
+import com.rayneo.agent.sdk.model.ControlActionStatus
+import com.rayneo.agent.sdk.model.ControlInputType
+import com.rayneo.agent.sdk.model.ControlTargetRole
 import com.rayneo.agent.sdk.model.DiscoveredAgent
 import com.rayneo.agent.sdk.model.GroupConfigSnapshot
 import com.rayneo.agent.sdk.model.GroupInfo
@@ -13,12 +30,12 @@ import com.rayneo.agent.sdk.model.MessageReceipt
 import com.rayneo.agent.sdk.model.NetworkAbility
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import com.rayneo.agent.sdk.model.NetworkMessageType
-import com.rayneo.agent.sdk.model.OffloadingSession
 import com.rayneo.agent.sdk.model.OperationResult
-import com.rayneo.agent.sdk.model.ProcessedVideoEndpoint
-import com.rayneo.agent.sdk.model.SandboxSpec
+import com.rayneo.agent.sdk.model.RecognitionTarget
+import com.rayneo.agent.sdk.model.RecognitionTargetStatus
+import com.rayneo.agent.sdk.model.RuntimeDataPlane
 import com.rayneo.agent.sdk.model.SdkInitResult
-import com.rayneo.agent.sdk.model.VideoUploadEndpoint
+import com.rayneo.agent.sdk.model.Snssai
 import com.rayneo.agent.sdk.security.AndroidDeviceSecurity
 import com.rayneo.agent.sdk.security.DisabledMessageSignatureVerifier
 import com.rayneo.agent.sdk.security.DisabledProofVerifier
@@ -38,6 +55,7 @@ import com.rayneo.agent.sdk.transport.DevicePublicKeyProvider
 import com.rayneo.agent.sdk.transport.LocalServer
 import com.rayneo.agent.sdk.transport.LocalAddressResolver
 import com.rayneo.agent.sdk.transport.MediaOffloadAdapter
+import com.rayneo.agent.sdk.transport.LocalProcessedVideo
 import com.rayneo.agent.sdk.transport.MasqueConfiguration
 import com.rayneo.agent.sdk.transport.MasqueTransport
 import com.rayneo.agent.sdk.transport.MasqueTransportStatistics
@@ -46,16 +64,20 @@ import com.rayneo.agent.sdk.transport.MessageSigner
 import com.rayneo.agent.sdk.transport.NetworkMessageListener
 import com.rayneo.agent.sdk.transport.OkHttpPeerMessenger
 import com.rayneo.agent.sdk.transport.OkHttpRuntimeTransport
+import com.rayneo.agent.sdk.transport.OkHttpSandboxTransport
 import com.rayneo.agent.sdk.transport.PeerMessenger
 import com.rayneo.agent.sdk.transport.ProofVerifier
 import com.rayneo.agent.sdk.transport.RuntimeTransport
+import com.rayneo.agent.sdk.transport.SandboxTransport
 import com.rayneo.agent.sdk.transport.RouteLocalAddressResolver
 import com.rayneo.agent.sdk.transport.TunnelConfiguration
 import com.rayneo.agent.sdk.transport.TunnelController
 import com.rayneo.agent.sdk.transport.VideoTrack
 import com.rayneo.agent.sdk.transport.VideoUploadHandle
+import com.rayneo.agent.sdk.transport.ProcessedVideoStream
 import com.rayneo.agent.sdk.vpn.AgentVpnService
 import com.rayneo.agent.sdk.vpn.VpnTunnelController
+import com.rayneo.agent.sdk.webrtc.AndroidWebRtcMediaAdapter
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -68,15 +90,95 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.Json
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.net.URI
 import java.net.InetAddress
 import java.time.Instant
 import java.util.UUID
+
+private class ManagedVideoUpload(
+    private val inner: VideoUploadHandle,
+    private val closeRemote: suspend () -> Unit,
+) : VideoUploadHandle {
+    private var localStopped = false
+    private var remoteClosed = false
+    override val trackId: String get() = inner.trackId
+    override val state: String get() = inner.state
+    override suspend fun pause() = inner.pause()
+    override suspend fun resume() = inner.resume()
+    override suspend fun stop() {
+        if (localStopped && remoteClosed) return
+        var localError: Throwable? = null
+        if (!localStopped) {
+            try {
+                inner.stop()
+                localStopped = true
+            } catch (error: Throwable) { localError = error }
+        }
+        if (!remoteClosed) {
+            closeRemote()
+            remoteClosed = true
+        }
+        localError?.let { throw it }
+    }
+}
+
+private class ManagedProcessedVideoStream(
+    private val inner: LocalProcessedVideo,
+    private val closeRemote: suspend () -> Unit,
+) : ProcessedVideoStream {
+    private var localClosed = false
+    private var remoteClosed = false
+    override val track: VideoTrack get() = inner.track
+    override val state: String get() = if (localClosed) "CLOSED" else "RUNNING"
+    override suspend fun close() {
+        if (localClosed && remoteClosed) return
+        var localError: Throwable? = null
+        if (!localClosed) {
+            try {
+                inner.close()
+                localClosed = true
+            } catch (error: Throwable) { localError = error }
+        }
+        if (!remoteClosed) {
+            closeRemote()
+            remoteClosed = true
+        }
+        localError?.let { throw it }
+    }
+}
+
+private data class MediaConnectionRecord(
+    val session: ComputingSession,
+    val requestId: String,
+    val mediaConnectionId: String,
+    val managed: Any,
+)
+
+private data class CreatedMediaConnection(
+    val requestId: String,
+    val mediaConnectionId: String,
+    val answerSdp: String,
+)
+
+private data class PendingMediaConnection(
+    val session: ComputingSession,
+    val requestId: String,
+    val offerSdp: String,
+    val prepared: com.rayneo.agent.sdk.transport.PreparedMediaConnection<*>,
+)
 
 class AgentSdk internal constructor(
     private val tunnelController: TunnelController,
@@ -93,6 +195,7 @@ class AgentSdk internal constructor(
     private val localServerFactory: () -> LocalServer = { TcpJsonLocalServer() },
     private val localAddressResolver: LocalAddressResolver = RouteLocalAddressResolver(),
     private val mediaOffloadAdapter: MediaOffloadAdapter? = null,
+    private val sandboxTransport: SandboxTransport = OkHttpSandboxTransport(),
     private val testCapabilityVcIssuer: TestCapabilityVcIssuer? = null,
     private val agentStateStore: AgentStateStore = InMemoryAgentStateStore(),
 ) {
@@ -100,7 +203,6 @@ class AgentSdk internal constructor(
 
     private var state = State.NEW
     private var runtime: RuntimeTransport? = null
-    private var computeRuntime: RuntimeTransport? = null
     private var localServer: LocalServer? = null
     private var groupCache: GroupMemberCache? = null
     private var networkListener: NetworkMessageListener? = null
@@ -119,8 +221,22 @@ class AgentSdk internal constructor(
     private var localTcpPort: Int = 0
     private var localUdpPort: Int = 0
     private val groups = mutableMapOf<String, GroupInfo>()
-    private val offloadingSessions = mutableMapOf<String, OffloadingSession>()
+    private var ueInfo: JsonObject? = null
+    private val computeRequests = mutableMapOf<String, JsonObject>()
+    private val computeCreateRequests = mutableMapOf<String, ComputeSessionRequest>()
+    private val computingStatuses = mutableMapOf<String, ComputeSessionStatus>()
+    private val computingStatusesByRequest = mutableMapOf<String, ComputeSessionStatus>()
+    private val computingSessions = mutableMapOf<String, ComputingSession>()
+    private val computingMedia = mutableMapOf<String, MediaConnectionRecord>()
+    private val computingPendingMedia = mutableMapOf<String, PendingMediaConnection>()
+    private val computingMediaLocks = mutableMapOf<String, Mutex>()
+    private val computingClosing = mutableSetOf<String>()
+    private val computingCloseResults = mutableMapOf<Triple<String, String, String>, JsonObject>()
+    private val computingWaiters = mutableMapOf<String, MutableList<CompletableDeferred<ComputingSession>>>()
+    private val computingMutex = Mutex()
+    private val computeJson = Json
 
+    /** Uses [agentRuntimeIp] and [agentRuntimePort] for every control-plane request. */
     suspend fun initialize(
         agentRuntimeIp: String,
         agentRuntimePort: Int,
@@ -130,8 +246,6 @@ class AgentSdk internal constructor(
         masqueServerUrl: String,
         masqueAuthorization: String? = null,
         tunMtu: Int = 1280,
-        computeControlIp: String? = null,
-        computeControlPort: Int? = null,
     ): SdkInitResult {
         if (state != State.NEW && state != State.CLOSED) {
             throw AgentSdkException(ErrorCode.INVALID_ARGUMENT, "SDK is already initialized")
@@ -139,17 +253,6 @@ class AgentSdk internal constructor(
         validatePort(agentRuntimePort, "agentRuntimePort")
         validatePort(localTcpPort, "localTcpPort")
         validatePort(localUdpPort, "localUdpPort")
-        if ((computeControlIp == null) != (computeControlPort == null)) {
-            throw AgentSdkException(
-                ErrorCode.INVALID_ARGUMENT,
-                "computeControlIp and computeControlPort must be configured together",
-                "computeControlIp",
-            )
-        }
-        val normalizedComputeControlIp = computeControlIp?.trim()?.let {
-            requireIpAddress(it, "computeControlIp", ErrorCode.INVALID_ARGUMENT)
-        }
-        computeControlPort?.let { validatePort(it, "computeControlPort") }
         val uri = try {
             URI(masqueServerUrl)
         } catch (error: Exception) {
@@ -175,7 +278,8 @@ class AgentSdk internal constructor(
             runtime = runtimeFactory(agentRuntimeIp, agentRuntimePort)
             this.agentRuntimeIp = agentRuntimeIp
             this.agentRuntimePort = agentRuntimePort
-            this.agentTunIp = runtime!!.getUeAgentIp()
+            ueInfo = runtime!!.getUeInfo()
+            this.agentTunIp = selectDefaultUeAgentIp(checkNotNull(ueInfo))
             this.agentTunCidr = "$agentTunIp/32"
             agentStateStore.load(agentRuntimeIp, agentRuntimePort, agentTunIp).also {
                 agentLifecycleState = it.state
@@ -212,17 +316,11 @@ class AgentSdk internal constructor(
             )
             tunnelController.setTunFdSwapper(masqueTransport::replaceTunFd)
             tunnelController.setTunReplacedListener(::rebindLocalServerAfterTunReplacement)
-            computeRuntime = if (normalizedComputeControlIp != null) {
-                tunnelController.replaceGroupPeers(
-                    COMPUTE_CONTROL_ROUTE_KEY,
-                    setOf(normalizedComputeControlIp),
-                )
-                runtimeFactory(normalizedComputeControlIp, checkNotNull(computeControlPort))
-            } else {
-                runtime
-            }
             state = State.READY
-            runtime!!.startDownlink(::handleRuntimeDownlink)
+            runtime!!.startDownlink(
+                onReconnected = ::recoverComputeStatuses,
+                handler = ::handleRuntimeDownlink,
+            )
             return SdkInitResult(
                 runtimeConnected = true,
                 masqueConnected = masqueTransport.connected,
@@ -300,17 +398,41 @@ class AgentSdk internal constructor(
         messageType: String,
         transactionId: Int,
         payload: JsonObject,
-    ): NetworkMessageAction {
-        if (transactionId < 0) return NetworkMessageAction.REJECT
+    ): JsonObject? {
+        if (transactionId !in 1..255) {
+            return buildJsonObject { put("result", NetworkMessageAction.REJECT.name) }
+        }
         return when {
-            messageType == "ACN_AGENT_GROUPING_INVITATION" ->
-                handleGroupInvitation(payload)
-            messageType == "ACN_AGENT_GROUPING_NOTIFICATION" ->
-                handleGroupConfig(payload)
-            else -> networkListener?.onNetworkMessage(
-                NetworkMessageType.UNKNOWN,
-                payload,
-            ) ?: NetworkMessageAction.REJECT
+            messageType == COMPUTE_CONNECT_CONFIG -> handleComputeConnectConfig(payload)
+            messageType == COMPUTE_SESSION_STATUS -> {
+                handleComputeSessionStatus(payload)
+                null
+            }
+            messageType == COMPUTE_SESSION_CLOSE -> handleComputeSessionClose(payload)
+            messageType == "ACN_AGENT_GROUPING_INVITATION" -> {
+                val action = handleGroupInvitation(payload)
+                buildJsonObject {
+                    val groupInfo = payload["group_info"] as? JsonObject
+                    groupInfo?.stringOrNull("group_id")?.let { put("group_id", it) }
+                    put("result", action.name)
+                }
+            }
+            messageType == "ACN_AGENT_GROUPING_NOTIFICATION" -> {
+                val action = handleGroupConfig(payload)
+                buildJsonObject {
+                    payload.stringOrNull("group_id")?.let { put("group_id", it) }
+                    put("result", action.name)
+                }
+            }
+            else -> buildJsonObject {
+                put(
+                    "result",
+                    (
+                        networkListener?.onNetworkMessage(NetworkMessageType.UNKNOWN, payload)
+                            ?: NetworkMessageAction.REJECT
+                    ).name,
+                )
+            }
         }
     }
 
@@ -769,12 +891,70 @@ class AgentSdk internal constructor(
         }
     }
 
-    suspend fun createOffloadingSession(
-        workloadType: String,
-        sandboxSpec: SandboxSpec,
+    suspend fun createComputingSession(
+        request: ComputeSessionRequest,
         timeoutSeconds: Double = 30.0,
-    ): OffloadingSession {
-        requireReady()
+    ): ComputeSessionStatus {
+        validateComputeRequest(request, ComputeRequestType.CREATE)
+        val context = checkNotNull(request.acnContext)
+        if (profile == null || context.requesterAgentId != profile!!.agentId) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "acn_context.requester_agent_id must match the local Agent",
+                "acn_context.requester_agent_id",
+            )
+        }
+        val snapshot = groupCache?.snapshot(context.groupId)
+        if (snapshot == null || groups[context.groupId]?.status != "ACTIVE") {
+            throw AgentSdkException(
+                ErrorCode.GROUP_NOT_ACTIVE,
+                "Group ${context.groupId} is not ACTIVE",
+                "acn_context.group_id",
+            )
+        }
+        if (!snapshot.membersByAgentId.containsKey(context.targetAgentId)) {
+            throw AgentSdkException(
+                ErrorCode.TARGET_NOT_IN_GROUP,
+                "acn_context.target_agent_id is not in the configured group",
+                "acn_context.target_agent_id",
+            )
+        }
+        return sendComputeRequest(request, timeoutSeconds)
+    }
+
+    suspend fun queryComputingSession(
+        request: ComputeSessionRequest,
+        timeoutSeconds: Double = 30.0,
+    ): ComputeSessionStatus {
+        validateComputeRequest(request, ComputeRequestType.QUERY)
+        return sendComputeRequest(request, timeoutSeconds)
+    }
+
+    suspend fun cancelComputingSession(
+        request: ComputeSessionRequest,
+        timeoutSeconds: Double = 30.0,
+    ): ComputeSessionStatus {
+        validateComputeRequest(request, ComputeRequestType.CANCEL)
+        return sendComputeRequest(request, timeoutSeconds)
+    }
+
+    suspend fun releaseComputingSession(
+        request: ComputeSessionRequest,
+        timeoutSeconds: Double = 30.0,
+    ): ComputeSessionStatus {
+        validateComputeRequest(request, ComputeRequestType.RELEASE)
+        return sendComputeRequest(request, timeoutSeconds)
+    }
+
+    suspend fun startVideoUpload(
+        computeServiceSessionId: String,
+        cameraId: String = "0",
+        width: Int = 1920,
+        height: Int = 1080,
+        fps: Int = 30,
+        bitrateKbps: Int = 4000,
+        timeoutSeconds: Double = 15.0,
+    ): VideoUploadHandle {
         if (timeoutSeconds <= 0.0) {
             throw AgentSdkException(
                 ErrorCode.INVALID_ARGUMENT,
@@ -782,101 +962,15 @@ class AgentSdk internal constructor(
                 "timeoutSeconds",
             )
         }
-        if (workloadType.isBlank()) {
-            throw AgentSdkException(
-                ErrorCode.INVALID_ARGUMENT,
-                "workloadType must be a non-empty string",
-                "workloadType",
-            )
-        }
-        if (sandboxSpec.vcpus <= 0) {
-            throw AgentSdkException(
-                ErrorCode.INVALID_ARGUMENT,
-                "sandboxSpec.vcpus must be greater than zero",
-                "sandboxSpec.vcpus",
-            )
-        }
-        if (sandboxSpec.memoryMb <= 0) {
-            throw AgentSdkException(
-                ErrorCode.INVALID_ARGUMENT,
-                "sandboxSpec.memoryMb must be greater than zero",
-                "sandboxSpec.memoryMb",
-            )
-        }
-        val path = "/compute/v1/offloading-sessions"
-        val response = withTimeout((timeoutSeconds * 1000).toLong()) {
-            requireComputeRuntime().request("POST", path, authenticateControl(path, buildJsonObject {
-                put("request_id", UUID.randomUUID().toString())
-                put("workload_type", workloadType)
-                put("sandbox_spec", buildJsonObject {
-                    put("vcpus", sandboxSpec.vcpus)
-                    put("memory_mb", sandboxSpec.memoryMb)
-                })
-            }))
-        }
-        val sessionId = response.requireRuntimeString("session_id")
-        val producer = parseVideoUploadEndpoint(
-            response["producer"]?.jsonObjectOrNull(),
-            ErrorCode.RUNTIME_REJECTED,
-            "producer",
-        )
-        val processedStream = parseProcessedVideoEndpoint(
-            response["processed_stream"]?.jsonObjectOrNull(),
-            ErrorCode.RUNTIME_REJECTED,
-            "processed_stream",
-        )
-        val session = OffloadingSession(
-            sessionId = sessionId,
-            state = response["state"]?.jsonPrimitive?.contentOrNull ?: "ALLOCATED",
-            expiresAt = response["expires_at"]?.jsonPrimitive?.contentOrNull?.let {
-                try {
-                    Instant.parse(it)
-                } catch (error: Exception) {
-                    throw AgentSdkException(
-                        ErrorCode.RUNTIME_REJECTED,
-                        "Runtime expires_at must be RFC3339",
-                        "expires_at",
-                        cause = error,
-                    )
-                }
-            },
-            producer = producer,
-            processedStream = processedStream,
-        )
-        tunnelController.replaceGroupPeers(
-            offloadingRouteKey(sessionId),
-            offloadingEndpointIps(session),
-        )
-        offloadingSessions[session.sessionId] = session
-        return session
-    }
-
-    suspend fun startVideoUpload(
-        session: OffloadingSession,
-        cameraId: String = "0",
-        width: Int = 1920,
-        height: Int = 1080,
-        fps: Int = 30,
-        bitrateKbps: Int = 4000,
-    ): VideoUploadHandle {
         requireReady()
-        if (session.state in setOf("CLOSED", "FAILED", "STOPPED")) {
+        val session = waitForComputingSession(computeServiceSessionId, timeoutSeconds)
+        if (session.role != ComputeRole.producer) {
             throw AgentSdkException(
-                ErrorCode.OFFLOADING_SESSION_INVALID,
-                "Offloading session ${session.sessionId} is not uploadable in state ${session.state}",
+                ErrorCode.COMPUTING_SESSION_INVALID,
+                "startVideoUpload requires the producer configuration",
+                "role",
             )
         }
-        if (session.producer == null) {
-            throw AgentSdkException(
-                ErrorCode.OFFLOADING_SESSION_INVALID,
-                "Producer endpoint is missing for offloading session ${session.sessionId}",
-            )
-        }
-        tunnelController.replaceGroupPeers(
-            offloadingRouteKey(session.sessionId),
-            offloadingEndpointIps(session),
-        )
-        offloadingSessions[session.sessionId] = session
         listOf(
             "width" to width,
             "height" to height,
@@ -889,22 +983,103 @@ class AgentSdk internal constructor(
                 field,
             )
         }
-        return requireMediaAdapter().startVideoUpload(
-            session,
-            cameraId,
-            width,
-            height,
-            fps,
-            bitrateKbps,
-        ).also {
-            offloadingSessions[session.sessionId] = session.copy(state = "SOURCE_CONNECTED")
+        val adapter = requireMediaAdapter()
+        validateMediaCodec(adapter, session)
+        val lock = computingMutex.withLock {
+            computingMediaLocks.getOrPut(computeServiceSessionId) { Mutex() }
+        }
+        return lock.withLock {
+            computingMutex.withLock { computingMedia[computeServiceSessionId] }
+                ?.let { return@withLock it.managed as VideoUploadHandle }
+            var pending = computingMutex.withLock {
+                computingPendingMedia[computeServiceSessionId]
+            }
+            if (pending == null) {
+                val newlyPrepared = adapter.prepareVideoUpload(
+                    session, cameraId, width, height, fps, bitrateKbps, timeoutSeconds,
+                )
+                try {
+                    validateLocalMediaOffer(session, newlyPrepared.offerSdp)
+                } catch (error: Throwable) {
+                    newlyPrepared.abort()
+                    throw error
+                }
+                pending = PendingMediaConnection(
+                    session,
+                    "media-${session.role.name}-${UUID.randomUUID()}",
+                    newlyPrepared.offerSdp,
+                    newlyPrepared,
+                )
+                computingMutex.withLock {
+                    computingPendingMedia[computeServiceSessionId] = pending
+                }
+            }
+            @Suppress("UNCHECKED_CAST")
+            val prepared = pending.prepared as
+                com.rayneo.agent.sdk.transport.PreparedMediaConnection<VideoUploadHandle>
+            var created: CreatedMediaConnection? = null
+            try {
+                val connection = createMediaConnection(
+                    session, pending.requestId, pending.offerSdp, timeoutSeconds,
+                )
+                created = connection
+                if (computingMutex.withLock { computeServiceSessionId in computingClosing }) {
+                    throw AgentSdkException(
+                        ErrorCode.COMPUTING_SESSION_INVALID,
+                        "computing session closed during media negotiation",
+                    )
+                }
+                installMediaCandidateRoutes(session, connection.answerSdp)
+                val local = prepared.applyAnswer(connection.answerSdp, timeoutSeconds)
+                val managed = ManagedVideoUpload(local) {
+                    closeMediaRecord(
+                        computeServiceSessionId, connection.mediaConnectionId, timeoutSeconds,
+                    )
+                }
+                val stored = computingMutex.withLock {
+                    computingPendingMedia.remove(computeServiceSessionId)
+                    if (computeServiceSessionId in computingClosing) false else {
+                        computingMedia[computeServiceSessionId] = MediaConnectionRecord(
+                            session, connection.requestId, connection.mediaConnectionId, managed,
+                        )
+                        true
+                    }
+                }
+                if (!stored) {
+                    local.stop()
+                    throw AgentSdkException(
+                        ErrorCode.COMPUTING_SESSION_INVALID,
+                        "computing session closed during media negotiation",
+                    )
+                }
+                managed
+            } catch (error: Throwable) {
+                val preservePending = created == null &&
+                    error is AgentSdkException && error.retryable &&
+                    computingMutex.withLock { computeServiceSessionId !in computingClosing }
+                if (preservePending) throw error
+                computingMutex.withLock { computingPendingMedia.remove(computeServiceSessionId) }
+                withContext(NonCancellable) {
+                    runCatching { prepared.abort() }
+                    created?.let {
+                        runCatching {
+                            deleteMediaConnection(session, it.mediaConnectionId, timeoutSeconds)
+                        }
+                        if (computingMutex.withLock {
+                                computeServiceSessionId !in computingClosing
+                            }
+                        ) runCatching { replaceComputeRoutes(session) }
+                    }
+                }
+                throw error
+            }
         }
     }
 
     suspend fun getProcessedVideoStream(
-        session: OffloadingSession,
-        timeoutSeconds: Double = 10.0,
-    ): VideoTrack {
+        computeServiceSessionId: String,
+        timeoutSeconds: Double = 15.0,
+    ): ProcessedVideoStream {
         if (timeoutSeconds <= 0.0) {
             throw AgentSdkException(
                 ErrorCode.INVALID_ARGUMENT,
@@ -913,27 +1088,1490 @@ class AgentSdk internal constructor(
             )
         }
         requireReady()
-        if (session.state in setOf("CLOSED", "FAILED", "STOPPED")) {
+        val session = waitForComputingSession(computeServiceSessionId, timeoutSeconds)
+        if (session.role != ComputeRole.consumer) {
             throw AgentSdkException(
-                ErrorCode.OFFLOADING_SESSION_INVALID,
-                "Offloading session ${session.sessionId} is not streamable in state ${session.state}",
+                ErrorCode.COMPUTING_SESSION_INVALID,
+                "getProcessedVideoStream requires the consumer configuration",
+                "role",
             )
         }
-        if (session.processedStream == null) {
-            throw AgentSdkException(
-                ErrorCode.OFFLOADING_SESSION_INVALID,
-                "Processed stream endpoint is missing for offloading session ${session.sessionId}",
-            )
+        val adapter = requireMediaAdapter()
+        validateMediaCodec(adapter, session)
+        val lock = computingMutex.withLock {
+            computingMediaLocks.getOrPut(computeServiceSessionId) { Mutex() }
         }
-        tunnelController.replaceGroupPeers(
-            offloadingRouteKey(session.sessionId),
-            offloadingEndpointIps(session),
-        )
-        offloadingSessions[session.sessionId] = session
-        return withTimeout((timeoutSeconds * 1000).toLong()) {
-            requireMediaAdapter().getProcessedVideoTrack(session, timeoutSeconds)
+        return lock.withLock {
+                computingMutex.withLock { computingMedia[computeServiceSessionId] }
+                    ?.let { return@withLock it.managed as ProcessedVideoStream }
+                var pending = computingMutex.withLock {
+                    computingPendingMedia[computeServiceSessionId]
+                }
+                if (pending == null) {
+                    val newlyPrepared = adapter.prepareProcessedVideo(session, timeoutSeconds)
+                    try {
+                        validateLocalMediaOffer(session, newlyPrepared.offerSdp)
+                    } catch (error: Throwable) {
+                        newlyPrepared.abort()
+                        throw error
+                    }
+                    pending = PendingMediaConnection(
+                        session,
+                        "media-${session.role.name}-${UUID.randomUUID()}",
+                        newlyPrepared.offerSdp,
+                        newlyPrepared,
+                    )
+                    computingMutex.withLock {
+                        computingPendingMedia[computeServiceSessionId] = pending
+                    }
+                }
+                @Suppress("UNCHECKED_CAST")
+                val prepared = pending.prepared as
+                    com.rayneo.agent.sdk.transport.PreparedMediaConnection<LocalProcessedVideo>
+                var created: CreatedMediaConnection? = null
+                try {
+                    val connection = createMediaConnection(
+                        session, pending.requestId, pending.offerSdp, timeoutSeconds,
+                    )
+                    created = connection
+                    if (computingMutex.withLock { computeServiceSessionId in computingClosing }) {
+                        throw AgentSdkException(
+                            ErrorCode.COMPUTING_SESSION_INVALID,
+                            "computing session closed during media negotiation",
+                        )
+                    }
+                    installMediaCandidateRoutes(session, connection.answerSdp)
+                    val local = prepared.applyAnswer(connection.answerSdp, timeoutSeconds)
+                    val managed = ManagedProcessedVideoStream(local) {
+                        closeMediaRecord(
+                            computeServiceSessionId, connection.mediaConnectionId, timeoutSeconds,
+                        )
+                    }
+                    val stored = computingMutex.withLock {
+                        computingPendingMedia.remove(computeServiceSessionId)
+                        if (computeServiceSessionId in computingClosing) false else {
+                            computingMedia[computeServiceSessionId] = MediaConnectionRecord(
+                                session, connection.requestId, connection.mediaConnectionId, managed,
+                            )
+                            true
+                        }
+                    }
+                    if (!stored) {
+                        local.close()
+                        throw AgentSdkException(
+                            ErrorCode.COMPUTING_SESSION_INVALID,
+                            "computing session closed during media negotiation",
+                        )
+                    }
+                    managed
+                } catch (error: Throwable) {
+                    val preservePending = created == null &&
+                        error is AgentSdkException && error.retryable &&
+                        computingMutex.withLock { computeServiceSessionId !in computingClosing }
+                    if (preservePending) throw error
+                    computingMutex.withLock { computingPendingMedia.remove(computeServiceSessionId) }
+                    withContext(NonCancellable) {
+                        runCatching { prepared.abort() }
+                        created?.let {
+                            runCatching {
+                                deleteMediaConnection(session, it.mediaConnectionId, timeoutSeconds)
+                            }
+                            if (computingMutex.withLock {
+                                    computeServiceSessionId !in computingClosing
+                                }
+                            ) runCatching { replaceComputeRoutes(session) }
+                        }
+                    }
+                    throw error
+                }
         }
     }
+
+    suspend fun updateRecognitionTarget(
+        computeServiceSessionId: String,
+        requestId: String,
+        text: String,
+        language: String? = null,
+        timeoutSeconds: Double = 15.0,
+    ): RecognitionTargetStatus {
+        validateSandboxTimeout(timeoutSeconds)
+        validateComputeRequestId(requestId, "request_id")
+        requireComputeString(text, "text")
+        language?.let { requireComputeString(it, "language") }
+        val session = waitForComputingSession(computeServiceSessionId, timeoutSeconds)
+        requireConsumerSession(session, "updateRecognitionTarget")
+        val context = mediaContext(session)
+        val body = buildJsonObject {
+            put("request_id", requestId)
+            put("computing_context", context)
+            put("input", buildJsonObject {
+                put("type", "TEXT")
+                put("text", text)
+                language?.let { put("language", it) }
+            })
+        }
+        val response = sandboxTransport.requestWithStatus(
+            "PUT",
+            recognitionTargetUrl(session),
+            body,
+            timeoutSeconds,
+            session.networkBinding.ueIpv4,
+        )
+        return parseRecognitionTargetResponse(response, session, requestId)
+    }
+
+    suspend fun getRecognitionTarget(
+        computeServiceSessionId: String,
+        timeoutSeconds: Double = 15.0,
+    ): RecognitionTargetStatus {
+        validateSandboxTimeout(timeoutSeconds)
+        val session = waitForComputingSession(computeServiceSessionId, timeoutSeconds)
+        requireConsumerSession(session, "getRecognitionTarget")
+        val response = sandboxTransport.requestWithStatus(
+            "GET",
+            recognitionTargetUrl(session),
+            null,
+            timeoutSeconds,
+            session.networkBinding.ueIpv4,
+        )
+        return parseRecognitionTargetResponse(response, session)
+    }
+
+    suspend fun createControlAction(
+        computeServiceSessionId: String,
+        request: ControlActionRequest,
+        timeoutSeconds: Double = 15.0,
+    ): ControlActionStatus {
+        validateSandboxTimeout(timeoutSeconds)
+        validateControlActionRequest(request)
+        val session = waitForComputingSession(computeServiceSessionId, timeoutSeconds)
+        requireConsumerSession(session, "createControlAction")
+        val body = buildJsonObject {
+            put("request_id", request.requestId)
+            put("computing_context", mediaContext(session))
+            request.action?.let { put("action", it.name) }
+            put("input", buildJsonObject {
+                put("type", request.inputType.name)
+                if (request.inputType == ControlInputType.TEXT) {
+                    put("text", checkNotNull(request.text))
+                    request.language?.let { put("language", it) }
+                }
+            })
+            request.parameters?.let { put("parameters", it) }
+            request.target?.let { target ->
+                put("target", buildJsonObject {
+                    put("role", target.role.name)
+                    target.agentId?.let { put("agent_id", it) }
+                })
+            }
+        }
+        val response = sandboxTransport.requestWithStatus(
+            "POST",
+            controlActionsUrl(session),
+            body,
+            timeoutSeconds,
+            session.networkBinding.ueIpv4,
+        )
+        return parseControlActionResponse(
+            response = response,
+            session = session,
+            expectedHttpStatus = 202,
+            expectedRequestId = request.requestId,
+            requireContext = true,
+            requireNormalized = request.inputType == ControlInputType.TEXT,
+        )
+    }
+
+    suspend fun getControlAction(
+        computeServiceSessionId: String,
+        actionId: String,
+        timeoutSeconds: Double = 15.0,
+    ): ControlActionStatus {
+        validateSandboxTimeout(timeoutSeconds)
+        val normalizedActionId = requireComputeString(actionId, "action_id")
+        val session = waitForComputingSession(computeServiceSessionId, timeoutSeconds)
+        requireConsumerSession(session, "getControlAction")
+        val encodedActionId = URI(null, null, "/$normalizedActionId", null)
+            .rawPath.removePrefix("/")
+        val response = sandboxTransport.requestWithStatus(
+            "GET",
+            "${controlActionsUrl(session).trimEnd('/')}/$encodedActionId",
+            null,
+            timeoutSeconds,
+            session.networkBinding.ueIpv4,
+        )
+        return parseControlActionResponse(
+            response = response,
+            session = session,
+            expectedHttpStatus = 200,
+            expectedActionId = normalizedActionId,
+        )
+    }
+
+    private fun validateControlActionRequest(request: ControlActionRequest) {
+        validateComputeRequestId(request.requestId, "request_id")
+        if (request.inputType == ControlInputType.TEXT) {
+            requireComputeString(request.text, "text")
+            request.language?.let { requireComputeString(it, "language") }
+            if (request.parameters != null) {
+                throw AgentSdkException(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "TEXT control input must not contain parameters",
+                    "parameters",
+                )
+            }
+        } else {
+            if (request.text != null || request.language != null) {
+                throw AgentSdkException(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "STRUCTURED control input must not contain text or language",
+                    "text",
+                )
+            }
+            if (request.action == null) {
+                throw AgentSdkException(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "STRUCTURED control input requires action",
+                    "action",
+                )
+            }
+            if (request.parameters == null) {
+                throw AgentSdkException(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "STRUCTURED control input requires a parameters object",
+                    "parameters",
+                )
+            }
+        }
+        request.target?.let { target ->
+            if (target.role == ControlTargetRole.producer) {
+                requireComputeString(target.agentId, "target.agent_id")
+            } else {
+                target.agentId?.let { requireComputeString(it, "target.agent_id") }
+            }
+        }
+    }
+
+    private fun parseControlActionResponse(
+        response: com.rayneo.agent.sdk.transport.RuntimeHttpResponse,
+        session: ComputingSession,
+        expectedHttpStatus: Int,
+        expectedRequestId: String? = null,
+        expectedActionId: String? = null,
+        requireContext: Boolean = false,
+        requireNormalized: Boolean = false,
+    ): ControlActionStatus {
+        if (response.statusCode != expectedHttpStatus) {
+            val error = response.body["error"] as? JsonObject
+            throw AgentSdkException(
+                ErrorCode.SANDBOX_REJECTED,
+                error?.stringOrNull("message")
+                    ?: "Sandbox returned HTTP ${response.statusCode}",
+                retryable = response.statusCode >= 500,
+            )
+        }
+        val requestId = response.body.stringOrNull("request_id")
+            ?.takeIf(String::isNotBlank)
+            ?: invalidControlResponse("request_id must be a non-empty string", "request_id")
+        if (expectedRequestId != null && requestId != expectedRequestId) {
+            invalidControlResponse(
+                "response request_id does not match the control request",
+                "request_id",
+            )
+        }
+        val actionId = response.body.stringOrNull("action_id")
+            ?.takeIf(String::isNotBlank)
+            ?: invalidControlResponse("action_id must be a non-empty string", "action_id")
+        if (expectedActionId != null && actionId != expectedActionId) {
+            invalidControlResponse("response action_id does not match the query", "action_id")
+        }
+        val rawContext = response.body["computing_context"]
+        if (requireContext && rawContext == null) {
+            invalidControlResponse("response computing_context is required", "computing_context")
+        }
+        if (rawContext != null && rawContext != mediaContext(session)) {
+            invalidControlResponse(
+                "response computing_context does not match C-02",
+                "computing_context",
+            )
+        }
+        val status = response.body.stringOrNull("status")
+            ?.takeIf { it in CONTROL_ACTION_STATUSES }
+            ?: invalidControlResponse("status is not a defined control action status", "status")
+        val cause = response.body.stringOrNull("cause")
+            ?: invalidControlResponse("cause must be a string", "cause")
+        val normalizedAction = response.body.stringOrNull("normalized_action")?.let { value ->
+            runCatching { ControlAction.valueOf(value) }.getOrElse {
+                invalidControlResponse(
+                    "normalized_action is not a defined action",
+                    "normalized_action",
+                )
+            }
+        }
+        val normalizedParameters = response.body["normalized_parameters"]?.let {
+            it as? JsonObject
+                ?: invalidControlResponse(
+                    "normalized_parameters must be an object",
+                    "normalized_parameters",
+                )
+        }
+        if (requireNormalized && (normalizedAction == null || normalizedParameters == null)) {
+            invalidControlResponse(
+                "TEXT control response requires normalized_action and normalized_parameters",
+                "normalized_action",
+            )
+        }
+        val result = response.body["result"]?.let {
+            it as? JsonObject ?: invalidControlResponse("result must be an object", "result")
+        }
+        val context = if (rawContext == null) null else ComputingContext(
+            computeServiceSessionId = session.computeServiceSessionId,
+            computeInstanceId = session.computeInstanceId,
+            bindingRef = session.bindingRef,
+            role = session.role,
+            agentId = session.receiverAgentId,
+        )
+        return ControlActionStatus(
+            requestId = requestId,
+            actionId = actionId,
+            status = status,
+            cause = cause,
+            computingContext = context,
+            normalizedAction = normalizedAction,
+            normalizedParameters = normalizedParameters,
+            result = result,
+        )
+    }
+
+    private fun invalidControlResponse(message: String, field: String): Nothing =
+        throw AgentSdkException(ErrorCode.SANDBOX_REJECTED, message, field)
+
+    private fun validateSandboxTimeout(timeoutSeconds: Double) {
+        if (timeoutSeconds <= 0.0) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "timeoutSeconds must be greater than zero",
+                "timeoutSeconds",
+            )
+        }
+    }
+
+    private fun requireConsumerSession(session: ComputingSession, operation: String) {
+        if (session.role != ComputeRole.consumer) {
+            throw AgentSdkException(
+                ErrorCode.COMPUTING_SESSION_INVALID,
+                "$operation requires the consumer configuration",
+                "role",
+            )
+        }
+    }
+
+    private fun parseRecognitionTargetResponse(
+        response: com.rayneo.agent.sdk.transport.RuntimeHttpResponse,
+        session: ComputingSession,
+        expectedRequestId: String? = null,
+    ): RecognitionTargetStatus {
+        if (response.statusCode != 200) {
+            val error = response.body["error"] as? JsonObject
+            throw AgentSdkException(
+                ErrorCode.SANDBOX_REJECTED,
+                error?.stringOrNull("message")
+                    ?: "Sandbox returned HTTP ${response.statusCode}",
+                retryable = response.statusCode >= 500,
+            )
+        }
+        val requestId = response.body.stringOrNull("request_id")
+            ?.takeIf(String::isNotBlank)
+            ?: invalidRecognitionResponse("request_id must be a non-empty string", "request_id")
+        if (expectedRequestId != null && requestId != expectedRequestId) {
+            invalidRecognitionResponse(
+                "response request_id does not match the recognition request",
+                "request_id",
+            )
+        }
+        if (response.body["computing_context"] != mediaContext(session)) {
+            invalidRecognitionResponse(
+                "response computing_context does not match C-02",
+                "computing_context",
+            )
+        }
+        if (response.body.stringOrNull("status") != "APPLIED") {
+            invalidRecognitionResponse("recognition target status must be APPLIED", "status")
+        }
+        val revision = response.body.stringOrNull("target_revision")
+            ?.takeIf { it.toULongOrNull() != null }
+            ?: invalidRecognitionResponse(
+                "target_revision must be a uint64 decimal string",
+                "target_revision",
+            )
+        val target = response.body["target"] as? JsonObject
+            ?: invalidRecognitionResponse("target must be an object", "target")
+        val label = target.stringOrNull("label")?.takeIf(String::isNotBlank)
+            ?: invalidRecognitionResponse("target.label must be a non-empty string", "target.label")
+        val prompt = target.stringOrNull("prompt")?.takeIf(String::isNotBlank)
+            ?: invalidRecognitionResponse(
+                "target.prompt must be a non-empty string",
+                "target.prompt",
+            )
+        return RecognitionTargetStatus(
+            requestId = requestId,
+            computingContext = ComputingContext(
+                computeServiceSessionId = session.computeServiceSessionId,
+                computeInstanceId = session.computeInstanceId,
+                bindingRef = session.bindingRef,
+                role = session.role,
+                agentId = session.receiverAgentId,
+            ),
+            status = "APPLIED",
+            targetRevision = revision,
+            target = RecognitionTarget(label, prompt),
+        )
+    }
+
+    private fun invalidRecognitionResponse(message: String, field: String): Nothing =
+        throw AgentSdkException(ErrorCode.SANDBOX_REJECTED, message, field)
+
+    private fun validateMediaCodec(adapter: MediaOffloadAdapter, session: ComputingSession) {
+        val codec = session.connectionParameters.videoCodec ?: return
+        if (!adapter.supportsVideoCodec(codec)) {
+            throw AgentSdkException(
+                ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                "required video codec is not supported: $codec",
+                "connection_parameters.video_codec",
+            )
+        }
+    }
+
+    private fun mediaContext(session: ComputingSession): JsonObject = buildJsonObject {
+        put("compute_service_session_id", session.computeServiceSessionId)
+        put("compute_instance_id", session.computeInstanceId)
+        put("binding_ref", session.bindingRef)
+        put("role", session.role.name)
+        put("agent_id", session.receiverAgentId)
+    }
+
+    private suspend fun createMediaConnection(
+        session: ComputingSession,
+        requestId: String,
+        offerSdp: String,
+        timeoutSeconds: Double,
+    ): CreatedMediaConnection {
+        val context = mediaContext(session)
+        val body = buildJsonObject {
+            put("request_id", requestId)
+            put("computing_context", context)
+            put("offer", buildJsonObject {
+                put("type", "offer")
+                put("sdp", offerSdp)
+            })
+        }
+        var response: com.rayneo.agent.sdk.transport.RuntimeHttpResponse? = null
+        for (attempt in 0..1) {
+            try {
+                response = sandboxTransport.requestWithStatus(
+                    "POST", mediaConnectionsUrl(session), body, timeoutSeconds,
+                    session.networkBinding.ueIpv4,
+                )
+                break
+            } catch (error: AgentSdkException) {
+                if (attempt == 1 || !error.retryable) throw error
+            }
+        }
+        val actual = checkNotNull(response)
+        if (actual.statusCode != 201) {
+            val error = actual.body["error"] as? JsonObject
+            throw AgentSdkException(
+                ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                error?.stringOrNull("message")
+                    ?: "Sandbox returned HTTP ${actual.statusCode}",
+                retryable = actual.statusCode >= 500,
+            )
+        }
+        val rawConnectionId = actual.body.stringOrNull("media_connection_id")
+        val connectionId: String
+        val answerSdp: String
+        try {
+            if (actual.body.stringOrNull("request_id") != requestId) {
+                invalidMediaResponse("response request_id does not match the request")
+            }
+            if (actual.body["computing_context"] != context) {
+                invalidMediaResponse("response computing_context does not match C-02")
+            }
+            connectionId = rawConnectionId
+                ?: invalidMediaResponse("media_connection_id must be a non-empty string")
+            val answer = actual.body["answer"] as? JsonObject
+                ?: invalidMediaResponse("answer must be an object")
+            if (answer.stringOrNull("type") != "answer") {
+                invalidMediaResponse("answer.type must be answer")
+            }
+            answerSdp = answer.stringOrNull("sdp")
+                ?: invalidMediaResponse("answer.sdp must be a non-empty string")
+        } catch (error: AgentSdkException) {
+            rawConnectionId?.let {
+                runCatching { deleteMediaConnection(session, it, timeoutSeconds) }
+            }
+            throw error
+        }
+        return CreatedMediaConnection(requestId, connectionId, answerSdp)
+    }
+
+    private fun invalidMediaResponse(message: String): Nothing =
+        throw AgentSdkException(ErrorCode.MEDIA_NEGOTIATION_FAILED, message)
+
+    private fun validateLocalMediaOffer(session: ComputingSession, offerSdp: String) {
+        val expected = if (session.role == ComputeRole.producer) "a=sendonly" else "a=recvonly"
+        if (offerSdp.lineSequence().none { it.trimEnd('\r') == expected }) {
+            invalidMediaResponse("local WebRTC Offer must contain $expected")
+        }
+        val all = candidateIpv4s(offerSdp)
+        if (session.networkBinding.ueIpv4 !in all) {
+            invalidMediaResponse(
+                "local WebRTC Offer has no ICE candidate for the C-02 UE IPv4 address",
+            )
+        }
+        if (candidateIpv4s(offerSdp, hostOnly = true) != setOf(session.networkBinding.ueIpv4)) {
+            invalidMediaResponse(
+                "local WebRTC Offer contains a host candidate outside the C-02 user plane",
+            )
+        }
+    }
+
+    private fun candidateIpv4s(sdp: String, hostOnly: Boolean = false): Set<String> =
+        sdp.lineSequence().mapNotNull { raw ->
+            val line = raw.trimEnd('\r')
+            if (!line.startsWith("a=candidate:")) return@mapNotNull null
+            val parts = line.split(Regex("\\s+"))
+            if (parts.size < 6 || (hostOnly && (parts.size < 8 || parts[7].lowercase() != "host"))) {
+                return@mapNotNull null
+            }
+            val octets = parts[4].split('.')
+            if (octets.size != 4) return@mapNotNull null
+            val numbers = octets.map { it.toIntOrNull() ?: return@mapNotNull null }
+            if (numbers.any { it !in 0..255 }) return@mapNotNull null
+            numbers.joinToString(".")
+        }.toSet()
+
+    private suspend fun installMediaCandidateRoutes(session: ComputingSession, answerSdp: String) {
+        val expected = if (session.role == ComputeRole.producer) "a=recvonly" else "a=sendonly"
+        if (answerSdp.lineSequence().none { it.trimEnd('\r') == expected }) {
+            invalidMediaResponse("Sandbox Answer must contain $expected")
+        }
+        session.connectionParameters.videoCodec?.let { codec ->
+            val wanted = codec.removePrefix("video/")
+            val negotiated = answerSdp.lineSequence().mapNotNull { raw ->
+                val line = raw.trimEnd('\r')
+                if (!line.startsWith("a=rtpmap:")) null
+                else line.substringAfter(' ', "").substringBefore('/').takeIf(String::isNotBlank)
+            }.toSet()
+            if (negotiated.none { it.equals(wanted, ignoreCase = true) }) {
+                invalidMediaResponse(
+                    "Sandbox Answer did not negotiate required video codec $codec",
+                )
+            }
+        }
+        val candidates = candidateIpv4s(answerSdp)
+        if (candidates.isEmpty()) invalidMediaResponse("Sandbox Answer has no IPv4 ICE candidate")
+        replaceComputeRoutes(session, candidates)
+    }
+
+    private suspend fun closeMediaRecord(
+        sessionId: String,
+        connectionId: String,
+        timeoutSeconds: Double,
+    ) {
+        val record = computingMutex.withLock {
+            computingMedia[sessionId]?.takeIf { it.mediaConnectionId == connectionId }
+        }
+        val session = record?.session
+            ?: computingMutex.withLock { computingSessions[sessionId] }
+            ?: return
+        try {
+            deleteMediaConnection(session, connectionId, timeoutSeconds)
+            computingMutex.withLock {
+                if (computingMedia[sessionId]?.mediaConnectionId == connectionId) {
+                    computingMedia.remove(sessionId)
+                }
+            }
+        } finally {
+            if (computingMutex.withLock { sessionId !in computingClosing }) {
+                replaceComputeRoutes(session)
+            }
+        }
+    }
+
+    private suspend fun deleteMediaConnection(
+        session: ComputingSession,
+        connectionId: String,
+        timeoutSeconds: Double,
+    ) {
+        val encoded = URI(null, null, "/$connectionId", null).rawPath.removePrefix("/")
+        val url = "${mediaConnectionsUrl(session).trimEnd('/')}/$encoded"
+        val response = sandboxTransport.requestWithStatus(
+            "DELETE", url, null, timeoutSeconds, session.networkBinding.ueIpv4,
+        )
+        if (response.statusCode != 204) {
+            throw AgentSdkException(
+                ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                "Sandbox returned HTTP ${response.statusCode} for media DELETE",
+                retryable = response.statusCode >= 500,
+            )
+        }
+    }
+
+    private fun validateComputeRequest(
+        request: ComputeSessionRequest,
+        expectedType: ComputeRequestType,
+    ) {
+        requireReady()
+        if (request.messageType != "COMPUTE_SESSION_REQUEST") {
+            invalidCompute("message_type must be COMPUTE_SESSION_REQUEST", "message_type")
+        }
+        if (request.requestType != expectedType) {
+            invalidCompute("request_type must be ${expectedType.name}", "request_type")
+        }
+        validateComputeRequestId(request.requestId, "request_id")
+        if (expectedType == ComputeRequestType.CREATE) {
+            val context = request.acnContext
+                ?: invalidCompute("acn_context is required for CREATE", "acn_context")
+            requireComputeString(context.groupId, "acn_context.group_id")
+            requireComputeString(context.requesterAgentId, "acn_context.requester_agent_id")
+            requireComputeString(context.targetAgentId, "acn_context.target_agent_id")
+            request.uiLocale?.let { requireComputeString(it, "ui_locale") }
+            if (request.computeServiceSessionId != null || request.targetRequestId != null) {
+                invalidCompute("CREATE must not contain a target session or request")
+            }
+            when (request.inputFormat) {
+                ComputeInputFormat.NATURAL_LANGUAGE -> {
+                    requireComputeString(request.text, "text")
+                    if (request.constraints != null) {
+                        invalidCompute(
+                            "Natural-language CREATE must not contain constraints",
+                            "constraints",
+                        )
+                    }
+                }
+                ComputeInputFormat.STRUCTURED -> {
+                    if (request.text != null) {
+                        invalidCompute("Structured CREATE must not contain text", "text")
+                    }
+                    validateComputeConstraints(request.constraints)
+                }
+            }
+            return
+        }
+        if (request.inputFormat != ComputeInputFormat.STRUCTURED) {
+            invalidCompute(
+                "QUERY, CANCEL and RELEASE require input_format=STRUCTURED",
+                "input_format",
+            )
+        }
+        if (
+            request.acnContext != null || request.text != null ||
+            request.constraints != null || request.uiLocale != null
+        ) {
+            invalidCompute("Non-CREATE requests must not contain CREATE fields")
+        }
+        val hasSession = request.computeServiceSessionId != null
+        val hasTargetRequest = request.targetRequestId != null
+        if (expectedType == ComputeRequestType.QUERY || expectedType == ComputeRequestType.CANCEL) {
+            if (hasSession == hasTargetRequest) {
+                invalidCompute(
+                    "Exactly one of compute_service_session_id and target_request_id is required",
+                )
+            }
+        } else if (!hasSession || hasTargetRequest) {
+            invalidCompute(
+                "RELEASE requires compute_service_session_id only",
+                "compute_service_session_id",
+            )
+        }
+        request.computeServiceSessionId?.let {
+            requireComputeString(it, "compute_service_session_id")
+        }
+        request.targetRequestId?.let { validateComputeRequestId(it, "target_request_id") }
+    }
+
+    private fun validateComputeConstraints(constraints: ComputeConstraints?) {
+        val value = constraints
+            ?: invalidCompute("constraints are required for structured CREATE", "constraints")
+        requireComputeString(value.capabilityId, "constraints.capability_id")
+        listOf(
+            "constraints.api_version" to value.apiVersion,
+            "constraints.image_id" to value.imageId,
+            "constraints.dnn" to value.dnn,
+            "constraints.snssai" to value.snssai,
+            "constraints.placement_region" to value.placementRegion,
+            "constraints.data_residency_region" to value.dataResidencyRegion,
+        ).forEach { (field, item) -> item?.let { requireComputeString(it, field) } }
+        value.resources?.let { resources ->
+            listOf(
+                "cpu_millicores" to resources.cpuMillicores,
+                "memory_mib" to resources.memoryMib,
+                "gpu_count" to resources.gpuCount,
+            ).forEach { (field, item) ->
+                if (item != null && item !in 0..UINT32_MAX) {
+                    invalidCompute(
+                        "constraints.resources.$field must be uint32",
+                        "constraints.resources.$field",
+                    )
+                }
+            }
+            resources.gpuModel?.let {
+                requireComputeString(it, "constraints.resources.gpu_model")
+            }
+        }
+        value.maxDurationMs?.let {
+            if (it !in 0..UINT32_MAX) {
+                invalidCompute("constraints.max_duration_ms must be uint32", "constraints.max_duration_ms")
+            }
+        }
+    }
+
+    private fun validateComputeRequestId(value: String, field: String) {
+        if (value.toByteArray(Charsets.UTF_8).size !in 1..128) {
+            invalidCompute("$field must contain 1..128 UTF-8 bytes", field)
+        }
+    }
+
+    private fun invalidCompute(message: String, field: String? = null): Nothing =
+        throw AgentSdkException(ErrorCode.INVALID_ARGUMENT, message, field)
+
+    private fun requireComputeString(value: String?, field: String): String =
+        value?.takeIf(String::isNotBlank)
+            ?: invalidCompute("$field must be a non-empty string", field)
+
+    private suspend fun computePreflight() {
+        val runtime = checkNotNull(runtime)
+        if (runtime.getAcnStatus()["ready"]?.jsonPrimitive?.booleanOrNull != true) {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "GET /v1/acn/status did not report ready=true (nas_not_ready)",
+                retryable = true,
+            )
+        }
+        val snapshot = runtime.getUeInfo()
+        selectDefaultUeAgentIp(snapshot)
+        val sessions = snapshot["pdu_sessions"] as? JsonArray
+        if (sessions == null || sessions.none { element ->
+                val item = element as? JsonObject
+                item?.stringOrNull("state") == "active" && item.stringOrNull("type") == "IPv4"
+            }
+        ) {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "No active IPv4 PDU Session is available (pdu-session-required)",
+            )
+        }
+        val accesses = snapshot["data_plane_accesses"] as? JsonArray
+        if (accesses == null || accesses.none { element ->
+                val item = element as? JsonObject
+                item?.stringOrNull("access_type") == "HTTP3_CONNECT_IP" &&
+                    item.stringOrNull("session_selection") == "EXACT_PDU_SESSION_ID"
+            }
+        ) {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime provides no exact HTTP3 CONNECT-IP data-plane access " +
+                    "(data-plane-access-unsupported)",
+            )
+        }
+        ueInfo = snapshot
+    }
+
+    private suspend fun sendComputeRequest(
+        request: ComputeSessionRequest,
+        timeoutSeconds: Double,
+    ): ComputeSessionStatus {
+        if (timeoutSeconds <= 0.0) {
+            invalidCompute("timeoutSeconds must be greater than zero", "timeoutSeconds")
+        }
+        val body = computeJson.encodeToJsonElement(request).jsonObject
+        computingMutex.withLock {
+            val previous = computeRequests[request.requestId]
+            if (previous != null && previous != body) {
+                invalidCompute(
+                    "request_id was already used with different computing content",
+                    "request_id",
+                )
+            }
+            computeRequests[request.requestId] = body
+        }
+        computePreflight()
+        if (request.requestType == ComputeRequestType.CREATE) {
+            computingMutex.withLock { computeCreateRequests[request.requestId] = request }
+        }
+        val activeRuntime = checkNotNull(runtime)
+        val response = withTimeout((timeoutSeconds * 1000).toLong()) {
+            activeRuntime.requestWithStatus("POST", COMPUTING_SESSION_REQUEST_PATH, body)
+        }
+        if (response.body.stringOrNull("message_type") == COMPUTE_SESSION_STATUS) {
+            val allowedStatus = when (request.requestType) {
+                ComputeRequestType.CREATE -> setOf(202)
+                ComputeRequestType.QUERY -> setOf(200)
+                ComputeRequestType.CANCEL, ComputeRequestType.RELEASE -> setOf(200, 202)
+            }
+            if (response.statusCode !in allowedStatus && response.statusCode !in 400..499) {
+                throw AgentSdkException(
+                    ErrorCode.RUNTIME_REJECTED,
+                    "Runtime returned invalid HTTP ${response.statusCode} for ${request.requestType}",
+                )
+            }
+            return parseComputeStatus(response.body).also {
+                if (it.requestId != request.requestId) {
+                    throw AgentSdkException(
+                        ErrorCode.RUNTIME_REJECTED,
+                        "C-04 request_id does not match the computing request",
+                        "request_id",
+                    )
+                }
+                rememberComputeStatus(it)
+            }
+        }
+        val error = response.body["error"] as? JsonObject
+        if (error != null) {
+            val code = error.stringOrNull("code") ?: "invalid-response"
+            val message = error.stringOrNull("message")
+                ?: "Runtime rejected computing request: $code"
+            throw AgentSdkException(
+                if (response.statusCode == 504) ErrorCode.TIMEOUT else ErrorCode.RUNTIME_REJECTED,
+                message,
+                retryable = response.statusCode in setOf(503, 504),
+            )
+        }
+        throw AgentSdkException(
+            ErrorCode.RUNTIME_REJECTED,
+            "Runtime returned HTTP ${response.statusCode} without C-04 or error",
+        )
+    }
+
+    private fun parseComputeStatus(
+        payload: JsonObject,
+        messageTypeInPayload: Boolean = true,
+    ): ComputeSessionStatus {
+        if (messageTypeInPayload && payload.stringOrNull("message_type") != COMPUTE_SESSION_STATUS) {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "message_type must be COMPUTE_SESSION_STATUS",
+                "message_type",
+            )
+        }
+        val requestId = payload.requireRuntimeString("request_id")
+        val status = payload.requireRuntimeString("status")
+        if (status !in COMPUTE_STATUSES) {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "status is not a defined computing session status",
+                "status",
+            )
+        }
+        val cause = payload.optionalRuntimeString("cause")
+            ?: throw AgentSdkException(ErrorCode.RUNTIME_REJECTED, "cause must be a string", "cause")
+        val sessionId = payload.optionalRuntimeString("compute_service_session_id")
+        val revision = payload.optionalRuntimeString("status_revision")
+        if (sessionId != null) {
+            if (sessionId.isBlank() || revision?.toULongOrNull() == null) {
+                throw AgentSdkException(
+                    ErrorCode.RUNTIME_REJECTED,
+                    "Existing sessions require a uint64 decimal status_revision",
+                    "status_revision",
+                )
+            }
+        } else if (revision != null) {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "status_revision requires compute_service_session_id",
+                "status_revision",
+            )
+        }
+        val rawMissingFields = payload["missing_fields"]
+        if (rawMissingFields != null && rawMissingFields !is JsonArray) {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "missing_fields must be an array of strings",
+                "missing_fields",
+            )
+        }
+        val missingFields = (rawMissingFields as? JsonArray).orEmpty().map {
+            (it as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)
+                ?.contentOrNull?.takeIf(String::isNotEmpty)
+                ?: throw AgentSdkException(
+                    ErrorCode.RUNTIME_REJECTED,
+                    "missing_fields must contain strings",
+                    "missing_fields",
+                )
+        }
+        if (status == "CLARIFICATION_REQUIRED" && rawMissingFields == null) {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "CLARIFICATION_REQUIRED requires missing_fields",
+                "missing_fields",
+            )
+        }
+        val result = payload["result"] as? JsonObject
+        if (payload.containsKey("result") && result == null) {
+            throw AgentSdkException(ErrorCode.RUNTIME_REJECTED, "result must be an object", "result")
+        }
+        return ComputeSessionStatus(
+            messageType = COMPUTE_SESSION_STATUS,
+            requestId = requestId,
+            computeServiceSessionId = sessionId,
+            statusRevision = revision,
+            status = status,
+            cause = cause,
+            missingFields = missingFields,
+            result = result,
+        )
+    }
+
+    private suspend fun rememberComputeStatus(status: ComputeSessionStatus) {
+        computingMutex.withLock {
+            computingStatusesByRequest[status.requestId] = status
+            val sessionId = status.computeServiceSessionId
+            val revision = status.statusRevision?.toULongOrNull()
+            if (sessionId == null || revision == null) {
+                return@withLock
+            }
+            val currentRevision = computingStatuses[sessionId]?.statusRevision?.toULongOrNull()
+            if (currentRevision == null || revision > currentRevision) {
+                computingStatuses[sessionId] = status
+                if (status.status in COMPUTE_TERMINAL_STATUSES) {
+                    computingWaiters.remove(sessionId).orEmpty().forEach {
+                        it.completeExceptionally(
+                            AgentSdkException(
+                                ErrorCode.COMPUTING_SESSION_INVALID,
+                                "Computing session ended in state ${status.status}",
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun handleComputeSessionStatus(payload: JsonObject) {
+        rememberComputeStatus(parseComputeStatus(payload, messageTypeInPayload = false))
+    }
+
+    private fun parseComputeConnectConfig(payload: JsonObject): ComputingSession {
+        val sessionId = payload.requireRuntimeString("compute_service_session_id")
+        val instanceId = payload.requireRuntimeString("compute_instance_id")
+        val bindingRef = payload.requireRuntimeString("binding_ref")
+        val role = try {
+            ComputeRole.valueOf(payload.requireRuntimeString("role"))
+        } catch (error: Exception) {
+            throw AgentSdkException(ErrorCode.RUNTIME_REJECTED, "Invalid role", "role", cause = error)
+        }
+        val receiverAgentId = payload.requireRuntimeString("receiver_agent_id")
+        val serviceEndpoint = requireServiceEndpoint(
+            payload.stringOrNull("service_endpoint"),
+            "service_endpoint",
+        )
+        val rawBinding = payload["network_binding"] as? JsonObject
+            ?: computePayloadError("network_binding must be an object", "network_binding")
+        val rawSnssai = rawBinding["snssai"] as? JsonObject
+            ?: computePayloadError("network_binding.snssai must be an object", "network_binding.snssai")
+        val rawDataPlane = rawBinding["runtime_data_plane"] as? JsonObject
+            ?: computePayloadError(
+                "network_binding.runtime_data_plane must be an object",
+                "network_binding.runtime_data_plane",
+            )
+        val binding = ComputeNetworkBinding(
+            pduSessionId = requireUnsignedInt(
+                rawBinding["pdu_session_id"]?.jsonPrimitive?.intOrNull,
+                "network_binding.pdu_session_id",
+                255,
+            ),
+            dnn = rawBinding.requireRuntimeString("dnn"),
+            snssai = Snssai(
+                sst = requireUnsignedInt(
+                    rawSnssai["sst"]?.jsonPrimitive?.intOrNull,
+                    "network_binding.snssai.sst",
+                    255,
+                ),
+                sd = parseOptionalSd(rawSnssai.optionalRuntimeString("sd")),
+            ),
+            ueIpv4 = normalizeIpv4(
+                rawBinding.stringOrNull("ue_ipv4"),
+                "network_binding.ue_ipv4",
+            ),
+            runtimeDataPlane = RuntimeDataPlane(
+                accessType = rawDataPlane.requireRuntimeString("access_type"),
+                sessionSelection = rawDataPlane.requireRuntimeString("session_selection"),
+            ),
+        )
+        val rawParameters = payload["connection_parameters"] as? JsonObject
+            ?: computePayloadError(
+                "connection_parameters must be an object",
+                "connection_parameters",
+            )
+        val parameters = ComputeConnectionParameters(
+            mediaConnectionsPath = requireAbsolutePath(
+                rawParameters.stringOrNull("media_connections_path"),
+                "connection_parameters.media_connections_path",
+            ),
+            transport = rawParameters.requireRuntimeString("transport"),
+            recognitionTargetPathTemplate = rawParameters
+                .optionalRuntimeString("recognition_target_path_template")
+                ?.let {
+                    requireAbsolutePath(it, "connection_parameters.recognition_target_path_template")
+                },
+            videoCodec = rawParameters.optionalRuntimeString("video_codec")?.let {
+                it.takeIf(String::isNotBlank)
+                    ?: computePayloadError(
+                        "connection_parameters.video_codec must be a non-empty string",
+                        "connection_parameters.video_codec",
+                    )
+            },
+        )
+        if (parameters.transport != "WEBRTC") {
+            computePayloadError(
+                "connection_parameters.transport must be WEBRTC",
+                "connection_parameters.transport",
+            )
+        }
+        parameters.recognitionTargetPathTemplate?.let { template ->
+            val marker = "{compute_service_session_id}"
+            if (template.windowed(marker.length).count { it == marker } != 1) {
+                computePayloadError(
+                    "recognition_target_path_template must contain " +
+                        "{compute_service_session_id} exactly once",
+                    "connection_parameters.recognition_target_path_template",
+                )
+            }
+        }
+        val expiresAt = payload.optionalRuntimeString("expires_at")?.let {
+            try {
+                Instant.parse(it)
+            } catch (error: Exception) {
+                computePayloadError("expires_at must be RFC3339", "expires_at", error)
+            }
+        }
+        return ComputingSession(
+            computeServiceSessionId = sessionId,
+            computeInstanceId = instanceId,
+            bindingRef = bindingRef,
+            role = role,
+            receiverAgentId = receiverAgentId,
+            serviceEndpoint = serviceEndpoint,
+            networkBinding = binding,
+            connectionParameters = parameters,
+            expiresAt = expiresAt,
+        )
+    }
+
+    private suspend fun handleComputeConnectConfig(payload: JsonObject): JsonObject {
+        val session = try {
+            parseComputeConnectConfig(payload)
+        } catch (_: AgentSdkException) {
+            return rawComputeConfigAck(payload, false, "invalid-request")
+        }
+        val key = Triple(session.bindingRef, session.role.name, session.receiverAgentId)
+        computingMutex.withLock {
+            if (computingCloseResults.containsKey(key)) {
+                return computeConfigAck(session, false, "session-closed")
+            }
+            computingSessions[session.computeServiceSessionId]?.let { current ->
+                return if (current == session) {
+                    computeConfigAck(session, true, "")
+                } else {
+                    computeConfigAck(session, false, "config-conflict")
+                }
+            }
+            if (computingSessions.values.any {
+                    it.bindingRef == session.bindingRef &&
+                        it.role == session.role &&
+                        it.receiverAgentId == session.receiverAgentId
+                }
+            ) {
+                return computeConfigAck(session, false, "config-conflict")
+            }
+        }
+        try {
+            validateAndInstallComputeBinding(session)
+        } catch (error: ComputeBindingException) {
+            return computeConfigAck(session, false, error.protocolCause)
+        }
+        computingMutex.withLock {
+            computingSessions[session.computeServiceSessionId] = session
+            computingWaiters.remove(session.computeServiceSessionId).orEmpty().forEach {
+                it.complete(session)
+            }
+        }
+        return computeConfigAck(session, true, "")
+    }
+
+    private suspend fun validateAndInstallComputeBinding(session: ComputingSession) {
+        if (profile == null || session.receiverAgentId != profile!!.agentId) {
+            throw ComputeBindingException("binding-mismatch")
+        }
+        val binding = session.networkBinding
+        if (
+            binding.runtimeDataPlane.accessType != "HTTP3_CONNECT_IP" ||
+            binding.runtimeDataPlane.sessionSelection != "EXACT_PDU_SESSION_ID"
+        ) {
+            throw ComputeBindingException("data-plane-access-unsupported")
+        }
+        val snapshot = ueInfo ?: checkNotNull(runtime).getUeInfo().also { ueInfo = it }
+        val sessions = snapshot["pdu_sessions"] as? JsonArray
+        val matching = sessions.orEmpty().mapNotNull { it as? JsonObject }.filter {
+            it["pdu_session_id"]?.jsonPrimitive?.intOrNull == binding.pduSessionId &&
+                it.stringOrNull("state") == "active" && it.stringOrNull("type") == "IPv4"
+        }
+        if (matching.size != 1) throw ComputeBindingException("pdu-session-not-found")
+        val pdu = matching.single()
+        val localSnssai = pdu["snssai"] as? JsonObject
+        val localSst = localSnssai?.get("sst")?.jsonPrimitive?.intOrNull
+        val localSd = localSnssai?.stringOrNull("sd")
+        val localIp = try {
+            normalizeIpv4(pdu.stringOrNull("ipv4"), "pdu_sessions.ipv4")
+        } catch (_: AgentSdkException) {
+            throw ComputeBindingException("network-binding-mismatch")
+        }
+        if (
+            pdu.stringOrNull("dnn") != binding.dnn ||
+            localSst != binding.snssai.sst || localSd != binding.snssai.sd ||
+            localIp != binding.ueIpv4 || agentTunIp != binding.ueIpv4
+        ) {
+            throw ComputeBindingException("network-binding-mismatch")
+        }
+        val accesses = snapshot["data_plane_accesses"] as? JsonArray
+        val matchingAccesses = accesses.orEmpty().mapNotNull { it as? JsonObject }.filter {
+            it.stringOrNull("access_type") == binding.runtimeDataPlane.accessType &&
+                it.stringOrNull("session_selection") == binding.runtimeDataPlane.sessionSelection
+        }
+        if (matchingAccesses.size != 1) {
+            throw ComputeBindingException("data-plane-access-unsupported")
+        }
+        val template = matchingAccesses.single().stringOrNull("endpoint_template")
+        if (template == null || template.windowed("{pdu_session_id}".length)
+                .count { it == "{pdu_session_id}" } != 1
+        ) {
+            throw ComputeBindingException("data-plane-access-unsupported")
+        }
+        val expanded = template.replace("{pdu_session_id}", binding.pduSessionId.toString())
+        val accessUri = runCatching { URI(expanded) }.getOrNull()
+        if (
+            accessUri?.scheme != "https" || accessUri.host.isNullOrBlank() ||
+            !masqueTransport.connected
+        ) {
+            throw ComputeBindingException("data-plane-access-unsupported")
+        }
+        installComputeRoute(session)
+    }
+
+    private suspend fun installComputeRoute(session: ComputingSession) {
+        replaceComputeRoutes(session)
+    }
+
+    private suspend fun replaceComputeRoutes(
+        session: ComputingSession,
+        extraAddresses: Set<String> = emptySet(),
+    ) {
+        val host = URI(session.serviceEndpoint).host ?: throw ComputeBindingException("config-rejected")
+        val addresses = withContext(Dispatchers.IO) {
+            InetAddress.getAllByName(host).filter { it.address.size == 4 }.mapNotNull { it.hostAddress }.toSet()
+        } + extraAddresses
+        if (addresses.isEmpty()) throw ComputeBindingException("config-rejected")
+        tunnelController.replaceGroupPeers(computingRouteKey(session.bindingRef), addresses)
+    }
+
+    private fun computeConfigAck(
+        session: ComputingSession,
+        accepted: Boolean,
+        cause: String,
+    ): JsonObject = buildJsonObject {
+        put("compute_service_session_id", session.computeServiceSessionId)
+        put("compute_instance_id", session.computeInstanceId)
+        put("binding_ref", session.bindingRef)
+        put("role", session.role.name)
+        put("receiver_agent_id", session.receiverAgentId)
+        put("network_binding", networkBindingJson(session.networkBinding))
+        put("accepted", accepted)
+        put("cause", cause)
+    }
+
+    private fun rawComputeConfigAck(
+        payload: JsonObject,
+        accepted: Boolean,
+        cause: String,
+    ): JsonObject = buildJsonObject {
+        listOf(
+            "compute_service_session_id",
+            "compute_instance_id",
+            "binding_ref",
+            "role",
+            "receiver_agent_id",
+            "network_binding",
+        ).forEach { field -> payload[field]?.let { put(field, it) } }
+        put("accepted", accepted)
+        put("cause", cause)
+    }
+
+    private fun networkBindingJson(binding: ComputeNetworkBinding): JsonObject = buildJsonObject {
+        put("pdu_session_id", binding.pduSessionId)
+        put("dnn", binding.dnn)
+        put("snssai", buildJsonObject {
+            put("sst", binding.snssai.sst)
+            binding.snssai.sd?.let { put("sd", it) }
+        })
+        put("ue_ipv4", binding.ueIpv4)
+        put("runtime_data_plane", buildJsonObject {
+            put("access_type", binding.runtimeDataPlane.accessType)
+            put("session_selection", binding.runtimeDataPlane.sessionSelection)
+        })
+    }
+
+    private suspend fun handleComputeSessionClose(payload: JsonObject): JsonObject {
+        val fields = listOf(
+            "compute_service_session_id",
+            "compute_instance_id",
+            "binding_ref",
+            "role",
+            "receiver_agent_id",
+        )
+        val values = try {
+            fields.associateWith { field -> payload.requireRuntimeString(field) }
+        } catch (_: AgentSdkException) {
+            return buildJsonObject {
+                fields.forEach { field ->
+                    payload.stringOrNull(field)?.takeIf(String::isNotBlank)?.let { put(field, it) }
+                }
+                put("closed", false)
+                put("cause", "invalid-request")
+            }
+        }
+        val sessionId = values.getValue("compute_service_session_id")
+        val instanceId = values.getValue("compute_instance_id")
+        val bindingRef = values.getValue("binding_ref")
+        val role = values.getValue("role")
+        val receiverAgentId = values.getValue("receiver_agent_id")
+        val hasCause = try {
+            payload.optionalRuntimeString("cause") != null
+        } catch (_: AgentSdkException) {
+            false
+        }
+        if (!hasCause) {
+            return closeAck(sessionId, instanceId, bindingRef, role, receiverAgentId, false, "invalid-request")
+        }
+        val key = Triple(bindingRef, role, receiverAgentId)
+        computingMutex.withLock { computingCloseResults[key]?.let { return it } }
+        val session = computingMutex.withLock { computingSessions[sessionId] }
+        if (
+            session == null || session.computeInstanceId != instanceId ||
+            session.bindingRef != bindingRef || session.role.name != role ||
+            session.receiverAgentId != receiverAgentId
+        ) {
+            return closeAck(
+                sessionId, instanceId, bindingRef, role, receiverAgentId,
+                false, "binding-mismatch",
+            )
+        }
+        computingMutex.withLock { computingClosing += sessionId }
+        val result = try {
+            computingMutex.withLock { computingPendingMedia.remove(sessionId) }
+                ?.let { pending -> runCatching { pending.prepared.abort() } }
+            runCatching {
+                when (val managed = computingMutex.withLock { computingMedia[sessionId]?.managed }) {
+                    is VideoUploadHandle -> managed.stop()
+                    is ProcessedVideoStream -> managed.close()
+                }
+            }
+            computingMutex.withLock { computingMedia.remove(sessionId) }
+            tunnelController.replaceGroupPeers(computingRouteKey(bindingRef), emptySet())
+            computingMutex.withLock { computingSessions.remove(sessionId) }
+            closeAck(sessionId, instanceId, bindingRef, role, receiverAgentId, true, "")
+        } catch (_: Exception) {
+            closeAck(
+                sessionId, instanceId, bindingRef, role, receiverAgentId,
+                false, "runtime-unhealthy",
+            )
+        }
+        computingMutex.withLock { computingCloseResults[key] = result }
+        return result
+    }
+
+    private fun closeAck(
+        sessionId: String,
+        instanceId: String,
+        bindingRef: String,
+        role: String,
+        receiverAgentId: String,
+        closed: Boolean,
+        cause: String,
+    ): JsonObject = buildJsonObject {
+        put("compute_service_session_id", sessionId)
+        put("compute_instance_id", instanceId)
+        put("binding_ref", bindingRef)
+        put("role", role)
+        put("receiver_agent_id", receiverAgentId)
+        put("closed", closed)
+        put("cause", cause)
+    }
+
+    private suspend fun waitForComputingSession(
+        sessionId: String,
+        timeoutSeconds: Double,
+    ): ComputingSession {
+        requireComputeString(sessionId, "compute_service_session_id")
+        val waiter = computingMutex.withLock {
+            computingSessions[sessionId]?.let { return it }
+            computingStatuses[sessionId]?.takeIf { it.status in COMPUTE_TERMINAL_STATUSES }?.let {
+                throw AgentSdkException(
+                    ErrorCode.COMPUTING_SESSION_INVALID,
+                    "Computing session ended in state ${it.status}",
+                )
+            }
+            CompletableDeferred<ComputingSession>().also {
+                computingWaiters.getOrPut(sessionId) { mutableListOf() } += it
+            }
+        }
+        return try {
+            withTimeout((timeoutSeconds * 1000).toLong()) { waiter.await() }
+        } finally {
+            computingMutex.withLock { computingWaiters[sessionId]?.remove(waiter) }
+        }
+    }
+
+    private suspend fun recoverComputeStatuses() {
+        val creates = computingMutex.withLock { computeCreateRequests.values.toList() }
+        creates.forEach { create ->
+            val known = computingMutex.withLock {
+                computingStatusesByRequest[create.requestId]?.let { byRequest ->
+                    byRequest.computeServiceSessionId?.let { computingStatuses[it] }
+                        ?: byRequest
+                }
+            }
+            if (known?.status in COMPUTE_TERMINAL_STATUSES) return@forEach
+            val query = ComputeSessionRequest(
+                messageType = "COMPUTE_SESSION_REQUEST",
+                requestType = ComputeRequestType.QUERY,
+                inputFormat = ComputeInputFormat.STRUCTURED,
+                requestId = UUID.randomUUID().toString(),
+                targetRequestId = create.requestId,
+            )
+            runCatching { sendComputeRequest(query, 30.0) }
+                .onFailure { Log.w(TAG, "Computing status recovery failed", it) }
+        }
+    }
+
+    private fun selectDefaultUeAgentIp(payload: JsonObject): String {
+        val nas = payload["nas"] as? JsonObject
+            ?: throw AgentSdkException(ErrorCode.RUNTIME_REJECTED, "GET /v1/ue/info has no nas")
+        if (
+            nas["registered"]?.jsonPrimitive?.booleanOrNull != true ||
+            nas.stringOrNull("state") != "session_ready" ||
+            nas["security_context"]?.jsonPrimitive?.booleanOrNull != true
+        ) {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "GET /v1/ue/info reports NAS is not ready",
+                retryable = true,
+            )
+        }
+        val sessions = payload["pdu_sessions"] as? JsonArray
+            ?: throw AgentSdkException(ErrorCode.RUNTIME_REJECTED, "pdu_sessions is required")
+        val defaults = sessions.mapNotNull { it as? JsonObject }.filter {
+            it.stringOrNull("state") == "active" && it.stringOrNull("type") == "IPv4" &&
+                it["default_route"]?.jsonPrimitive?.booleanOrNull == true
+        }.map { normalizeIpv4(it.stringOrNull("ipv4"), "pdu_sessions.ipv4") }
+        if (defaults.size != 1) {
+            throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "Exactly one active default IPv4 PDU Session is required",
+                "pdu_sessions",
+                retryable = true,
+            )
+        }
+        return defaults.single()
+    }
+
+    private fun normalizeIpv4(value: String?, field: String): String {
+        val text = value?.takeIf(String::isNotBlank)
+            ?: computePayloadError("$field must be an IPv4 literal", field)
+        val address = try {
+            InetAddress.getByName(text)
+        } catch (error: Exception) {
+            computePayloadError("$field must be an IPv4 literal", field, error)
+        }
+        if (address.address.size != 4) computePayloadError("$field must be an IPv4 literal", field)
+        return address.hostAddress ?: computePayloadError("$field is invalid", field)
+    }
+
+    private fun requireServiceEndpoint(value: String?, field: String): String {
+        val text = value?.takeIf(String::isNotBlank)
+            ?: computePayloadError("$field must be a non-empty string", field)
+        val uri = try {
+            URI(text)
+        } catch (error: Exception) {
+            computePayloadError("$field must be an absolute HTTP or HTTPS URI", field, error)
+        }
+        if (
+            uri.scheme !in setOf("http", "https") || uri.host.isNullOrBlank() ||
+            uri.userInfo != null || uri.fragment != null
+        ) {
+            computePayloadError("$field must be an absolute HTTP or HTTPS URI", field)
+        }
+        return text.trimEnd('/')
+    }
+
+    private fun requireAbsolutePath(value: String?, field: String): String {
+        val text = value?.takeIf(String::isNotBlank)
+            ?: computePayloadError("$field must be a non-empty path", field)
+        val uri = runCatching { URI(text) }.getOrNull()
+        if (!text.startsWith('/') || uri?.isAbsolute == true || uri?.host != null) {
+            computePayloadError("$field must be an absolute path", field)
+        }
+        return text
+    }
+
+    private fun parseOptionalSd(value: String?): String? {
+        if (value == null) return null
+        if (!Regex("[0-9A-Fa-f]{6}").matches(value)) {
+            computePayloadError(
+                "network_binding.snssai.sd must be six hexadecimal characters",
+                "network_binding.snssai.sd",
+            )
+        }
+        return value
+    }
+
+    private fun requireUnsignedInt(value: Int?, field: String, maximum: Int): Int {
+        if (value == null || value !in 0..maximum) computePayloadError("$field is invalid", field)
+        return value
+    }
+
+    private fun computePayloadError(
+        message: String,
+        field: String,
+        cause: Throwable? = null,
+    ): Nothing = throw AgentSdkException(ErrorCode.RUNTIME_REJECTED, message, field, cause = cause)
+
+    private fun computingRouteKey(bindingRef: String): String = "computing:$bindingRef"
+
+    private fun mediaConnectionsUrl(session: ComputingSession): String =
+        URI(session.serviceEndpoint.trimEnd('/') + "/")
+            .resolve(session.connectionParameters.mediaConnectionsPath)
+            .toString()
+
+    private fun recognitionTargetUrl(session: ComputingSession): String {
+        val template = session.connectionParameters.recognitionTargetPathTemplate
+            ?: throw AgentSdkException(
+                ErrorCode.COMPUTING_SESSION_INVALID,
+                "C-02 does not provide recognition_target_path_template",
+                "connection_parameters.recognition_target_path_template",
+            )
+        val encodedSessionId = URI(null, null, "/${session.computeServiceSessionId}", null)
+            .rawPath.removePrefix("/")
+        val path = template.replace("{compute_service_session_id}", encodedSessionId)
+        return URI(session.serviceEndpoint.trimEnd('/') + "/").resolve(path).toString()
+    }
+
+    private fun controlActionsUrl(session: ComputingSession): String =
+        URI(session.serviceEndpoint.trimEnd('/') + "/")
+            .resolve("/v1/control-actions")
+            .toString()
+
+    private class ComputeBindingException(val protocolCause: String) : RuntimeException(protocolCause)
 
     suspend fun getGroupSnapshot(groupId: String): GroupConfigSnapshot? =
         groupCache?.snapshot(groupId)
@@ -944,15 +2582,47 @@ class AgentSdk internal constructor(
     suspend fun close() {
         if (state == State.CLOSED || state == State.CLOSING) return
         state = State.CLOSING
+        computingMutex.withLock {
+            computingClosing += computingSessions.keys
+            computingClosing += computingPendingMedia.keys
+        }
+        computingMutex.withLock {
+            computingPendingMedia.values.toList().also { computingPendingMedia.clear() }
+        }.forEach { pending -> runCatching { pending.prepared.abort() } }
+        computingMutex.withLock { computingMedia.values.toList() }.forEach { record ->
+            runCatching {
+                when (val managed = record.managed) {
+                    is VideoUploadHandle -> managed.stop()
+                    is ProcessedVideoStream -> managed.close()
+                }
+            }
+        }
         runCatching { groupCache?.close() }
         runCatching { masqueTransport.close() }
         runCatching { localServer?.close() }
-        if (computeRuntime !== runtime) runCatching { computeRuntime?.close() }
-        computeRuntime = null
         runCatching { runtime?.close() }
+        runCatching { sandboxTransport.close() }
         runCatching { tunnelController.close() }
         runCatching { mediaOffloadAdapter?.close() }
-        offloadingSessions.clear()
+        computingMutex.withLock {
+            val closed = AgentSdkException(
+                ErrorCode.SDK_NOT_INITIALIZED,
+                "SDK is closed",
+            )
+            computingWaiters.values.flatten().forEach { it.completeExceptionally(closed) }
+            computingWaiters.clear()
+            computeRequests.clear()
+            computeCreateRequests.clear()
+            computingStatuses.clear()
+            computingStatusesByRequest.clear()
+            computingSessions.clear()
+            computingMedia.clear()
+            computingPendingMedia.clear()
+            computingMediaLocks.clear()
+            computingClosing.clear()
+            computingCloseResults.clear()
+        }
+        ueInfo = null
         state = State.CLOSED
     }
 
@@ -1300,70 +2970,6 @@ class AgentSdk internal constructor(
         agentCardContext = null
     }
 
-    private fun parseVideoUploadEndpoint(
-        value: JsonObject?,
-        errorCode: ErrorCode,
-        fieldPrefix: String,
-    ): VideoUploadEndpoint {
-        val endpoint = value ?: throw AgentSdkException(
-            errorCode,
-            "$fieldPrefix must be an object",
-            fieldPrefix,
-        )
-        return VideoUploadEndpoint(
-            videoServerIp = requireIpAddress(
-                endpoint.stringOrNull("video_server_ip"),
-                "$fieldPrefix.video_server_ip",
-                errorCode,
-            ),
-            sourceStartUrl = requireHttpUrl(
-                endpoint.stringOrNull("source_start_url"),
-                "$fieldPrefix.source_start_url",
-                errorCode,
-            ),
-            sourceStopUrl = requireHttpUrl(
-                endpoint.stringOrNull("source_stop_url"),
-                "$fieldPrefix.source_stop_url",
-                errorCode,
-            ),
-        )
-    }
-
-    private fun parseProcessedVideoEndpoint(
-        value: JsonObject?,
-        errorCode: ErrorCode,
-        fieldPrefix: String,
-    ): ProcessedVideoEndpoint {
-        val endpoint = value ?: throw AgentSdkException(
-            errorCode,
-            "$fieldPrefix must be an object",
-            fieldPrefix,
-        )
-        val protocol = endpoint.stringOrNull("protocol") ?: "webrtc"
-        val signaling = endpoint.stringOrNull("signaling") ?: "non-trickle"
-        if (protocol != "webrtc" || signaling !in setOf("non-trickle", "trickle")) {
-            throw AgentSdkException(
-                errorCode,
-                "$fieldPrefix contains an unsupported WebRTC profile",
-                fieldPrefix,
-            )
-        }
-        return ProcessedVideoEndpoint(
-            videoServerIp = requireIpAddress(
-                endpoint.stringOrNull("video_server_ip"),
-                "$fieldPrefix.video_server_ip",
-                errorCode,
-            ),
-            offerUrl = requireHttpUrl(
-                endpoint.stringOrNull("offer_url"),
-                "$fieldPrefix.offer_url",
-                errorCode,
-            ),
-            protocol = protocol,
-            signaling = signaling,
-        )
-    }
-
     private fun requireIpAddress(value: String?, field: String, errorCode: ErrorCode): String {
         val text = requireEndpointString(value, field, errorCode)
         val parsed = try {
@@ -1377,27 +2983,6 @@ class AgentSdk internal constructor(
         return parsed.hostAddress ?: text
     }
 
-    private fun requireHttpUrl(value: String?, field: String, errorCode: ErrorCode): String {
-        val text = requireEndpointString(value, field, errorCode)
-        val uri = try {
-            URI(text)
-        } catch (error: Exception) {
-            throw AgentSdkException(errorCode, "$field is not a valid URL", field, cause = error)
-        }
-        if (
-            uri.scheme !in setOf("http", "https") || uri.host.isNullOrBlank() ||
-            uri.userInfo != null || uri.fragment != null ||
-            (uri.port != -1 && uri.port !in 1..65535)
-        ) {
-            throw AgentSdkException(
-                errorCode,
-                "$field must be an HTTP/HTTPS URL without credentials or fragment",
-                field,
-            )
-        }
-        return text
-    }
-
     private fun requireEndpointString(
         value: String?,
         field: String,
@@ -1409,10 +2994,17 @@ class AgentSdk internal constructor(
     )
 
     private fun JsonObject.stringOrNull(field: String): String? =
-        this[field]?.jsonPrimitive?.contentOrNull
+        (this[field] as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.contentOrNull
 
-    private fun kotlinx.serialization.json.JsonElement.jsonObjectOrNull(): JsonObject? =
-        runCatching { jsonObject }.getOrNull()
+    private fun JsonObject.optionalRuntimeString(field: String): String? {
+        val value = this[field] ?: return null
+        return (value as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.contentOrNull
+            ?: throw AgentSdkException(
+                ErrorCode.RUNTIME_REJECTED,
+                "Runtime response field $field must be a string",
+                field,
+            )
+    }
 
     private fun JsonObject.requireRuntimeString(field: String): String =
         stringOrNull(field)?.takeIf { it.isNotBlank() } ?: throw AgentSdkException(
@@ -1421,23 +3013,10 @@ class AgentSdk internal constructor(
             field,
         )
 
-    private fun offloadingRouteKey(sessionId: String): String = "offloading:$sessionId"
-
-    private fun offloadingEndpointIps(session: OffloadingSession): Set<String> = buildSet {
-        session.producer?.let { add(it.videoServerIp) }
-        session.processedStream?.let { add(it.videoServerIp) }
-    }
-
     private fun requireMediaAdapter(): MediaOffloadAdapter =
         mediaOffloadAdapter ?: throw AgentSdkException(
-            ErrorCode.OFFLOADING_SESSION_NOT_FOUND,
+            ErrorCode.COMPUTING_SESSION_NOT_FOUND,
             "No WebRTC media adapter is configured",
-        )
-
-    private fun requireComputeRuntime(): RuntimeTransport =
-        computeRuntime ?: throw AgentSdkException(
-            ErrorCode.SDK_NOT_INITIALIZED,
-            "Compute control transport is unavailable",
         )
 
     private fun validatePort(port: Int, field: String) {
@@ -1460,12 +3039,45 @@ class AgentSdk internal constructor(
 
     companion object {
         private const val TAG = "AgentSdk"
-        private const val COMPUTE_CONTROL_ROUTE_KEY = "compute-control"
+        private const val COMPUTING_SESSION_REQUEST_PATH = "/v1/computing/session-requests"
+        private const val COMPUTE_CONNECT_CONFIG = "COMPUTE_CONNECT_CONFIG"
+        private const val COMPUTE_SESSION_STATUS = "COMPUTE_SESSION_STATUS"
+        private const val COMPUTE_SESSION_CLOSE = "COMPUTE_SESSION_CLOSE"
+        private val CONTROL_ACTION_STATUSES = setOf(
+            "ACCEPTED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED", "UNKNOWN",
+        )
+        private const val UINT32_MAX = 4_294_967_295L
+        private val COMPUTE_TERMINAL_STATUSES = setOf(
+            "REJECTED",
+            "CLARIFICATION_REQUIRED",
+            "REQUEST_CANCELLED",
+            "NOT_FOUND",
+            "FAILED",
+            "COMPLETED",
+        )
+        private val COMPUTE_STATUSES = setOf(
+            "ACCEPTED",
+            "WAITING_PARTICIPANTS",
+            "PLANNING",
+            "COORDINATING",
+            "RESERVED",
+            "ACTIVATING",
+            "MEDIA_CONNECTING",
+            "ACTIVE",
+            "RELEASING",
+            "COMPENSATING",
+            "CLEANUP_FAILED",
+            "FAILED",
+            "COMPLETED",
+            "REJECTED",
+            "CLARIFICATION_REQUIRED",
+            "REQUEST_CANCELLED",
+            "NOT_FOUND",
+        )
         private val LOCAL_SERVER_REBIND_DELAYS_MS = longArrayOf(0, 25, 100, 250)
 
         fun create(
             vpnService: AgentVpnService,
-            mediaOffloadAdapter: MediaOffloadAdapter? = null,
             peerMessenger: PeerMessenger = OkHttpPeerMessenger(),
             localServerFactory: () -> LocalServer = { TcpJsonLocalServer() },
         ): AgentSdk {
@@ -1492,7 +3104,7 @@ class AgentSdk internal constructor(
                 agentStateStore = FileAgentStateStore(
                     File(vpnService.noBackupFilesDir, "agent-sdk/agents")
                 ),
-                mediaOffloadAdapter = mediaOffloadAdapter,
+                mediaOffloadAdapter = AndroidWebRtcMediaAdapter(vpnService),
                 peerMessenger = peerMessenger,
                 localServerFactory = localServerFactory,
             )

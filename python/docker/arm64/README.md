@@ -47,6 +47,8 @@ Agent B 容器 172.29.100.3 -> 宿主机 172.29.100.1:8089 / UDP 8444
 
 Runtime 必须监听宿主机可达地址（例如 `0.0.0.0:8088`、`0.0.0.0:8089`），MASQUE
 必须监听并发布 UDP `8443`、`8444`；只监听 `127.0.0.1` 时 bridge 容器无法访问。
+Agent B 默认循环读取镜像内
+`/opt/agent-sdk/examples/assets/video-offload-test.mp4`，不要求宿主机提供摄像头设备。
 
 ```bash
 cp same-host.env.example .env
@@ -66,7 +68,7 @@ docker run --rm --network agent-sdk-access \
 docker compose --env-file .env -f docker-compose.same-host.yml up -d agent-b
 docker compose --env-file .env -f docker-compose.same-host.yml logs --tail=100 agent-b
 
-# 看到 B_READY 后启动 A，然后再持续跟随两端日志。
+# 看到 B_READY 后启动 A，然后持续跟随算力会话和视频日志。
 docker compose --env-file .env -f docker-compose.same-host.yml up -d agent-a
 docker compose --env-file .env -f docker-compose.same-host.yml logs -f agent-a agent-b
 ```
@@ -101,9 +103,25 @@ docker exec agent-sdk-b ip route get 10.60.0.2
 `AGENT_TUN_MTU`、`AGENT_NAME`、`AGENT_OWNER`、`AGENT_REGION`、
 `AGENT_PRIORITY`、`AGENT_LOG_FILE`、`AGENT_LOG_LEVEL` 和
 `AGENT_FRESH_REGISTRATION`、`AGENT_DEREGISTER_ON_EXIT`。A 还支持
-`AGENT_TARGET_ID`、`AGENT_MESSAGE_JSON`、
-`AGENT_GROUP_NAME` 等参数；B 还支持 `AGENT_WAIT_TIMEOUT`、
-`AGENT_EXIT_AFTER_MESSAGE` 和 `AGENT_THIRD_PARTY_PRIVATE_KEY`。
+`AGENT_TARGET_ID`、`AGENT_MESSAGE_JSON`、`AGENT_GROUP_NAME`、
+`AGENT_COMPUTE_CAPABILITY_ID`、CPU/内存/GPU/镜像等正式算力约束、
+`AGENT_COMPUTE_TERMINAL_ACTION` 和 `AGENT_PROCESSED_FRAME_COUNT`。B 还支持
+`AGENT_WAIT_TIMEOUT`、`AGENT_VIDEO_SOURCE`、`AGENT_VIDEO_FILE`、
+`AGENT_LOOP_VIDEO`、`AGENT_VIDEO_WIDTH`、
+`AGENT_VIDEO_HEIGHT`、`AGENT_VIDEO_FPS`、`AGENT_VIDEO_BITRATE_KBPS`、
+`AGENT_MAX_SESSIONS` 和 `AGENT_THIRD_PARTY_PRIVATE_KEY`。
+
+默认验收流程中，A 创建并查询算力会话，只把 `compute_service_session_id` 发给 B；
+B 收到后循环读取镜像内的测试 MP4 并调用 `start_video_upload()`；A 收到一个处理帧后
+发送 RELEASE；
+双方内部处理 C-05，B 观察上传句柄进入 `STOPPED` 后退出。日志成功事件依次包含 A 的
+`COMPUTING_SESSION_CREATED`、`PROCESSED_VIDEO_FRAME`、
+`COMPUTING_SESSION_TERMINATED`，以及 B 的 `VIDEO_UPLOAD_STARTED`、
+`COMPUTING_SESSION_CLOSED`。
+
+如需改用真实摄像头，将 `AGENT_VIDEO_SOURCE=camera`，并在 compose 的 Agent B
+`devices` 中增加 `/dev/video0:/dev/video0`；`AGENT_CAMERA_ID`、分辨率和帧率仅在该模式
+生效。自定义本地视频应挂载进容器，并将 `AGENT_VIDEO_FILE` 指向容器内路径。
 
 ARM 测试镜像默认设置 `AGENT_FRESH_REGISTRATION=true` 和
 `AGENT_DEREGISTER_ON_EXIT=true`。每次启动时，如果状态卷中存在上次测试的身份，脚本

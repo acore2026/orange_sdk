@@ -2,6 +2,130 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-14 — Linux A/B 测试脚本补齐算力视频联调
+
+### 修改原因
+
+- 原 `agent_a_test.py`、`agent_b_test.py` 只验证身份、发现、建组和普通 A2A 消息，
+  没有覆盖新 SDK 的正式异步算力会话与 WebRTC 媒体接口。
+- B 若直接在 A2A 回调中等待 producer C-02 和媒体协商，会延迟 A 的消息响应并可能阻塞
+  consumer 侧建连。
+
+### 修改方式
+
+- A 在 ACN 流程后提交正式 CREATE，只向 B 发送 `compute_service_session_id`，随后执行
+  QUERY、等待 consumer C-02、连接处理流、校验视频帧，并按配置执行 RELEASE 或 CANCEL。
+- B 的群消息回调只校验并排队 session ID，主循环再调用 `start_video_upload()`；收到
+  C-05 后通过上传句柄的 `STOPPED` 状态确认 SDK 已完成自动清理。
+- 补充 CREATE 全部可选约束、视频源参数、媒体超时、帧数和会话终止方式；ARM 启动脚本、
+  compose 和环境变量示例同步采用 `video_rendering`。
+- 新增仓库内置的 8 秒 1280×720 H.264 合成测试片；B 默认循环解码该文件作为 producer
+  输入，不依赖真实摄像头，同时保留显式选择 V4L2 摄像头的模式。
+- 更新 Linux 使用指南和 ARM 镜像文档，明确 C-02/C-04/C-05 仍由 SDK 内部处理，应用
+  消息不携带 Sandbox 地址、端口或 URL。
+
+### 验证内容
+
+- A/B 示例针对性测试、Python 全量测试、源码编译、Shell 语法和 Docker Compose 展开
+  检查通过。
+
+## 2026-09-11 — SDK 对齐正式异步算力会话协议
+
+### 修改原因
+
+- 旧 `create_offloading_session/createOffloadingSession` 使用
+  `/compute/v1/offloading-sessions` 和同步 Sandbox 响应，无法兼容正式
+  `ComputeSessionRequest`、C-02～C-06 及完整会话生命周期。
+- 算网下行属于 SDK 可自动落实的网络和媒体配置，群组授权已在 CREATE 引用的群组及网侧
+  CA 校验中完成，不需要新增用户可见回调。
+
+### 修改方式
+
+- 删除旧创建模型和接口，新增 Python `create_computing_session` 与 Android
+  `createComputingSession`，并补齐 QUERY、CANCEL、RELEASE；四种操作统一调用
+  `POST /v1/computing/session-requests`，按文档校验和序列化全部字段。
+- 算力控制请求固定复用 `initialize/init` 的 AgentRuntime IP 和端口，删除独立算力
+  控制地址覆盖参数；Android App 配置页同步删除 Mock IP/端口。
+- SDK 在每次算力请求前校验 ACN/NAS、活动 IPv4 PDU Session 和精确 CONNECT-IP
+  能力；CREATE 额外校验本地 ACTIVE 群组、请求方身份和目标成员。
+- 初始化的公共 WebSocket 内部处理 C-02/C-04/C-05：校验并缓存 Sandbox 配置、自动
+  C-03、按 `status_revision` 去重、关闭媒体和路由并自动 C-06；重连后按原 CREATE ID
+  发起 QUERY 恢复状态。
+- `start_video_upload/startVideoUpload` 和
+  `get_processed_video_stream/getProcessedVideoStream` 改为只接收
+  `compute_service_session_id`，等待内部 C-02，并使用缓存的 `service_endpoint`、角色、
+  `binding_ref` 和路径。
+- Python 示例和自检迁移到 consumer/producer 角色语义。Android 测试 App 由 A 创建正式
+  会话并只向 B 发送 `compute_service_session_id`；A 等待 consumer C-02 接收处理流，B
+  收到 ID 后申请摄像头权限并等待 producer C-02 上传，停止时由 A 发送 RELEASE。
+- U-MEDIA 由 SDK 核心层统一实现：producer/consumer 分别生成完整的
+  `sendonly/recvonly` 非 Trickle Offer，向同一 C-02 媒体集合路径发送正式
+  `request_id + computing_context + offer`，校验 HTTP 201 回显并应用 Answer。
+- Sandbox HTTP、幂等重试、`media_connection_id` 和 HTTP 204 DELETE 均封装在 SDK；
+  Answer ICE IPv4 候选加入对应 CONNECT-IP 路由，物理网 host candidate 不允许进入
+  Offer。C-05、用户主动停止和 SDK 关闭均清理本地 PeerConnection。
+- Android SDK 模块新增内置 libwebrtc 适配器和传递依赖，并将网络优先级设为 VPN；Python Wheel 新增
+  内置 aiortc/V4L2 适配器。Android consumer 返回可显式 `close()` 的
+  `ProcessedVideoStream`，其 `track` 用于页面渲染。
+- 删除 App 内重复的旧 WebRTC adapter 和 High Profile 编码器实现，Generic/RayNeo 均直接
+  使用 `AgentSdk.create(service)`；App 版本更新为 `0.2.27`。
+- N6 Mock Video Server 新增正式 `POST/DELETE /v1/media-connections`，按完整
+  `computing_context` 关联双端媒体，支持角色级活动连接约束、创建幂等和重复删除；smoke
+  client 改为验证 consumer 先建连、producer 后建连及原 Track 切源。
+- 补齐 U-RECOGNITION：Python/Android SDK 新增识别目标 PUT/GET 接口，内部展开 C-02
+  路径模板、生成 consumer `computing_context`，并严格校验 Sandbox 响应；Android
+  Sandbox transport 同步支持 PUT 和 GET。
+- 补齐 U-CONTROL：新增文本/结构化动作模型、CreateControlAction 和 GetControlAction，
+  固定访问 Sandbox 控制资源，自动注入 consumer 会话上下文并校验异步动作状态；
+  producer Runtime 转发仍保持为网侧内部接口。
+
+### 验证内容
+
+- Python SDK 当前全量 131 项测试和源码编译检查通过；此前 Wheel 打包检查已确认包含内置
+  `agent_sdk.webrtc` 及 `aiortc` 运行时依赖声明。
+- 本轮新增识别目标和动作控制协议测试通过；Android `:agent-sdk:testDebugUnitTest`
+  当前 64 项测试
+  通过。Release AAR 状态沿用本条前述构建验证。
+- Android Generic/RayNeo App 编译及两组单元测试通过；Mock Video Server 6 项测试在
+  Python 3.12 容器中通过，其中正式 U-MEDIA 测试完成真实 producer/consumer aiortc 传输。
+- N6 `agent-sdk-mock-video-server` 已使用新镜像重建并通过健康检查及部署后 smoke；验证
+  consumer 占位帧、producer 输入、处理帧切换、Track 复用和双方媒体 DELETE 全部成功。
+
+## 2026-09-11 — 补齐消息接收与群组下行回调接口文档
+
+### 修改原因
+
+- 接口文档只说明了 Runtime 下行 WebSocket 和 `/A2A/message` 线协议，没有在接口清单中列出应用必须调用的两个 SDK listener 注册接口。
+- 用户友好版把 listener 注册时机写成初始化后，与当前 SDK 和示例 App 在初始化前注册的实际顺序不一致。
+
+### 修改方式
+
+- 补充 `register_network_message_listener/registerNetworkMessageListener`，明确同一回调通过 `GROUP_INVITATION` 接受或拒绝群组邀请，并在 `GROUP_CONFIG` 已提交后通知应用。
+- 补充 `register_group_message_listener/registerGroupMessageListener`，明确它接收其他 Agent 通过 `send_message/sendMessage` 投递的业务 JSON。
+- 统一文档中的注册时机、Python 注销函数和 Android `AutoCloseable` 语义，并把两个接口加入平台函数清单和调用示例。
+
+### 验证内容
+
+- 对照 Python/Android 公开函数签名、初始化顺序和下行分发实现检查文档；Markdown 标题、目录链接、代码围栏和接口名称检查通过。
+
+## 2026-09-10 — 算力创建统一 AgentRuntime 地址并内置视频 URL
+
+### 修改原因
+
+- 算力会话创建响应只需提供 Video Server IP；固定端口、WebRTC 信令路径、协议和信令模式不应由网络逐次下发或由应用拼装。
+- 正式算力创建请求应复用初始化时的 AgentRuntime IP 和端口；Android 测试 App 仍需通过显式配置访问 Mock Server。
+
+### 修改方式
+
+- Python/Android 的响应模型收敛为一个顶层 `video_server_ip`，移除 producer 和 processed-stream 端点对象。
+- `start_video_upload/startVideoUpload` 在 SDK 内生成端口 `28500` 的 source 与 source/stop URL；`get_processed_video_stream/getProcessedVideoStream` 生成 processed URL。该临时方案已由 2026-09-11 的正式 U-MEDIA 实现替代。
+- 算力创建默认复用 AgentRuntime 地址，并保留显式 Mock 覆盖；Mock Video Server 改为只返回 IP，A2A 示例也只传递该 IP。Android App 的 Mock 控制地址、界面和部署配置保持不变。
+
+### 验证内容
+
+- Python SDK 113 项、Mock Video Server 5 项测试通过，并完成源码编译检查。
+- Android SDK 55 项、Generic App 25 项和 RayNeo App 25 项单元测试通过；Release AAR、Generic/RayNeo Debug APK 构建成功。
+
 ## 2026-09-10 — 计算卸载改为资源规格申请
 
 ### 修改原因

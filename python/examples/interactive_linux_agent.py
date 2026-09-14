@@ -49,9 +49,7 @@ async def run_interactive(args: argparse.Namespace) -> None:
     print("等待输入期间，MASQUE 保活和下行 WebSocket 仍会正常运行。")
 
     gate = EnterStepGate()
-    sdk = AgentSdk(
-        media_offload_adapter=linux_agent.ExampleMediaOffloadAdapter(),
-    )
+    sdk = AgentSdk()
     unregister_network = lambda: None
     unregister_group = lambda: None
     flow_completed = False

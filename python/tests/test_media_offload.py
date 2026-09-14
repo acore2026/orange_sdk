@@ -1,198 +1,612 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
-import uuid
 
 import pytest
 
 from agent_sdk import (
+    AcnContext,
     AgentSdk,
     AgentSdkError,
+    ComputeConstraints,
+    ComputeInputFormat,
+    ComputeRequestType,
+    ComputeResources,
+    ComputeSessionRequest,
+    ComputeSessionStatus,
+    ControlAction,
+    ControlActionRequest,
+    ControlInputType,
     ErrorCode,
-    OffloadingSession,
-    ProcessedVideoEndpoint,
-    SandboxSpec,
-    VideoUploadEndpoint,
+    RecognitionTargetStatus,
+    RuntimeHttpResponse,
 )
 
-from conftest import LOCAL_ID, _create_sdk_fixture, group_payload
+from conftest import LOCAL_ID, PEER_ID, group_payload
 
 
-def test_media_api_surface_has_no_accept_or_target_distribution() -> None:
-    assert not hasattr(AgentSdk, "accept_offloading_session")
-    assert "target_agent_ids" not in inspect.signature(
+def create_request(request_id: str = "create-001") -> ComputeSessionRequest:
+    return ComputeSessionRequest(
+        message_type="COMPUTE_SESSION_REQUEST",
+        request_type=ComputeRequestType.CREATE,
+        input_format=ComputeInputFormat.STRUCTURED,
+        request_id=request_id,
+        acn_context=AcnContext(
+            group_id="g1",
+            requester_agent_id=LOCAL_ID,
+            target_agent_id=PEER_ID,
+        ),
+        constraints=ComputeConstraints(
+            capability_id="dog-vision",
+            resources=ComputeResources(cpu_millicores=2000, memory_mib=4096),
+            allow_base_qos=True,
+        ),
+        ui_locale="zh-CN",
+    )
+
+
+def connect_config(role: str = "consumer") -> dict:
+    return {
+        "compute_service_session_id": "css-001",
+        "compute_instance_id": "ci-001",
+        "binding_ref": "binding-css-001-7f84",
+        "role": role,
+        "receiver_agent_id": LOCAL_ID,
+        "service_endpoint": "http://8.8.8.9:8788/sandbox-base",
+        "network_binding": {
+            "pdu_session_id": 1,
+            "dnn": "internet",
+            "snssai": {"sst": 1, "sd": "010203"},
+            "ue_ipv4": "8.8.8.7",
+            "runtime_data_plane": {
+                "access_type": "HTTP3_CONNECT_IP",
+                "session_selection": "EXACT_PDU_SESSION_ID",
+            },
+        },
+        "connection_parameters": {
+            "media_connections_path": "/v1/media-connections",
+            "transport": "WEBRTC",
+            "recognition_target_path_template": (
+                "/v1/recognition-targets/{compute_service_session_id}"
+            ),
+        },
+    }
+
+
+def test_computing_api_replaces_legacy_offloading_api() -> None:
+    assert not hasattr(AgentSdk, "create_offloading_session")
+    assert "request" in inspect.signature(AgentSdk.create_computing_session).parameters
+    assert "compute_service_session_id" in inspect.signature(
         AgentSdk.start_video_upload
     ).parameters
-    assert "session" in inspect.signature(AgentSdk.start_video_upload).parameters
-    assert "session" in inspect.signature(
+    assert "compute_service_session_id" in inspect.signature(
         AgentSdk.get_processed_video_stream
     ).parameters
-    create_parameters = inspect.signature(AgentSdk.create_offloading_session).parameters
-    assert "sandbox_spec" in create_parameters
-    assert "agent_id" not in create_parameters
-    assert "group_id" not in create_parameters
-    assert "sandbox_id" not in create_parameters
+    assert "compute_service_session_id" in inspect.signature(
+        AgentSdk.update_recognition_target
+    ).parameters
+    assert "compute_service_session_id" in inspect.signature(
+        AgentSdk.get_recognition_target
+    ).parameters
+    assert "compute_service_session_id" in inspect.signature(
+        AgentSdk.create_control_action
+    ).parameters
+    assert "compute_service_session_id" in inspect.signature(
+        AgentSdk.get_control_action
+    ).parameters
+
+
+async def test_create_uses_formal_path_and_exact_body(sdk_fixture):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    await runtime.deliver_group_config(group_payload())
+
+    status = await sdk.create_computing_session(create_request())
+
+    assert isinstance(status, ComputeSessionStatus)
+    assert status.compute_service_session_id == "css-001"
+    _, path, body = runtime.requests[-1]
+    assert path == "/v1/computing/session-requests"
+    assert body == {
+        "message_type": "COMPUTE_SESSION_REQUEST",
+        "request_type": "CREATE",
+        "input_format": "STRUCTURED",
+        "request_id": "create-001",
+        "acn_context": {
+            "group_id": "g1",
+            "requester_agent_id": LOCAL_ID,
+            "target_agent_id": PEER_ID,
+        },
+        "constraints": {
+            "capability_id": "dog-vision",
+            "resources": {"cpu_millicores": 2000, "memory_mib": 4096},
+            "allow_base_qos": True,
+        },
+        "ui_locale": "zh-CN",
+    }
+    assert "proof" not in body
+    assert "timestamp" not in body
+
+
+async def test_create_requires_a_locally_active_group(sdk_fixture):
+    with pytest.raises(AgentSdkError) as error:
+        await sdk_fixture["sdk"].create_computing_session(create_request())
+
+    assert error.value.code is ErrorCode.GROUP_NOT_ACTIVE
+
+
+async def test_create_rejects_mismatched_c04_request_id(sdk_fixture):
+    runtime = sdk_fixture["runtime"]
+    await runtime.deliver_group_config(group_payload())
+
+    async def response_with_wrong_id(method, path, body):
+        del method, path
+        return RuntimeHttpResponse(
+            202,
+            {
+                "message_type": "COMPUTE_SESSION_STATUS",
+                "request_id": "another-request",
+                "compute_service_session_id": "css-001",
+                "status_revision": "1",
+                "status": "ACCEPTED",
+                "cause": "",
+            },
+        )
+
+    runtime.request_with_status = response_with_wrong_id
+    with pytest.raises(AgentSdkError, match="request_id") as error:
+        await sdk_fixture["sdk"].create_computing_session(create_request())
+
+    assert error.value.code is ErrorCode.RUNTIME_REJECTED
 
 
 @pytest.mark.parametrize(
-    "sandbox_spec,field",
+    "method,request_type,target",
     [
-        (SandboxSpec(vcpus=0, memory_mb=4096), "sandbox_spec.vcpus"),
-        (SandboxSpec(vcpus=2, memory_mb=0), "sandbox_spec.memory_mb"),
+        ("query_computing_session", ComputeRequestType.QUERY, "target_request_id"),
+        ("cancel_computing_session", ComputeRequestType.CANCEL, "target_request_id"),
+        ("release_computing_session", ComputeRequestType.RELEASE, "compute_service_session_id"),
     ],
 )
-async def test_create_rejects_invalid_sandbox_spec(sdk_fixture, sandbox_spec, field):
+async def test_lifecycle_requests_share_formal_endpoint(
+    sdk_fixture, method, request_type, target
+):
+    request = ComputeSessionRequest(
+        message_type="COMPUTE_SESSION_REQUEST",
+        request_type=request_type,
+        input_format=ComputeInputFormat.STRUCTURED,
+        request_id=f"{request_type.value.lower()}-001",
+        target_request_id="create-001" if target == "target_request_id" else None,
+        compute_service_session_id="css-001" if target == "compute_service_session_id" else None,
+    )
+
+    await getattr(sdk_fixture["sdk"], method)(request)
+
+    _, path, body = sdk_fixture["runtime"].requests[-1]
+    assert path == "/v1/computing/session-requests"
+    assert body["request_type"] == request_type.value
+    assert body[target] in {"create-001", "css-001"}
+
+
+async def test_c02_is_accepted_internally_and_consumer_media_uses_cached_endpoint(
+    sdk_fixture,
+):
+    runtime = sdk_fixture["runtime"]
+    response = await runtime.deliver_downlink(
+        "COMPUTE_CONNECT_CONFIG", connect_config(), 49
+    )
+
+    assert response == {
+        "compute_service_session_id": "css-001",
+        "compute_instance_id": "ci-001",
+        "binding_ref": "binding-css-001-7f84",
+        "role": "consumer",
+        "receiver_agent_id": LOCAL_ID,
+        "network_binding": connect_config()["network_binding"],
+        "accepted": True,
+        "cause": "",
+    }
+    stream = await sdk_fixture["sdk"].get_processed_video_stream("css-001")
+    assert sdk_fixture["media"].stream_args == ("css-001",)
+    method, url, body, timeout, source_ipv4 = sdk_fixture["sandbox"].requests[-1]
+    assert (method, url, timeout, source_ipv4) == (
+        "POST",
+        "http://8.8.8.9:8788/v1/media-connections",
+        15.0,
+        "8.8.8.7",
+    )
+    assert body["computing_context"] == {
+        "compute_service_session_id": "css-001",
+        "compute_instance_id": "ci-001",
+        "binding_ref": "binding-css-001-7f84",
+        "role": "consumer",
+        "agent_id": LOCAL_ID,
+    }
+    assert body["offer"]["type"] == "offer"
+    assert "a=recvonly" in body["offer"]["sdp"]
+    assert "8.8.8.9/32" in sdk_fixture["backend"].routes
+    assert "8.8.8.10/32" in sdk_fixture["backend"].routes
+    assert await stream.recv() == b"frame"
+
+
+async def test_producer_media_uses_cached_c02(sdk_fixture):
+    await sdk_fixture["runtime"].deliver_downlink(
+        "COMPUTE_CONNECT_CONFIG", connect_config("producer"), 50
+    )
+
+    upload = await sdk_fixture["sdk"].start_video_upload("css-001", fps=24)
+
+    assert upload.track_id == "camera-track-1"
+    assert sdk_fixture["media"].upload_args[0] == "css-001"
+    assert sdk_fixture["media"].upload_args[1]["fps"] == 24
+    method, url, body, _, _ = sdk_fixture["sandbox"].requests[-1]
+    assert (method, url) == ("POST", "http://8.8.8.9:8788/v1/media-connections")
+    assert body["computing_context"]["role"] == "producer"
+    assert "a=sendonly" in body["offer"]["sdp"]
+
+
+async def test_consumer_close_deletes_only_media_and_restores_service_route(sdk_fixture):
+    await sdk_fixture["runtime"].deliver_downlink(
+        "COMPUTE_CONNECT_CONFIG", connect_config("consumer"), 50
+    )
+    stream = await sdk_fixture["sdk"].get_processed_video_stream("css-001")
+
+    await stream.close()
+
+    assert sdk_fixture["sandbox"].requests[-1][0:2] == (
+        "DELETE",
+        "http://8.8.8.9:8788/v1/media-connections/media-consumer-001",
+    )
+    assert "8.8.8.9/32" in sdk_fixture["backend"].routes
+    assert "8.8.8.10/32" not in sdk_fixture["backend"].routes
+    assert "css-001" in sdk_fixture["sdk"]._computing_sessions
+
+
+async def test_media_retry_reuses_request_id_and_offer(sdk_fixture):
+    await sdk_fixture["runtime"].deliver_downlink(
+        "COMPUTE_CONNECT_CONFIG", connect_config("producer"), 50
+    )
+    sandbox = sdk_fixture["sandbox"]
+    actual_request = sandbox.request_with_status
+    calls = []
+
+    async def fail_once(method, url, body, timeout_seconds, source_ipv4):
+        calls.append((method, url, body, timeout_seconds, source_ipv4))
+        if len(calls) == 1:
+            raise AgentSdkError(
+                ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                "connection reset after POST",
+                retryable=True,
+            )
+        return await actual_request(method, url, body, timeout_seconds, source_ipv4)
+
+    sandbox.request_with_status = fail_once
+    await sdk_fixture["sdk"].start_video_upload("css-001")
+
+    assert len(calls) == 2
+    assert calls[0][2] == calls[1][2]
+    assert calls[0][2]["request_id"].startswith("media-producer-")
+
+
+async def test_media_retry_after_public_timeout_keeps_pending_offer(sdk_fixture):
+    await sdk_fixture["runtime"].deliver_downlink(
+        "COMPUTE_CONNECT_CONFIG", connect_config("producer"), 50
+    )
+    sandbox = sdk_fixture["sandbox"]
+    actual_request = sandbox.request_with_status
+    calls = []
+
+    async def fail_first_api_call(method, url, body, timeout_seconds, source_ipv4):
+        calls.append((method, url, body, timeout_seconds, source_ipv4))
+        if len(calls) <= 2:
+            raise AgentSdkError(ErrorCode.TIMEOUT, "unknown POST result", retryable=True)
+        return await actual_request(method, url, body, timeout_seconds, source_ipv4)
+
+    sandbox.request_with_status = fail_first_api_call
     with pytest.raises(AgentSdkError) as error:
-        await sdk_fixture["sdk"].create_offloading_session(
-            workload_type="video_rendering",
-            sandbox_spec=sandbox_spec,
+        await sdk_fixture["sdk"].start_video_upload("css-001")
+    assert error.value.retryable is True
+
+    upload = await sdk_fixture["sdk"].start_video_upload("css-001")
+
+    assert upload.track_id == "camera-track-1"
+    assert len(calls) == 3
+    assert calls[0][2] == calls[1][2] == calls[2][2]
+
+
+async def test_media_rejects_untrusted_response_echo(sdk_fixture):
+    await sdk_fixture["runtime"].deliver_downlink(
+        "COMPUTE_CONNECT_CONFIG", connect_config("consumer"), 50
+    )
+    sandbox = sdk_fixture["sandbox"]
+
+    async def wrong_echo(method, url, body, timeout_seconds, source_ipv4):
+        del method, url, timeout_seconds, source_ipv4
+        return RuntimeHttpResponse(201, {
+            "request_id": body["request_id"],
+            "computing_context": {**body["computing_context"], "binding_ref": "wrong"},
+            "media_connection_id": "untrusted-media",
+            "answer": {"type": "answer", "sdp": "v=0\r\n"},
+        })
+
+    sandbox.request_with_status = wrong_echo
+    with pytest.raises(AgentSdkError) as error:
+        await sdk_fixture["sdk"].get_processed_video_stream("css-001")
+
+    assert error.value.code is ErrorCode.MEDIA_NEGOTIATION_FAILED
+    assert sdk_fixture["media"].prepared.aborted is True
+
+
+async def test_media_rejects_host_candidate_outside_c02_user_plane(sdk_fixture):
+    await sdk_fixture["runtime"].deliver_downlink(
+        "COMPUTE_CONNECT_CONFIG", connect_config("producer"), 50
+    )
+    media = sdk_fixture["media"]
+    original_prepare = media.prepare_video_upload
+
+    async def prepare_with_wifi_candidate(session, **kwargs):
+        prepared = await original_prepare(session, **kwargs)
+        prepared.offer_sdp += "a=candidate:9 1 UDP 1 192.168.1.9 50001 typ host\r\n"
+        return prepared
+
+    media.prepare_video_upload = prepare_with_wifi_candidate
+    with pytest.raises(AgentSdkError, match="outside the C-02"):
+        await sdk_fixture["sdk"].start_video_upload("css-001")
+
+    assert media.prepared.aborted is True
+    assert sdk_fixture["sandbox"].requests == []
+
+
+async def test_answer_application_failure_deletes_remote_and_restores_route(sdk_fixture):
+    await sdk_fixture["runtime"].deliver_downlink(
+        "COMPUTE_CONNECT_CONFIG", connect_config("producer"), 50
+    )
+    media = sdk_fixture["media"]
+    original_prepare = media.prepare_video_upload
+
+    async def failing_prepare(session, **kwargs):
+        prepared = await original_prepare(session, **kwargs)
+
+        async def fail(answer_sdp, timeout_seconds):
+            del answer_sdp, timeout_seconds
+            raise AgentSdkError(
+                ErrorCode.MEDIA_NEGOTIATION_FAILED, "setRemoteDescription failed"
+            )
+
+        prepared.apply_answer = fail
+        return prepared
+
+    media.prepare_video_upload = failing_prepare
+    with pytest.raises(AgentSdkError, match="setRemoteDescription"):
+        await sdk_fixture["sdk"].start_video_upload("css-001")
+
+    assert sdk_fixture["sandbox"].requests[-1][0] == "DELETE"
+    assert "8.8.8.9/32" in sdk_fixture["backend"].routes
+    assert "8.8.8.10/32" not in sdk_fixture["backend"].routes
+
+
+async def test_c05_wins_a_media_create_race_and_deletes_late_connection(sdk_fixture):
+    runtime = sdk_fixture["runtime"]
+    await runtime.deliver_downlink(
+        "COMPUTE_CONNECT_CONFIG", connect_config("producer"), 50
+    )
+    sandbox = sdk_fixture["sandbox"]
+    actual_request = sandbox.request_with_status
+    post_started = asyncio.Event()
+    release_post = asyncio.Event()
+
+    async def delayed_post(method, url, body, timeout_seconds, source_ipv4):
+        if method == "POST":
+            post_started.set()
+            await release_post.wait()
+        return await actual_request(method, url, body, timeout_seconds, source_ipv4)
+
+    sandbox.request_with_status = delayed_post
+    upload_task = asyncio.create_task(
+        sdk_fixture["sdk"].start_video_upload("css-001")
+    )
+    await post_started.wait()
+    close = {
+        "compute_service_session_id": "css-001",
+        "compute_instance_id": "ci-001",
+        "binding_ref": "binding-css-001-7f84",
+        "role": "producer",
+        "receiver_agent_id": LOCAL_ID,
+        "cause": "released",
+    }
+
+    ack = await runtime.deliver_downlink("COMPUTE_SESSION_CLOSE", close, 51)
+    release_post.set()
+    with pytest.raises(AgentSdkError) as error:
+        await upload_task
+
+    assert ack["closed"] is True
+    assert error.value.code is ErrorCode.COMPUTING_SESSION_INVALID
+    assert any(request[0] == "DELETE" for request in sandbox.requests)
+    assert "css-001" not in sdk_fixture["sdk"]._computing_media
+
+
+async def test_c04_deduplicates_by_status_revision(sdk_fixture):
+    runtime = sdk_fixture["runtime"]
+    await runtime.deliver_downlink(
+        "COMPUTE_SESSION_STATUS",
+        {
+            "request_id": "create-001",
+            "compute_service_session_id": "css-001",
+            "status_revision": "3",
+            "status": "MEDIA_CONNECTING",
+            "cause": "",
+        },
+        34,
+    )
+    await runtime.deliver_downlink(
+        "COMPUTE_SESSION_STATUS",
+        {
+            "request_id": "create-001",
+            "compute_service_session_id": "css-001",
+            "status_revision": "2",
+            "status": "ACTIVATING",
+            "cause": "",
+        },
+        35,
+    )
+
+    assert sdk_fixture["sdk"]._computing_statuses["css-001"].status == "MEDIA_CONNECTING"
+
+
+async def test_c05_closes_sdk_media_and_replays_same_c06(sdk_fixture):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    await runtime.deliver_downlink(
+        "COMPUTE_CONNECT_CONFIG", connect_config("producer"), 49
+    )
+    upload = await sdk.start_video_upload("css-001")
+    close = {
+        "compute_service_session_id": "css-001",
+        "compute_instance_id": "ci-001",
+        "binding_ref": "binding-css-001-7f84",
+        "role": "producer",
+        "receiver_agent_id": LOCAL_ID,
+        "cause": "released",
+    }
+
+    first = await runtime.deliver_downlink("COMPUTE_SESSION_CLOSE", close, 50)
+    second = await runtime.deliver_downlink("COMPUTE_SESSION_CLOSE", close, 50)
+
+    assert first == second
+    assert first["closed"] is True
+    assert first["cause"] == ""
+    assert upload.state == "STOPPED"
+    assert sdk_fixture["sandbox"].requests[-1][0:2] == (
+        "DELETE",
+        "http://8.8.8.9:8788/v1/media-connections/media-producer-001",
+    )
+    assert "8.8.8.9/32" not in sdk_fixture["backend"].routes
+
+
+async def test_recognition_target_uses_c02_path_and_context(sdk_fixture):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    sandbox = sdk_fixture["sandbox"]
+    await runtime.deliver_downlink("COMPUTE_CONNECT_CONFIG", connect_config(), 49)
+
+    updated = await sdk.update_recognition_target(
+        "css-001",
+        request_id="recognition-001",
+        text="寻找红色玩偶",
+        language="zh",
+    )
+    fetched = await sdk.get_recognition_target("css-001")
+
+    assert isinstance(updated, RecognitionTargetStatus)
+    assert updated == fetched
+    assert updated.status == "APPLIED"
+    assert updated.target_revision == "1"
+    assert updated.target.label == "红色玩偶"
+    method, url, body, _, source_ip = sandbox.requests[-2]
+    assert method == "PUT"
+    assert url == "http://8.8.8.9:8788/v1/recognition-targets/css-001"
+    assert source_ip == "8.8.8.7"
+    assert body == {
+        "request_id": "recognition-001",
+        "computing_context": {
+            "compute_service_session_id": "css-001",
+            "compute_instance_id": "ci-001",
+            "binding_ref": "binding-css-001-7f84",
+            "role": "consumer",
+            "agent_id": LOCAL_ID,
+        },
+        "input": {"type": "TEXT", "text": "寻找红色玩偶", "language": "zh"},
+    }
+    assert sandbox.requests[-1][0:3] == (
+        "GET",
+        "http://8.8.8.9:8788/v1/recognition-targets/css-001",
+        None,
+    )
+
+
+async def test_c02_rejects_invalid_recognition_target_template(sdk_fixture):
+    payload = connect_config()
+    payload["connection_parameters"]["recognition_target_path_template"] = (
+        "/v1/recognition-targets/current"
+    )
+
+    response = await sdk_fixture["runtime"].deliver_downlink(
+        "COMPUTE_CONNECT_CONFIG", payload, 49
+    )
+
+    assert response["accepted"] is False
+    assert response["cause"] == "invalid-request"
+
+
+async def test_text_control_action_uses_formal_sandbox_resource(sdk_fixture):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    sandbox = sdk_fixture["sandbox"]
+    await runtime.deliver_downlink("COMPUTE_CONNECT_CONFIG", connect_config(), 49)
+
+    created = await sdk.create_control_action(
+        "css-001",
+        ControlActionRequest(
+            request_id="control-search-001",
+            input_type=ControlInputType.TEXT,
+            text="寻找杯子",
+            language="zh",
+        ),
+    )
+    fetched = await sdk.get_control_action("css-001", created.action_id)
+
+    assert created.action_id == "action-001"
+    assert created.status == "RUNNING"
+    assert created.normalized_action is ControlAction.SEARCH_OBJECT
+    assert created.normalized_parameters == {"query": "cup"}
+    assert fetched.status == "COMPLETED"
+    assert fetched.computing_context is None
+    method, url, body, _, source_ip = sandbox.requests[-2]
+    assert method == "POST"
+    assert url == "http://8.8.8.9:8788/v1/control-actions"
+    assert source_ip == "8.8.8.7"
+    assert body == {
+        "request_id": "control-search-001",
+        "computing_context": {
+            "compute_service_session_id": "css-001",
+            "compute_instance_id": "ci-001",
+            "binding_ref": "binding-css-001-7f84",
+            "role": "consumer",
+            "agent_id": LOCAL_ID,
+        },
+        "input": {"type": "TEXT", "text": "寻找杯子", "language": "zh"},
+    }
+    assert sandbox.requests[-1][0:3] == (
+        "GET",
+        "http://8.8.8.9:8788/v1/control-actions/action-001",
+        None,
+    )
+
+
+async def test_structured_control_action_requires_parameters(sdk_fixture):
+    with pytest.raises(AgentSdkError) as error:
+        await sdk_fixture["sdk"].create_control_action(
+            "css-001",
+            ControlActionRequest(
+                request_id="control-movement-001",
+                input_type=ControlInputType.STRUCTURED,
+                action=ControlAction.MOVEMENT,
+            ),
         )
 
     assert error.value.code is ErrorCode.INVALID_ARGUMENT
-    assert error.value.field == field
+    assert error.value.field == "parameters"
 
 
-async def test_compute_control_override_installs_route_and_isolates_requests(tmp_path):
-    fixture = await _create_sdk_fixture(
-        tmp_path,
-        restore_profile=True,
-        compute_override=True,
-    )
-    try:
-        sdk = fixture["sdk"]
-        runtime = fixture["runtime"]
-        compute_runtime = fixture["compute_runtime"]
-        backend = fixture["backend"]
-        await runtime.deliver_group_config(group_payload())
+async def test_c02_rejects_network_binding_mismatch(sdk_fixture):
+    payload = connect_config()
+    payload["network_binding"]["ue_ipv4"] = "8.8.8.6"
 
-        await sdk.create_offloading_session(
-            workload_type="video_rendering",
-            sandbox_spec=SandboxSpec(vcpus=2, memory_mb=4096),
-        )
-
-        assert "172.30.0.10/32" in backend.routes
-        assert compute_runtime.requests[-1][1] == "/compute/v1/offloading-sessions"
-        assert not any(path.startswith("/compute/") for _, path, _ in runtime.requests)
-    finally:
-        await fixture["sdk"].close()
-
-
-async def test_create_upload_and_self_receive_use_only_declared_media_apis(sdk_fixture):
-    sdk = sdk_fixture["sdk"]
-    runtime = sdk_fixture["runtime"]
-    media = sdk_fixture["media"]
-    messenger = sdk_fixture["messenger"]
-    backend = sdk_fixture["backend"]
-    await runtime.deliver_group_config(group_payload())
-
-    session = await sdk.create_offloading_session(
-        workload_type="video_rendering",
-        sandbox_spec=SandboxSpec(vcpus=2, memory_mb=4096),
+    response = await sdk_fixture["runtime"].deliver_downlink(
+        "COMPUTE_CONNECT_CONFIG", payload, 49
     )
 
-    _, path, body = runtime.requests[-1]
-    assert path == "/compute/v1/offloading-sessions"
-    assert set(body) == {
-        "request_id",
-        "workload_type",
-        "sandbox_spec",
-        "timestamp",
-        "proof",
-    }
-    assert body["workload_type"] == "video_rendering"
-    assert body["sandbox_spec"] == {"vcpus": 2, "memory_mb": 4096}
-    uuid.UUID(body["request_id"])
-    assert session.state == "ALLOCATED"
-    assert session.producer is not None
-    assert session.processed_stream is not None
-    assert "access_token" not in repr(session)
-    assert "access_ticket" not in repr(session)
-
-    upload = await sdk.start_video_upload(
-        session,
-        camera_id=2,
-        width=1280,
-        height=720,
-        fps=30,
-        bitrate_kbps=2500,
-    )
-
-    assert session.state == "SOURCE_CONNECTED"
-    assert media.upload_args == (
-        "session-1",
-        {
-            "camera_id": 2,
-            "width": 1280,
-            "height": 720,
-            "fps": 30,
-            "bitrate_kbps": 2500,
-        },
-    )
-    assert upload.track_id == "camera-track-1"
-    assert not any(path.endswith("/consumers") for _, path, _ in runtime.requests)
-    assert messenger.calls == []
-
-    stream = await sdk.get_processed_video_stream(session)
-    assert "8.8.8.9/32" in backend.routes
-    assert await stream.recv() == b"frame"
-
-
-async def test_application_supplied_remote_session_gets_processed_stream(sdk_fixture):
-    sdk = sdk_fixture["sdk"]
-    runtime = sdk_fixture["runtime"]
-    backend = sdk_fixture["backend"]
-    await runtime.deliver_group_config(group_payload())
-    session = OffloadingSession(
-        session_id="session-from-b",
-        state="SOURCE_CONNECTED",
-        processed_stream=ProcessedVideoEndpoint(
-            video_server_ip="8.8.8.9",
-            offer_url="https://8.8.8.9:28500/v1/processed/offer",
-            protocol="webrtc",
-            signaling="non-trickle",
-        ),
-    )
-
-    stream = await sdk.get_processed_video_stream(session)
-
-    assert session.processed_stream.offer_url.endswith("/v1/processed/offer")
-    assert "8.8.8.9/32" in backend.routes
-    assert await stream.recv() == b"frame"
-
-
-async def test_application_supplied_session_drives_upload_endpoint(sdk_fixture):
-    sdk = sdk_fixture["sdk"]
-    media = sdk_fixture["media"]
-    backend = sdk_fixture["backend"]
-    session = OffloadingSession(
-        session_id="session-created-elsewhere",
-        state="ALLOCATED",
-        producer=VideoUploadEndpoint(
-            video_server_ip="9.9.9.9",
-            source_start_url="https://9.9.9.9:29500/source",
-            source_stop_url="https://9.9.9.9:29500/source/stop",
-        ),
-        processed_stream=ProcessedVideoEndpoint(
-            video_server_ip="9.9.9.10",
-            offer_url="https://9.9.9.10:29501/processed",
-        ),
-    )
-
-    upload = await sdk.start_video_upload(session, fps=24)
-
-    assert upload.track_id == "camera-track-1"
-    assert media.upload_args[0] == "session-created-elsewhere"
-    assert {"9.9.9.9/32", "9.9.9.10/32"} <= backend.routes
-
-
-async def test_processed_stream_rejects_session_without_endpoint(sdk_fixture):
-    sdk = sdk_fixture["sdk"]
-    session = OffloadingSession(
-        session_id="session-without-endpoint",
-        state="SOURCE_CONNECTED",
-    )
-
-    with pytest.raises(AgentSdkError) as error:
-        await sdk.get_processed_video_stream(session)
-
-    assert error.value.code is ErrorCode.OFFLOADING_SESSION_INVALID
+    assert response["accepted"] is False
+    assert response["cause"] == "network-binding-mismatch"

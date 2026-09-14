@@ -23,8 +23,7 @@ class DiagnosticLogWiringTest {
 
         assertTrue(activity.contains("Dump 日志"))
         assertTrue(activity.contains("DiagnosticLogExporter.createDump"))
-        assertTrue(exporter.contains("[WEBRTC INBOUND RTP]"))
-        assertTrue(exporter.contains("AndroidWebRtcMediaDiagnostics.render()"))
+        assertTrue(exporter.contains("compute_endpoint=<managed by SDK from C-02>"))
         assertTrue(exporter.contains("[VIDEO PREVIEW RENDERER]"))
         assertTrue(renderer.contains("renderer=TextureView/EglRenderer"))
         assertTrue(activity.contains("?.diagnosticSummary()"))
@@ -39,32 +38,6 @@ class DiagnosticLogWiringTest {
         assertTrue(runner.contains("masque_downlink_read_buffer_too_small="))
         assertTrue(runner.contains("masque_uplink_datagram_too_large="))
         assertTrue(manifest.contains("androidx.core.content.FileProvider"))
-    }
-
-    @Test
-    fun inboundRtpCountersRemainAvailableForTheDump() {
-        AndroidWebRtcMediaDiagnostics.reset()
-        AndroidWebRtcMediaDiagnostics.update(
-            InboundRtpDiagnosticSnapshot(
-                sessionId = "session-1",
-                trackId = "track-1",
-                peerConnectionState = "CONNECTED",
-                packetsReceived = 12,
-                bytesReceived = 3456,
-                framesDecoded = 10,
-                framesDropped = 2,
-                decodedSinkCallbacks = 10,
-                lastFrameSize = "1280x720",
-                statsSamples = 3,
-            ),
-        )
-
-        val rendered = AndroidWebRtcMediaDiagnostics.render()
-        assertTrue(rendered.contains("packetsReceived=12"))
-        assertTrue(rendered.contains("bytesReceived=3456"))
-        assertTrue(rendered.contains("framesDecoded=10"))
-        assertTrue(rendered.contains("framesDropped=2"))
-        assertTrue(rendered.contains("decoded_sink_callbacks=10"))
     }
 
     @Test
