@@ -2,6 +2,30 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-14 — 恢复实机验证过的WebRTC VPN路由模型
+
+### 修改原因
+
+- 修改记录确认`0.2.18`至`0.2.24`的真实Android链路已完成B与N6的ICE/DTLS、A的持续RTP接收，
+  后续处理的是关键帧、H.264解码和EGL渲染卡顿；该链路通过关闭libwebrtc Android网络监视器，
+  让普通ICE socket由非旁路`AgentVpnService`按Sandbox路由进入CONNECT-IP。
+- 正式算力会话改造删除了该设置并增加`networkPreference=VPN`，后续又用
+  `networkIgnoreMask`屏蔽物理网络。Android真机无法由libwebrtc枚举出可用VPN adapter，ICE在
+  候选收集阶段以`observed adapters: none`结束。
+
+### 修改方式
+
+- SDK内置WebRTC适配器恢复`disableNetworkMonitor=true`，移除`networkIgnoreMask`和
+  `networkPreference=VPN`；正式C-02缓存、U-MEDIA请求、Offer方角色和媒体接口保持不变。
+- 候选选择不再依赖网络监视器的adapter标签，只发布地址精确等于C-02 `ue_ipv4`的候选；继续
+  记录实际候选地址和adapter，拒绝物理网地址进入发送给Sandbox的Offer。
+- Android测试App升级为`0.2.33`、`versionCode=35`。
+
+### 验证内容
+
+- Android候选策略回归测试覆盖TUN候选adapter标签不确定的情况；执行SDK/App全量测试及
+  Generic、RayNeo debug APK构建。
+
 ## 2026-09-14 — WebRTC网络监视器延迟到CONNECT-IP就绪后创建
 
 ### 修改原因

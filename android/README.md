@@ -534,9 +534,9 @@ SDK 模块内置 libwebrtc 媒体适配器，并通过 Gradle 声明
 `binding_ref` 或 `media_connection_id`。两端都主动生成完整非 Trickle ICE Offer：
 producer 为 `sendonly`，consumer 为 `recvonly`。SDK 等待 ICE 收集完成后 POST C-02
 媒体集合路径，校验 HTTP 201 的 `request_id/computing_context` 回显和 Answer，再设置
-远端描述。Android WebRTC 工厂忽略物理 Wi-Fi、蜂窝、以太网和回环网络；SDK 根据
-libwebrtc 候选回调的 `adapterType` 只发布 VPN/TUN 候选。VPN host candidate 被隐私名称
-遮蔽时，SDK 使用已由 C-02 校验的 `ue_ipv4` 发布，并由核心层再次检查。Answer 中的
+远端描述。Android WebRTC 工厂关闭 libwebrtc 的 Android 网络监视器，使未受保护的
+ICE socket 继续由非旁路 `AgentVpnService` 根据 Sandbox 路由送入 CONNECT-IP；SDK
+只发布地址与 C-02 `ue_ipv4` 一致的候选，并由核心层再次检查。Answer 中的
 IPv4 候选在应用前加入 CONNECT-IP 路由。`upload.stop()`、`stream.close()`、C-05 和
 `sdk.close()` 负责本地关闭，主动关闭同时发送
 `DELETE /v1/media-connections/{media_connection_id}` 并要求 HTTP 204。

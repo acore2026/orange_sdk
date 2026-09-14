@@ -10,41 +10,42 @@ import org.webrtc.PeerConnection
 
 class AndroidIceCandidatePolicyTest {
     @Test
-    fun publishesOnlyVpnCandidateAndRestoresUeAddress() {
+    fun publishesOnlyCandidateWithC02UeAddress() {
         val wifi = "candidate:1 1 UDP 1 100.101.21.11 40000 typ host"
-        val vpn = "candidate:2 1 UDP 2 device-name.local 41000 typ host"
-        val offer = "v=0\r\na=$wifi\r\na=$vpn\r\na=end-of-candidates\r\n"
+        val tun = "candidate:2 1 UDP 2 10.60.0.2 41000 typ host"
+        val offer = "v=0\r\na=$wifi\r\na=$tun\r\na=end-of-candidates\r\n"
 
         val published = publishUserPlaneOffer(
             offer,
             "10.60.0.2",
             listOf(
                 GatheredIceCandidate(wifi, PeerConnection.AdapterType.WIFI),
-                GatheredIceCandidate(vpn, PeerConnection.AdapterType.VPN),
+                // With the Android network monitor disabled, the TUN candidate's adapter
+                // label is implementation-dependent and cannot be used as the selector.
+                GatheredIceCandidate(tun, PeerConnection.AdapterType.UNKNOWN),
             ),
         )
 
         assertFalse(published.contains("100.101.21.11"))
-        assertFalse(published.contains("device-name.local"))
         assertTrue(published.contains("a=candidate:2 1 UDP 2 10.60.0.2 41000 typ host"))
     }
 
     @Test
-    fun acceptsExactUeCandidateWhenAdapterIsUnknown() {
+    fun acceptsExactUeCandidateRegardlessOfAdapterLabel() {
         val candidate = "candidate:3 1 UDP 3 10.60.0.2 42000 typ host"
         val offer = "v=0\r\na=$candidate\r\n"
 
         val published = publishUserPlaneOffer(
             offer,
             "10.60.0.2",
-            listOf(GatheredIceCandidate(candidate, PeerConnection.AdapterType.UNKNOWN)),
+            listOf(GatheredIceCandidate(candidate, PeerConnection.AdapterType.ETHERNET)),
         )
 
         assertTrue(published.contains("10.60.0.2 42000 typ host"))
     }
 
     @Test
-    fun rejectsOfferWithoutVpnCandidate() {
+    fun rejectsOfferWithoutC02UeCandidate() {
         val wifi = "candidate:1 1 UDP 1 100.101.21.11 40000 typ host"
         val offer = "v=0\r\na=$wifi\r\n"
 

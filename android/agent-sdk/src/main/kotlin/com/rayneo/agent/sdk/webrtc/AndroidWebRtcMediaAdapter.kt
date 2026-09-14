@@ -54,8 +54,8 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
 
     private fun createFactory(): PeerConnectionFactory {
         // AgentSdk creates this adapter before initialize() establishes the VPN. Delay the
-        // libwebrtc network monitor until the first media call so its initial network list
-        // already contains the SDK-managed CONNECT-IP TUN interface.
+        // native media stack until the first media call so interface enumeration happens
+        // after the SDK-managed CONNECT-IP TUN interface exists.
         Log.i(TAG, "Creating WebRTC factory after CONNECT-IP VPN initialization")
         if (factoryInitialized.compareAndSet(false, true)) {
             PeerConnectionFactory.initialize(
@@ -64,14 +64,11 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
             )
         }
         val options = PeerConnectionFactory.Options().apply {
-            // Computing media must use the CONNECT-IP VPN/TUN network. A preference only
-            // changes candidate priority and still lets libwebrtc publish physical Wi-Fi,
-            // cellular, and Ethernet candidates.
-            networkIgnoreMask =
-                PeerConnectionFactory.Options.ADAPTER_TYPE_ETHERNET or
-                PeerConnectionFactory.Options.ADAPTER_TYPE_WIFI or
-                PeerConnectionFactory.Options.ADAPTER_TYPE_CELLULAR or
-                PeerConnectionFactory.Options.ADAPTER_TYPE_LOOPBACK
+            // Keep libwebrtc from binding ICE sockets to a ConnectivityManager network.
+            // AgentVpnService is non-bypassable, so ordinary unprotected sockets follow the
+            // CONNECT-IP route and the native interface enumeration can expose the UE/TUN IP.
+            // This is the same network model used by the previously device-verified media path.
+            disableNetworkMonitor = true
         }
         return PeerConnectionFactory.builder()
             .setOptions(options)
@@ -338,7 +335,6 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
     private fun createPeer(signals: PeerSignals): PeerConnection {
         val configuration = PeerConnection.RTCConfiguration(emptyList()).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
-            networkPreference = PeerConnection.AdapterType.VPN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_ONCE
             disableIPv6OnWifi = true
         }
@@ -510,11 +506,11 @@ internal data class GatheredIceCandidate(
 )
 
 /**
- * Publishes only candidates gathered on the SDK-managed VPN/TUN interface.
+ * Publishes only candidates carrying the C-02 UE IPv4 address.
  *
- * Android libwebrtc may obscure a VPN host address in SDP. The socket is still bound to the
- * VPN network, so publish the C-02 UE IPv4 address for that host candidate. The exact-address
- * fallback covers libwebrtc builds that report the candidate adapter as UNKNOWN.
+ * The factory deliberately disables Android's libwebrtc network monitor so its sockets remain
+ * ordinary, unprotected application sockets routed by AgentVpnService. Adapter labels are not
+ * authoritative in that mode; the address assigned to the TUN is the user-plane identity.
  */
 internal fun publishUserPlaneOffer(
     sdp: String,
@@ -529,15 +525,11 @@ internal fun publishUserPlaneOffer(
         if (!line.startsWith("a=candidate:")) return@mapNotNull line
         val records = observed[normalizeCandidate(line)].orEmpty()
         val address = candidateAddress(line)
-        val selected = records.firstOrNull {
-            it.adapterType == PeerConnection.AdapterType.VPN
-        } ?: records.firstOrNull {
-            it.adapterType == PeerConnection.AdapterType.UNKNOWN && address == ueIpv4
-        }
+        val selected = records.firstOrNull { address == ueIpv4 }
         if (selected == null) return@mapNotNull null
         selectedAdapters += selected.adapterType
         selectedCount += 1
-        rewriteVpnHostAddress(line, ueIpv4)
+        line
     }
     if (selectedCount == 0) {
         val summary = gatheredCandidates
@@ -549,8 +541,8 @@ internal fun publishUserPlaneOffer(
             .ifBlank { "none" }
         throw AgentSdkException(
             ErrorCode.MEDIA_NEGOTIATION_FAILED,
-            "WebRTC did not gather an ICE candidate on the SDK VPN/TUN network " +
-                "for UE IPv4 $ueIpv4 (observed adapters: $summary)",
+            "WebRTC did not gather an ICE candidate for the C-02 UE IPv4 $ueIpv4 " +
+                "through the SDK VPN/TUN (observed adapters: $summary)",
         )
     }
     Log.i(
@@ -569,14 +561,6 @@ internal fun candidateAddress(line: String): String? =
 
 internal fun candidateType(line: String): String? =
     candidateParts(line).getOrNull(7)
-
-private fun rewriteVpnHostAddress(line: String, ueIpv4: String): String {
-    val parts = candidateParts(line).toMutableList()
-    if (parts.size >= 8 && parts[7].equals("host", ignoreCase = true)) {
-        parts[4] = ueIpv4
-    }
-    return parts.joinToString(" ")
-}
 
 private fun candidateParts(line: String): List<String> =
     line.trim().split(Regex("\\s+"))
