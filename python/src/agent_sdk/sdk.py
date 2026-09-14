@@ -419,7 +419,14 @@ class AgentSdk:
         self._computing_media_locks: dict[str, asyncio.Lock] = {}
         self._computing_closing: set[str] = set()
         self._computing_close_results: dict[tuple[str, str, str], Mapping[str, Any]] = {}
+        self._computing_control_lock = asyncio.Lock()
         self._computing_session_changed = asyncio.Condition()
+        self._identity_removal_lock = asyncio.Lock()
+        self._identity_removal_in_progress = False
+        self._computing_requests_in_flight: set[str] = set()
+        self._computing_closed_session_ids: set[str] = set()
+        self._received_a2a_message_ids: dict[str, None] = {}
+        self._received_a2a_lock = asyncio.Lock()
 
     def _log(
         self,
@@ -835,12 +842,15 @@ class AgentSdk:
             transaction_id=transaction_id,
         )
         if message_type == _COMPUTE_CONNECT_CONFIG:
-            return await self._handle_compute_connect_config(payload)
+            async with self._computing_control_lock:
+                return await self._handle_compute_connect_config(payload)
         if message_type == _COMPUTE_SESSION_STATUS:
-            await self._handle_compute_session_status(payload)
+            async with self._computing_control_lock:
+                await self._handle_compute_session_status(payload)
             return None
         if message_type == _COMPUTE_SESSION_CLOSE:
-            return await self._handle_compute_session_close(payload)
+            async with self._computing_control_lock:
+                return await self._handle_compute_session_close(payload)
         if message_type == "ACN_AGENT_GROUPING_INVITATION":
             action = await self._handle_group_invitation(payload)
             group_info = payload.get("group_info")
@@ -968,7 +978,27 @@ class AgentSdk:
             raise AgentSdkError(
                 ErrorCode.INVALID_ARGUMENT, "A2A payload must be a JSON object"
             )
-        await self._group_listener.on_group_message(group_id, sender_id, user_payload)
+        message_id = str(payload["message_id"])
+        async with self._received_a2a_lock:
+            if message_id in self._received_a2a_message_ids:
+                self._log(
+                    logging.INFO,
+                    "a2a_duplicate_acknowledged",
+                    message_id=message_id,
+                )
+                return
+            self._received_a2a_message_ids[message_id] = None
+            try:
+                await self._group_listener.on_group_message(
+                    group_id, sender_id, user_payload
+                )
+            except BaseException:
+                self._received_a2a_message_ids.pop(message_id, None)
+                raise
+            while len(self._received_a2a_message_ids) > 1024:
+                del self._received_a2a_message_ids[
+                    next(iter(self._received_a2a_message_ids))
+                ]
 
     @logged_async
     async def send_message(
@@ -1147,23 +1177,28 @@ class AgentSdk:
                 "reason is not a supported deregistration reason",
                 field="reason",
             )
-        body = await self._authenticate_control_request(
-            path,
-            {
-                "request_id": str(uuid.uuid4()),
-                "agent_id": agent_id,
-                "reason": reason,
-            },
-        )
-        response = await self._runtime.request("POST", path, body)
-        result = OperationResult(
-            bool(response.get("success", True)),
-            str(response.get("operation_id", "")),
-            str(response.get("message", "")),
-        )
-        if result.success:
-            self._clear_agent_state()
-        return result
+        async with self._identity_removal_lock:
+            await self._begin_identity_removal("deregister_identity")
+            try:
+                body = await self._authenticate_control_request(
+                    path,
+                    {
+                        "request_id": str(uuid.uuid4()),
+                        "agent_id": agent_id,
+                        "reason": reason,
+                    },
+                )
+                response = await self._runtime.request("POST", path, body)
+                result = OperationResult(
+                    bool(response.get("success", True)),
+                    str(response.get("operation_id", "")),
+                    str(response.get("message", "")),
+                )
+                if result.success:
+                    self._clear_agent_state()
+                return result
+            finally:
+                self._identity_removal_in_progress = False
 
     @logged_async
     async def reset_agent(self) -> OperationResult:
@@ -1180,12 +1215,67 @@ class AgentSdk:
                 "",
                 "Agent is already in NO_IDENTITY state",
             )
-        self._clear_agent_state()
-        return OperationResult(
-            True,
-            "",
-            "Local Agent state reset to NO_IDENTITY; network identity was not changed",
+        async with self._identity_removal_lock:
+            await self._begin_identity_removal("reset_agent")
+            try:
+                self._clear_agent_state()
+                return OperationResult(
+                    True,
+                    "",
+                    "Local Agent state reset to NO_IDENTITY; network identity was not changed",
+                )
+            finally:
+                self._identity_removal_in_progress = False
+
+    async def _begin_identity_removal(self, operation: str) -> None:
+        async with self._computing_control_lock:
+            active_session_ids = self._active_computing_session_ids()
+            active_request_ids = sorted(
+                self._computing_requests_in_flight
+                | set(self._unresolved_compute_create_request_ids())
+            )
+            if active_session_ids or active_request_ids:
+                details = active_session_ids + [
+                    f"request:{request_id}"
+                    for request_id in active_request_ids
+                ]
+                raise AgentSdkError(
+                    ErrorCode.AGENT_STATE_INVALID,
+                    f"{operation} requires all computing sessions to be released or "
+                    "cancelled before clearing the Agent Profile: "
+                    + ", ".join(details),
+                )
+            self._identity_removal_in_progress = True
+
+    def _active_computing_session_ids(self) -> list[str]:
+        return sorted(
+            set(self._computing_sessions)
+            | set(self._computing_pending_media)
+            | set(self._computing_media)
+            | {
+                session_id
+                for session_id, status in self._computing_statuses.items()
+                if session_id not in self._computing_closed_session_ids
+                and status.status not in _COMPUTE_TERMINAL_STATUSES
+            }
         )
+
+    def _unresolved_compute_create_request_ids(self) -> list[str]:
+        unresolved: list[str] = []
+        for request_id in self._compute_create_requests:
+            status = self._computing_statuses_by_request.get(request_id)
+            session_id = status.compute_service_session_id if status else None
+            session_status = self._computing_statuses.get(session_id or "")
+            if status is None or not (
+                status.status in _COMPUTE_TERMINAL_STATUSES
+                or (
+                    session_status is not None
+                    and session_status.status in _COMPUTE_TERMINAL_STATUSES
+                )
+                or session_id in self._computing_closed_session_ids
+            ):
+                unresolved.append(request_id)
+        return unresolved
 
     @logged_async
     async def get_network_ability(
@@ -1564,6 +1654,39 @@ class AgentSdk:
     ) -> ComputeSessionStatus:
         await self._validate_compute_request(request, ComputeRequestType.RELEASE)
         return await self._send_compute_request(request, timeout_seconds)
+
+    @logged_async
+    async def await_computing_session_closed(
+        self,
+        compute_service_session_id: str,
+        timeout_seconds: float = 30.0,
+    ) -> None:
+        self._require_ready()
+        session_id = self._require_nonempty_string(
+            compute_service_session_id,
+            "compute_service_session_id",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+        if timeout_seconds <= 0:
+            raise AgentSdkError(
+                ErrorCode.INVALID_ARGUMENT,
+                "timeout_seconds must be greater than zero",
+                field="timeout_seconds",
+            )
+
+        async def wait() -> None:
+            async with self._computing_session_changed:
+                while session_id in self._active_computing_session_ids():
+                    await self._computing_session_changed.wait()
+
+        try:
+            await asyncio.wait_for(wait(), timeout_seconds)
+        except TimeoutError as exc:
+            raise AgentSdkError(
+                ErrorCode.TIMEOUT,
+                f"timed out waiting for C-05 to close computing session {session_id}",
+                retryable=True,
+            ) from exc
 
     @logged_async
     async def start_video_upload(
@@ -2777,68 +2900,79 @@ class AgentSdk:
                 field="timeout_seconds",
             )
         body = self._compute_request_body(request)
-        previous = self._compute_requests.get(request.request_id)
-        if previous is not None and previous != body:
-            raise AgentSdkError(
-                ErrorCode.INVALID_ARGUMENT,
-                "request_id was already used with different computing content",
-                field="request_id",
-                details={"cause": "idempotency-conflict"},
+        async with self._computing_control_lock:
+            if self._identity_removal_in_progress:
+                raise AgentSdkError(
+                    ErrorCode.AGENT_STATE_INVALID,
+                    "computing requests cannot start while the Agent Profile is being removed",
+                )
+            previous = self._compute_requests.get(request.request_id)
+            if previous is not None and previous != body:
+                raise AgentSdkError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "request_id was already used with different computing content",
+                    field="request_id",
+                    details={"cause": "idempotency-conflict"},
+                )
+            self._compute_requests[request.request_id] = body
+            self._computing_requests_in_flight.add(request.request_id)
+        try:
+            await self._compute_preflight()
+            if request.request_type is ComputeRequestType.CREATE:
+                self._compute_create_requests[request.request_id] = request
+            assert self._runtime is not None
+            response = await asyncio.wait_for(
+                self._runtime.request_with_status(
+                    "POST", _COMPUTING_SESSION_REQUEST_PATH, body
+                ),
+                timeout=timeout_seconds,
             )
-        self._compute_requests[request.request_id] = body
-        await self._compute_preflight()
-        if request.request_type is ComputeRequestType.CREATE:
-            self._compute_create_requests[request.request_id] = request
-        assert self._runtime is not None
-        response = await asyncio.wait_for(
-            self._runtime.request_with_status(
-                "POST", _COMPUTING_SESSION_REQUEST_PATH, body
-            ),
-            timeout=timeout_seconds,
-        )
-        if not isinstance(response, RuntimeHttpResponse):
+            if not isinstance(response, RuntimeHttpResponse):
+                raise AgentSdkError(
+                    ErrorCode.RUNTIME_REJECTED,
+                    "Runtime transport returned an invalid HTTP response",
+                )
+            allowed_status = (
+                {202}
+                if request.request_type is ComputeRequestType.CREATE
+                else {200}
+                if request.request_type is ComputeRequestType.QUERY
+                else {200, 202}
+            )
+            if response.body.get("message_type") == _COMPUTE_SESSION_STATUS:
+                if response.status_code not in allowed_status and not 400 <= response.status_code < 500:
+                    raise AgentSdkError(
+                        ErrorCode.RUNTIME_REJECTED,
+                        f"Runtime returned invalid HTTP {response.status_code} for "
+                        f"{request.request_type.value}",
+                        details={"http_status": response.status_code},
+                    )
+                result = self._parse_compute_status(response.body)
+                if result.request_id != request.request_id:
+                    raise AgentSdkError(
+                        ErrorCode.RUNTIME_REJECTED,
+                        "C-04 request_id does not match the computing request",
+                        field="request_id",
+                    )
+                await self._remember_compute_status(result)
+                return self._computing_statuses_by_request.get(request.request_id, result)
+            error = response.body.get("error")
+            if isinstance(error, Mapping):
+                cause = error.get("code")
+                error_code = ErrorCode.TIMEOUT if response.status_code == 504 else ErrorCode.RUNTIME_REJECTED
+                raise AgentSdkError(
+                    error_code,
+                    str(error.get("message") or f"Runtime rejected computing request: {cause}"),
+                    retryable=response.status_code in {503, 504},
+                    details={"cause": cause, "http_status": response.status_code},
+                )
             raise AgentSdkError(
                 ErrorCode.RUNTIME_REJECTED,
-                "Runtime transport returned an invalid HTTP response",
+                f"Runtime returned HTTP {response.status_code} without C-04 or error",
             )
-        allowed_status = (
-            {202}
-            if request.request_type is ComputeRequestType.CREATE
-            else {200}
-            if request.request_type is ComputeRequestType.QUERY
-            else {200, 202}
-        )
-        if response.body.get("message_type") == _COMPUTE_SESSION_STATUS:
-            if response.status_code not in allowed_status and not 400 <= response.status_code < 500:
-                raise AgentSdkError(
-                    ErrorCode.RUNTIME_REJECTED,
-                    f"Runtime returned invalid HTTP {response.status_code} for "
-                    f"{request.request_type.value}",
-                    details={"http_status": response.status_code},
-                )
-            result = self._parse_compute_status(response.body)
-            if result.request_id != request.request_id:
-                raise AgentSdkError(
-                    ErrorCode.RUNTIME_REJECTED,
-                    "C-04 request_id does not match the computing request",
-                    field="request_id",
-                )
-            await self._remember_compute_status(result)
-            return result
-        error = response.body.get("error")
-        if isinstance(error, Mapping):
-            cause = error.get("code")
-            error_code = ErrorCode.TIMEOUT if response.status_code == 504 else ErrorCode.RUNTIME_REJECTED
-            raise AgentSdkError(
-                error_code,
-                str(error.get("message") or f"Runtime rejected computing request: {cause}"),
-                retryable=response.status_code in {503, 504},
-                details={"cause": cause, "http_status": response.status_code},
-            )
-        raise AgentSdkError(
-            ErrorCode.RUNTIME_REJECTED,
-            f"Runtime returned HTTP {response.status_code} without C-04 or error",
-        )
+        finally:
+            async with self._computing_control_lock:
+                self._computing_requests_in_flight.discard(request.request_id)
 
     def _parse_compute_status(
         self, payload: Mapping[str, Any], *, message_type_in_payload: bool = True
@@ -2929,15 +3063,37 @@ class AgentSdk:
         )
 
     async def _remember_compute_status(self, status: ComputeSessionStatus) -> bool:
-        self._computing_statuses_by_request[status.request_id] = status
         session_id = status.compute_service_session_id
-        if session_id is None or status.status_revision is None:
-            return True
-        current = self._computing_statuses.get(session_id)
-        if current is not None and current.status_revision is not None:
-            if int(status.status_revision) <= int(current.status_revision):
-                return False
-        self._computing_statuses[session_id] = status
+        if (
+            session_id is not None
+            and session_id in self._computing_closed_session_ids
+            and status.status not in _COMPUTE_TERMINAL_STATUSES
+        ):
+            self._log(
+                logging.INFO,
+                "computing_status_ignored_after_local_close",
+                compute_service_session_id=session_id,
+                status=status.status,
+            )
+            return False
+        if session_id is not None and status.status_revision is not None:
+            current = self._computing_statuses.get(session_id)
+            if current is not None and current.status_revision is not None:
+                if int(status.status_revision) <= int(current.status_revision):
+                    current_for_request = self._computing_statuses_by_request.get(
+                        status.request_id
+                    )
+                    if (
+                        current_for_request is None
+                        or current_for_request.compute_service_session_id != session_id
+                        or current_for_request.status_revision is None
+                        or int(status.status_revision)
+                        > int(current_for_request.status_revision)
+                    ):
+                        self._computing_statuses_by_request[status.request_id] = status
+                    return False
+            self._computing_statuses[session_id] = status
+        self._computing_statuses_by_request[status.request_id] = status
         async with self._computing_session_changed:
             self._computing_session_changed.notify_all()
         return True
@@ -3103,7 +3259,14 @@ class AgentSdk:
             session.role.value,
             session.receiver_agent_id,
         )
+        if self._identity_removal_in_progress:
+            return self._compute_config_ack(session, False, "session-closed")
+        if session.compute_service_session_id in self._computing_closed_session_ids:
+            return self._compute_config_ack(session, False, "session-closed")
         if key in self._computing_close_results:
+            return self._compute_config_ack(session, False, "session-closed")
+        status = self._computing_statuses.get(session.compute_service_session_id)
+        if status is not None and status.status in _COMPUTE_TERMINAL_STATUSES:
             return self._compute_config_ack(session, False, "session-closed")
         current = self._computing_sessions.get(session.compute_service_session_id)
         if current is not None:
@@ -3130,6 +3293,21 @@ class AgentSdk:
         except AgentSdkError as exc:
             cause = str(exc.details.get("cause") or "config-rejected")
             return self._compute_config_ack(session, False, cause)
+        status = self._computing_statuses.get(session.compute_service_session_id)
+        profile_matches = (
+            self._profile is not None
+            and self._profile.agent_id == session.receiver_agent_id
+        )
+        if (
+            self._identity_removal_in_progress
+            or not profile_matches
+            or (status is not None and status.status in _COMPUTE_TERMINAL_STATUSES)
+        ):
+            assert self._routes is not None
+            await self._routes.replace_group_peers(
+                self._computing_route_key(session.binding_ref), set()
+            )
+            return self._compute_config_ack(session, False, "session-closed")
         self._computing_sessions[session.compute_service_session_id] = session
         async with self._computing_session_changed:
             self._computing_session_changed.notify_all()
@@ -3387,6 +3565,7 @@ class AgentSdk:
                 self._computing_route_key(session.binding_ref), set()
             )
             self._computing_sessions.pop(session.compute_service_session_id, None)
+            self._computing_closed_session_ids.add(session.compute_service_session_id)
             result = {**response_base, "closed": True, "cause": ""}
         except Exception:
             result = {**response_base, "closed": False, "cause": "runtime-unhealthy"}
@@ -3406,15 +3585,16 @@ class AgentSdk:
 
         async def wait() -> ComputingSession:
             async with self._computing_session_changed:
-                while session_id not in self._computing_sessions:
+                while True:
                     status = self._computing_statuses.get(session_id)
                     if status is not None and status.status in _COMPUTE_TERMINAL_STATUSES:
                         raise AgentSdkError(
                             ErrorCode.COMPUTING_SESSION_INVALID,
                             f"computing session ended in state {status.status}",
                         )
+                    if session_id in self._computing_sessions:
+                        return self._computing_sessions[session_id]
                     await self._computing_session_changed.wait()
-                return self._computing_sessions[session_id]
 
         try:
             return await asyncio.wait_for(wait(), timeout_seconds)
@@ -3962,6 +4142,8 @@ class AgentSdk:
                 await self._media_offload_adapter.close()
             self._compute_requests.clear()
             self._compute_create_requests.clear()
+            self._computing_requests_in_flight.clear()
+            self._computing_closed_session_ids.clear()
             self._computing_statuses.clear()
             self._computing_statuses_by_request.clear()
             self._computing_sessions.clear()
@@ -3970,6 +4152,8 @@ class AgentSdk:
             self._computing_media_locks.clear()
             self._computing_closing.clear()
             self._computing_close_results.clear()
+            self._identity_removal_in_progress = False
+            self._received_a2a_message_ids.clear()
             self._ue_info = None
             self._state = "CLOSED"
         except Exception as exc:

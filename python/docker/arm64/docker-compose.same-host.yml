@@ -2,7 +2,7 @@ name: agent-sdk-ab
 
 services:
   agent-a:
-    image: "${AGENT_IMAGE:-agent-connect-sdk:0.17.6-arm64}"
+    image: "${AGENT_IMAGE:-agent-connect-sdk:0.17.7-arm64}"
     container_name: agent-sdk-a
     command: ["start-agent-a.sh"]
     cap_add:
@@ -38,7 +38,7 @@ services:
     stop_grace_period: 15s
 
   agent-b:
-    image: "${AGENT_IMAGE:-agent-connect-sdk:0.17.6-arm64}"
+    image: "${AGENT_IMAGE:-agent-connect-sdk:0.17.7-arm64}"
     container_name: agent-sdk-b
     command: ["start-agent-b.sh"]
     cap_add:

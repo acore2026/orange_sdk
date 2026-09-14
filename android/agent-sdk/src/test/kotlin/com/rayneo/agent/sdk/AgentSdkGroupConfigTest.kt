@@ -37,6 +37,7 @@ import com.rayneo.agent.sdk.transport.VideoTrack
 import com.rayneo.agent.sdk.transport.VideoUploadHandle
 import com.rayneo.agent.sdk.security.TestCapabilityVcIssuer
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -519,6 +520,42 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
+    fun `older HTTP C04 cannot regress a newer WebSocket C04`() = runTest {
+        initializeSdk()
+        runtime.deliverGroupConfig(groupConfig(includeSecondPeer = true))
+        runtime.computeRequestHandler = { body ->
+            runtime.deliverDownlink(
+                "COMPUTE_SESSION_STATUS",
+                buildJsonObject {
+                    put("request_id", body["request_id"]!!)
+                    put("compute_service_session_id", "css-001")
+                    put("status_revision", "7")
+                    put("status", "ACTIVE")
+                    put("cause", "")
+                },
+            )
+            RuntimeHttpResponse(
+                202,
+                buildJsonObject {
+                    put("message_type", "COMPUTE_SESSION_STATUS")
+                    put("request_id", body["request_id"]!!)
+                    put("compute_service_session_id", "css-001")
+                    put("status_revision", "2")
+                    put("status", "ACCEPTED")
+                    put("cause", "")
+                },
+            )
+        }
+
+        val first = sdk.createComputingSession(createComputeRequest())
+        val replay = sdk.createComputingSession(createComputeRequest())
+
+        assertEquals("ACTIVE", first.status)
+        assertEquals("7", first.statusRevision)
+        assertEquals(first, replay)
+    }
+
+    @Test
     fun `computing lifecycle operations use the formal endpoint and target fields`() = runTest {
         initializeSdk()
 
@@ -648,6 +685,62 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
+    fun `terminal C04 takes precedence over an already cached C02`() = runTest {
+        initializeSdk()
+        runtime.deliverDownlink("COMPUTE_CONNECT_CONFIG", computeConnectConfig("consumer"))
+        runtime.deliverDownlink(
+            "COMPUTE_SESSION_STATUS",
+            computeStatus(status = "FAILED", revision = "7"),
+        )
+
+        val error = runCatching {
+            sdk.getProcessedVideoStream("css-001")
+        }.exceptionOrNull() as AgentSdkException
+
+        assertEquals(ErrorCode.COMPUTING_SESSION_INVALID, error.code)
+        assertEquals(0, media.prepareCount)
+    }
+
+    @Test
+    fun `C02 arriving after terminal C04 is rejected without installing route`() = runTest {
+        initializeSdk()
+        runtime.deliverDownlink(
+            "COMPUTE_SESSION_STATUS",
+            computeStatus(status = "FAILED", revision = "7"),
+        )
+
+        val ack = runtime.deliverDownlink(
+            "COMPUTE_CONNECT_CONFIG",
+            computeConnectConfig("consumer"),
+        )!!
+
+        assertFalse(ack["accepted"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals("session-closed", ack["cause"]!!.jsonPrimitive.content)
+        assertFalse(tunnel.groupPeers.containsKey("computing:binding-css-001"))
+    }
+
+    @Test
+    fun `C05 waits for an earlier C02 installation and then closes it`() = runTest {
+        initializeSdk()
+        val releaseRouteInstall = CompletableDeferred<Unit>()
+        tunnel.computeReplacementGate = releaseRouteInstall
+        val c02 = async {
+            runtime.deliverDownlink("COMPUTE_CONNECT_CONFIG", computeConnectConfig("consumer"))!!
+        }
+        tunnel.computeReplacementStarted.await()
+        val c05 = async {
+            runtime.deliverDownlink("COMPUTE_SESSION_CLOSE", computeSessionClose("consumer"))!!
+        }
+
+        assertFalse(c05.isCompleted)
+        releaseRouteInstall.complete(Unit)
+
+        assertTrue(c02.await()["accepted"]!!.jsonPrimitive.content.toBoolean())
+        assertTrue(c05.await()["closed"]!!.jsonPrimitive.content.toBoolean())
+        assertFalse(tunnel.groupPeers.containsKey("computing:binding-css-001"))
+    }
+
+    @Test
     fun `media retry after public timeout reuses request id and offer`() = runTest {
         initializeSdk()
         runtime.deliverDownlink("COMPUTE_CONNECT_CONFIG", computeConnectConfig("producer"))
@@ -692,6 +785,105 @@ class AgentSdkGroupConfigTest {
             sandbox.requests.last().second,
         )
         assertFalse(tunnel.groupPeers.containsKey("computing:binding-css-001"))
+    }
+
+    @Test
+    fun `identity removal preserves profile until C05 closes computing configuration`() = runTest {
+        initializeSdk()
+        runtime.deliverDownlink("COMPUTE_CONNECT_CONFIG", computeConnectConfig("consumer"))
+        val profile = checkNotNull(sdk.localProfile)
+        runtime.paths.clear()
+
+        val deregisterFailure = runCatching {
+            sdk.deregisterIdentity(profile.agentId, "normal")
+        }.exceptionOrNull() as AgentSdkException
+        val resetFailure = runCatching { sdk.resetAgent() }
+            .exceptionOrNull() as AgentSdkException
+
+        assertEquals(ErrorCode.AGENT_STATE_INVALID, deregisterFailure.code)
+        assertEquals(ErrorCode.AGENT_STATE_INVALID, resetFailure.code)
+        assertEquals(profile, sdk.localProfile)
+        assertTrue(runtime.paths.isEmpty())
+
+        val closeWaiter = async { sdk.awaitComputingSessionClosed("css-001") }
+        val close = runtime.deliverDownlink(
+            "COMPUTE_SESSION_CLOSE",
+            computeSessionClose("consumer"),
+        )!!
+        assertTrue(close["closed"]!!.jsonPrimitive.content.toBoolean())
+        closeWaiter.await()
+
+        val result = sdk.deregisterIdentity(profile.agentId, "normal")
+
+        assertTrue(result.success)
+        assertEquals(AgentLifecycleState.NO_IDENTITY, sdk.agentLifecycleState)
+        assertEquals(null, sdk.localProfile)
+        assertEquals(listOf("/acn-agent/v1/agent-deletions"), runtime.paths)
+    }
+
+    @Test
+    fun `non terminal C04 blocks reset before C02 arrives`() = runTest {
+        initializeSdk()
+        val profile = checkNotNull(sdk.localProfile)
+        runtime.deliverGroupConfig(groupConfig(includeSecondPeer = true))
+        sdk.createComputingSession(createComputeRequest())
+
+        val failure = runCatching { sdk.resetAgent() }
+            .exceptionOrNull() as AgentSdkException
+
+        assertEquals(ErrorCode.AGENT_STATE_INVALID, failure.code)
+        assertEquals(profile, sdk.localProfile)
+
+        runtime.deliverDownlink(
+            "COMPUTE_SESSION_STATUS",
+            buildJsonObject {
+                put("request_id", "cancel-001")
+                put("compute_service_session_id", "css-001")
+                put("status_revision", "3")
+                put("status", "REQUEST_CANCELLED")
+                put("cause", "cancelled")
+            },
+        )
+        val result = sdk.resetAgent()
+
+        assertTrue(result.success)
+        assertEquals(AgentLifecycleState.NO_IDENTITY, sdk.agentLifecycleState)
+    }
+
+    @Test
+    fun `in flight computing request blocks reset atomically`() = runTest {
+        initializeSdk()
+        runtime.deliverGroupConfig(groupConfig(includeSecondPeer = true))
+        val profile = checkNotNull(sdk.localProfile)
+        val requestStarted = CompletableDeferred<Unit>()
+        val releaseResponse = CompletableDeferred<Unit>()
+        runtime.computeRequestHandler = { body ->
+            requestStarted.complete(Unit)
+            releaseResponse.await()
+            RuntimeHttpResponse(
+                202,
+                buildJsonObject {
+                    put("message_type", "COMPUTE_SESSION_STATUS")
+                    put("request_id", body["request_id"]!!)
+                    put("compute_service_session_id", "css-001")
+                    put("status_revision", "3")
+                    put("status", "REQUEST_CANCELLED")
+                    put("cause", "cancelled")
+                },
+            )
+        }
+        val create = async { sdk.createComputingSession(createComputeRequest()) }
+        requestStarted.await()
+
+        val failure = runCatching { sdk.resetAgent() }
+            .exceptionOrNull() as AgentSdkException
+
+        assertEquals(ErrorCode.AGENT_STATE_INVALID, failure.code)
+        assertEquals(profile, sdk.localProfile)
+
+        releaseResponse.complete(Unit)
+        assertEquals("REQUEST_CANCELLED", create.await().status)
+        assertTrue(sdk.resetAgent().success)
     }
 
     @Test
@@ -1285,6 +1477,23 @@ class AgentSdkGroupConfigTest {
         })
     }
 
+    private fun computeStatus(status: String, revision: String): JsonObject = buildJsonObject {
+        put("request_id", "create-001")
+        put("compute_service_session_id", "css-001")
+        put("status_revision", revision)
+        put("status", status)
+        put("cause", if (status == "FAILED") "resource-activation-failed" else "")
+    }
+
+    private fun computeSessionClose(role: String): JsonObject = buildJsonObject {
+        put("compute_service_session_id", "css-001")
+        put("compute_instance_id", "ci-001")
+        put("binding_ref", "binding-css-001")
+        put("role", role)
+        put("receiver_agent_id", LOCAL_ID)
+        put("cause", "released")
+    }
+
     private fun groupConfig(
         peerPort: String = "4001",
         includeSecondPeer: Boolean = false,
@@ -1354,6 +1563,8 @@ class AgentSdkGroupConfigTest {
         val groupPeers = mutableMapOf<String, Set<String>>()
         val replacements = mutableListOf<Pair<String, Set<String>>>()
         var establishedConfiguration: TunnelConfiguration? = null
+        var computeReplacementGate: CompletableDeferred<Unit>? = null
+        val computeReplacementStarted = CompletableDeferred<Unit>()
         private var swapper: (suspend (Int) -> Unit)? = null
         private var replacedListener: (suspend () -> Unit)? = null
 
@@ -1361,6 +1572,13 @@ class AgentSdkGroupConfigTest {
             establishedConfiguration = configuration
         }
         override suspend fun replaceGroupPeers(groupId: String, peerIps: Set<String>) {
+            if (
+                groupId.startsWith("computing:") && peerIps.isNotEmpty() &&
+                computeReplacementGate != null
+            ) {
+                computeReplacementStarted.complete(Unit)
+                computeReplacementGate!!.await()
+            }
             replacements += groupId to peerIps.toSet()
             if (peerIps.isEmpty()) groupPeers.remove(groupId) else groupPeers[groupId] = peerIps
         }

@@ -315,7 +315,7 @@ async def run_agent_b(
                 metadata={
                     "region": args.region,
                     "os": "Linux",
-                    "version": "0.17.6",
+                    "version": "0.17.7",
                 },
             )
             lifecycle_state = AgentLifecycleState.IDENTITY_READY
@@ -373,9 +373,14 @@ async def run_agent_b(
             agent_tun_cidr=initialized.agent_tun_cidr,
             listen_endpoint=initialized.agent_tcp_endpoint,
         )
+        source_label = (
+            f"循环上传本地视频 {args.video_file}"
+            if args.video_source == "file"
+            else f"上传V4L2摄像头 /dev/video{args.camera_id}"
+        )
         print(
             "Agent B 已就绪：现在启动 Agent A；B 会自动接受邀请，收到 session ID "
-            "后上传摄像头视频。",
+            f"后{source_label}。",
             flush=True,
         )
 

@@ -46,6 +46,9 @@ class ComputingVideoFlowWiringTest {
         assertFalse(generic.contains("mediaOffloadAdapter"))
         assertFalse(rayneo.contains("mediaOffloadAdapter"))
         assertTrue(runner.contains("sdk.releaseComputingSession("))
+        assertTrue(runner.contains("sdk.awaitComputingSessionClosed(sessionId"))
+        assertFalse(generic.contains("runCatching { activeRunner.stopComputingSession() }"))
+        assertFalse(rayneo.contains("runCatching { activeRunner.stopComputingSession() }"))
         assertTrue(generic.indexOf("activeRunner.stopComputingSession()") <
             generic.indexOf("activeRunner.deregisterAgentForStop()"))
         assertTrue(rayneo.indexOf("activeRunner.stopComputingSession()") <

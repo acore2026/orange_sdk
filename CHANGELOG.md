@@ -2,6 +2,37 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-14 — 收紧算力下行时序并显示视频流畅度
+
+### 修改原因
+
+- Runtime WebSocket会并发分派C-02、C-04和C-05，可能出现C-05越过仍在安装路由的C-02、终态
+  C-04未覆盖已缓存C-02，或较旧HTTP响应覆盖较新WebSocket状态的竞态。
+- Android因C-02重建TUN而重试A2A时，Python接收端尚未按`message_id`去重，可能重复执行同一
+  用户消息回调。
+- Android A端预览只显示`LIVE`，实机无法直接量化处理流的帧率和停顿；B角色界面也没有明确
+  提示默认视频源。
+- 活动算力会话尚未收到C-05时，Reset或注销可能先清除Agent Profile，使随后到达的C-02无法
+  校验本端身份，也会遗留未完成的媒体与路由清理。
+
+### 修改方式
+
+- Android和Python按到达顺序串行处理同一算力生命周期的C-02/C-04/C-05；终态优先于缓存配置，
+  C-02安装期间到达终态时回滚算力路由，并按`status_revision`阻止状态倒退。
+- Python A2A接收端缓存最近1024个`message_id`，重复投递直接确认且不再次触发用户回调。
+- Android Generic预览每秒显示接收FPS、显示FPS、超过200ms的卡顿次数、最大帧间隔和最新帧
+  距今时间；诊断摘要同步记录卡顿指标。B角色明确显示默认采集本机0号摄像头。
+- Android和Python在活动算力请求、非终态会话或C-02配置存在时拒绝Reset/注销并保留Profile；
+  新增`awaitComputingSessionClosed/await_computing_session_closed`等待C-05。示例App按“释放、
+  等C-05、再Reset或注销”的顺序执行，清理失败时不继续删除Profile。
+- Python SDK升级为`0.17.7`；Android测试App升级为`0.2.37`、`versionCode=39`。
+
+### 验证内容
+
+- 回归测试覆盖C-02/C-04/C-05乱序、HTTP与WebSocket状态竞争、Python A2A重复投递，以及
+  C-05前Profile保护和C-05后注销；执行Python全量测试、Android SDK/App测试及Generic、
+  RayNeo debug APK构建。
+
 ## 2026-09-14 — 修复Android实机TUN候选被误删
 
 ### 修改原因

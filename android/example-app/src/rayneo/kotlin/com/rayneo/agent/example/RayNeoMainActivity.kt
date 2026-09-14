@@ -468,12 +468,12 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         resetArmed = false
         setResetAvailable(false)
         setPrimaryAction(PrimaryMode.BUSY, "身份重置中…")
-        setStatus("正在重置到状态1", "停止自动流程并清除本地身份状态")
+        setStatus("正在重置到状态1", "先关闭算力会话，再清除本地身份状态")
         lifecycleScope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
                     if (activeRunner != null) {
-                        runCatching { activeRunner.stopComputingSession() }
+                        activeRunner.stopComputingSession()
                         activeRunner.resetAgent()
                     } else {
                         activeSdk.resetAgent()
@@ -676,7 +676,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         if (isFinishing || stopInProgress) return
         stopInProgress = true
         setPrimaryAction(PrimaryMode.BUSY, "正在关闭…")
-        setStatus("正在停止", "先向核心网发送 Agent 去注册请求")
+        setStatus("正在停止", "先关闭算力会话，再向核心网发送 Agent 去注册请求")
         mBindingPair.updateView {
             stopAction.isEnabled = false
             stopAction.alpha = 0.45f
@@ -697,7 +697,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             try {
                 withContext(Dispatchers.IO) {
                     if (activeRunner != null) {
-                        runCatching { activeRunner.stopComputingSession() }
+                        activeRunner.stopComputingSession()
                         activeRunner.deregisterAgentForStop()
                     } else {
                         deregisterIdentityForStop(activeSdk, ::appendLog)
@@ -705,9 +705,13 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 }
             } catch (error: CancellationException) {
                 throw error
-            } catch (_: Exception) {
-                // The attempt and failure are logged by deregisterIdentityForStop.
-                // A user-requested stop still releases all local resources.
+            } catch (error: Exception) {
+                appendLog(
+                    LabLogLevel.ERROR,
+                    "APP STOP",
+                    "算力会话关闭或身份注销失败：" +
+                        "${error.message ?: error::class.java.simpleName}；Agent Profile 已保留",
+                )
             }
         }
         activeRunner?.close()

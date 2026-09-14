@@ -14,17 +14,17 @@ cd /root/lpx/sdk/python
 默认生成：
 
 ```text
-镜像：agent-connect-sdk:0.17.6-arm64
-归档：dist/arm64/agent-connect-sdk-0.17.6-linux-arm64.tar.gz
-校验：dist/arm64/agent-connect-sdk-0.17.6-linux-arm64.tar.gz.sha256
+镜像：agent-connect-sdk:0.17.7-arm64
+归档：dist/arm64/agent-connect-sdk-0.17.7-linux-arm64.tar.gz
+校验：dist/arm64/agent-connect-sdk-0.17.7-linux-arm64.tar.gz.sha256
 ```
 
 ARM64 目标机导入：
 
 ```bash
-sha256sum -c agent-connect-sdk-0.17.6-linux-arm64.tar.gz.sha256
-gzip -dc agent-connect-sdk-0.17.6-linux-arm64.tar.gz | docker load
-docker image inspect --format '{{.Os}}/{{.Architecture}}' agent-connect-sdk:0.17.6-arm64
+sha256sum -c agent-connect-sdk-0.17.7-linux-arm64.tar.gz.sha256
+gzip -dc agent-connect-sdk-0.17.7-linux-arm64.tar.gz | docker load
+docker image inspect --format '{{.Os}}/{{.Architecture}}' agent-connect-sdk:0.17.7-arm64
 ```
 
 ## 同一宿主机运行 A 和 B
@@ -61,7 +61,7 @@ docker network inspect agent-sdk-access \
 
 # 从同一个 Docker 网络验证 Runtime；返回 /v1/ue/info JSON 才算可达。
 docker run --rm --network agent-sdk-access \
-  agent-connect-sdk:0.17.6-arm64 \
+  agent-connect-sdk:0.17.7-arm64 \
   curl -fsS http://172.29.100.1:8088/v1/ue/info
 
 # 先启动 B。logs --tail 读取已有日志后立即返回，不会占住当前终端。
@@ -146,7 +146,7 @@ App 一致。
 docker compose --env-file .env -f docker-compose.same-host.yml down
 ```
 
-## 从 0.17.5 卸载并重装 0.17.6
+## 从 0.17.6 卸载并重装 0.17.7
 
 升级前保留 `agent-a-state` 和 `agent-b-state` 卷，让新版容器第一次启动时可以读取旧
 Agent ID 并注销网侧遗留身份。不要使用 `docker compose down -v`。
@@ -156,13 +156,13 @@ docker compose --env-file .env -f docker-compose.same-host.yml \
   down --remove-orphans
 docker image rm agent-connect-sdk:0.17.5-arm64
 
-sha256sum -c agent-connect-sdk-0.17.6-linux-arm64.tar.gz.sha256
-gzip -dc agent-connect-sdk-0.17.6-linux-arm64.tar.gz | docker load
+sha256sum -c agent-connect-sdk-0.17.7-linux-arm64.tar.gz.sha256
+gzip -dc agent-connect-sdk-0.17.7-linux-arm64.tar.gz | docker load
 docker image inspect --format '{{.Os}}/{{.Architecture}}' \
-  agent-connect-sdk:0.17.6-arm64
+  agent-connect-sdk:0.17.7-arm64
 ```
 
-将 `.env` 中的 `AGENT_IMAGE` 更新为 `agent-connect-sdk:0.17.6-arm64`，并使用本版本
+将 `.env` 中的 `AGENT_IMAGE` 更新为 `agent-connect-sdk:0.17.7-arm64`，并使用本版本
 随附的 `docker-compose.same-host.yml`。展开配置后应看到 A/B 的 fresh 和退出注销开关
 都为 `true`：
 

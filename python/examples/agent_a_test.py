@@ -331,7 +331,7 @@ async def run_agent_a(
                 metadata={
                     "region": args.region,
                     "os": "Linux",
-                    "version": "0.17.6",
+                    "version": "0.17.7",
                 },
             )
             lifecycle_state = AgentLifecycleState.IDENTITY_READY
@@ -634,6 +634,14 @@ async def run_agent_a(
                 status_revision=terminal_status.status_revision,
                 cause=terminal_status.cause,
             )
+            await client.await_computing_session_closed(
+                compute_session_id,
+                timeout_seconds=args.compute_timeout,
+            )
+            _emit(
+                "COMPUTING_SESSION_CLOSED",
+                compute_service_session_id=compute_session_id,
+            )
 
         completed = True
         return {
@@ -661,6 +669,10 @@ async def run_agent_a(
                     )
                     await client.release_computing_session(
                         cleanup_request,
+                        timeout_seconds=args.compute_timeout,
+                    )
+                    await client.await_computing_session_closed(
+                        compute_session_id,
                         timeout_seconds=args.compute_timeout,
                     )
                     _emit(

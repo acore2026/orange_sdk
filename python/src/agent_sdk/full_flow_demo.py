@@ -188,6 +188,23 @@ class DemoRuntime:
         assert response is not None
         return response
 
+    async def push_compute_close(self) -> Mapping[str, Any]:
+        assert self.downlink_handler is not None
+        response = await self.downlink_handler(
+            "COMPUTE_SESSION_CLOSE",
+            51,
+            {
+                "compute_service_session_id": "css-demo",
+                "compute_instance_id": "ci-demo",
+                "binding_ref": "binding-css-demo",
+                "role": "consumer",
+                "receiver_agent_id": LOCAL_AGENT_ID,
+                "cause": "released",
+            },
+        )
+        assert response is not None
+        return response
+
     async def request(
         self, method: str, path: str, body: Mapping[str, Any]
     ) -> Mapping[str, Any]:
@@ -469,7 +486,7 @@ async def run_demo(
             owner="demo-owner",
             name="Agent A",
             description="wheel installation self-check",
-            metadata={"region": "CN", "os": "Linux", "version": "0.17.6"},
+            metadata={"region": "CN", "os": "Linux", "version": "0.17.7"},
         )
         show("2 apply_identity", profile.agent_id)
 
@@ -567,8 +584,22 @@ async def run_demo(
         frame = await stream.recv()
         show("11 media offload", f"{status.status}, frame={frame!r}")
 
+        await sdk.release_computing_session(
+            ComputeSessionRequest(
+                message_type="COMPUTE_SESSION_REQUEST",
+                request_type=ComputeRequestType.RELEASE,
+                input_format=ComputeInputFormat.STRUCTURED,
+                request_id="release-demo",
+                compute_service_session_id=status.compute_service_session_id,
+            )
+        )
+        close_ack = await runtime.push_compute_close()
+        assert close_ack["closed"] is True
+        await sdk.await_computing_session_closed(status.compute_service_session_id)
+        show("12 computing session closed", True)
+
         deregistration = await sdk.deregister_identity(profile.agent_id)
-        show("12 deregister_identity", deregistration.success)
+        show("13 deregister_identity", deregistration.success)
 
         summary = {
             "runtime_request_count": len(runtime.requests),
@@ -581,7 +612,7 @@ async def run_demo(
             "media_state": "STREAM_READY",
         }
         assert summary == {
-            "runtime_request_count": 8,
+            "runtime_request_count": 9,
             "group_id": "g-demo",
             "peer_endpoint": "http://agent-b:4001/A2A/message",
             "installed_route": True,

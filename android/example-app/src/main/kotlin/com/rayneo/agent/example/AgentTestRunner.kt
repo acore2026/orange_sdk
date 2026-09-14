@@ -191,7 +191,7 @@ class AgentTestRunner(
                     metadata = buildJsonObject {
                         put("region", "CN")
                         put("os", "Android")
-                        put("version", "0.2.36")
+                        put("version", "0.2.37")
                     },
                 )
             }
@@ -261,8 +261,9 @@ class AgentTestRunner(
 
     suspend fun stopComputingSession() = operationMutex.withLock {
         val sessionId = activeComputeSessionId
+        var sessionClosed = sessionId == null
         try {
-            if (config.role == TestRole.A && sessionId != null) {
+            if (sessionId != null) {
                 onLog(LabLogLevel.INFO, "COMPUTE RELEASE", "释放 session_id=$sessionId")
                 sdk.releaseComputingSession(
                     ComputeSessionRequest(
@@ -280,6 +281,13 @@ class AgentTestRunner(
                         "session_id=$sessionId，status=${status.status}",
                     )
                 }
+                sdk.awaitComputingSessionClosed(sessionId, timeoutSeconds = 30.0)
+                onLog(
+                    LabLogLevel.SUCCESS,
+                    "COMPUTE RELEASE",
+                    "已收到 C-05 并清理本地算力配置；现在允许清除 Agent Profile",
+                )
+                sessionClosed = true
             }
         } catch (error: CancellationException) {
             throw error
@@ -292,8 +300,10 @@ class AgentTestRunner(
             throw error
         } finally {
             withContext(NonCancellable) { closeLocalMedia() }
-            activeComputeSessionId = null
-            createComputeRequest = null
+            if (sessionClosed) {
+                activeComputeSessionId = null
+                createComputeRequest = null
+            }
         }
     }
 
@@ -438,7 +448,7 @@ class AgentTestRunner(
         onLog(
             LabLogLevel.INFO,
             "VIDEO UPLOAD",
-            "等待 producer C-02，并由 SDK 内部解析 Sandbox 端点后开始 WebRTC 协商",
+            "默认采集本机 0 号摄像头；等待 producer C-02 后开始 WebRTC 协商",
         )
         videoUploadHandle = sdk.startVideoUpload(
             computeServiceSessionId = sessionId,
@@ -573,8 +583,12 @@ class AgentTestRunner(
     }
 
     private suspend fun runAgentB() {
-        onStatus(RunnerStatus("Agent B 已就绪", "请启动 Agent A；邀请与算力配置将自动处理"))
-        onLog(LabLogLevel.INFO, "READY", "等待建组邀请、群组配置和 compute_service_session_id")
+        onStatus(RunnerStatus("Agent B 已就绪", "收到算力会话后默认启动本机 0 号摄像头"))
+        onLog(
+            LabLogLevel.INFO,
+            "READY",
+            "等待建组邀请、群组配置和 compute_service_session_id；视频源=本机 0 号摄像头",
+        )
         waitUntilCancelled()
     }
 

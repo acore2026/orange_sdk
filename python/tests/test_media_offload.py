@@ -7,6 +7,7 @@ import pytest
 
 from agent_sdk import (
     AcnContext,
+    AgentLifecycleState,
     AgentSdk,
     AgentSdkError,
     ComputeConstraints,
@@ -177,6 +178,44 @@ async def test_create_rejects_mismatched_c04_request_id(sdk_fixture):
         await sdk_fixture["sdk"].create_computing_session(create_request())
 
     assert error.value.code is ErrorCode.RUNTIME_REJECTED
+
+
+async def test_older_http_c04_cannot_regress_newer_downlink_c04(sdk_fixture):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    await runtime.deliver_group_config(group_payload())
+
+    async def stale_http_response(method, path, body):
+        del method, path
+        await runtime.deliver_downlink(
+            "COMPUTE_SESSION_STATUS",
+            {
+                "request_id": body["request_id"],
+                "compute_service_session_id": "css-001",
+                "status_revision": "7",
+                "status": "ACTIVE",
+                "cause": "",
+            },
+            50,
+        )
+        return RuntimeHttpResponse(
+            202,
+            {
+                "message_type": "COMPUTE_SESSION_STATUS",
+                "request_id": body["request_id"],
+                "compute_service_session_id": "css-001",
+                "status_revision": "2",
+                "status": "ACCEPTED",
+                "cause": "",
+            },
+        )
+
+    runtime.request_with_status = stale_http_response
+
+    status = await sdk.create_computing_session(create_request())
+
+    assert status.status == "ACTIVE"
+    assert status.status_revision == "7"
 
 
 @pytest.mark.parametrize(
@@ -471,6 +510,99 @@ async def test_c04_deduplicates_by_status_revision(sdk_fixture):
     )
 
     assert sdk_fixture["sdk"]._computing_statuses["css-001"].status == "MEDIA_CONNECTING"
+    assert (
+        sdk_fixture["sdk"]._computing_statuses_by_request["create-001"].status
+        == "MEDIA_CONNECTING"
+    )
+
+
+async def test_terminal_c04_takes_precedence_over_cached_c02(sdk_fixture):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    await runtime.deliver_downlink(
+        "COMPUTE_CONNECT_CONFIG", connect_config("consumer"), 49
+    )
+    await runtime.deliver_downlink(
+        "COMPUTE_SESSION_STATUS",
+        {
+            "request_id": "create-001",
+            "compute_service_session_id": "css-001",
+            "status_revision": "7",
+            "status": "FAILED",
+            "cause": "resource-activation-failed",
+        },
+        50,
+    )
+
+    with pytest.raises(AgentSdkError) as error:
+        await sdk.get_processed_video_stream("css-001")
+
+    assert error.value.code is ErrorCode.COMPUTING_SESSION_INVALID
+    assert sdk_fixture["media"].stream_args is None
+
+
+async def test_c02_after_terminal_c04_is_rejected_without_route(sdk_fixture):
+    runtime = sdk_fixture["runtime"]
+    await runtime.deliver_downlink(
+        "COMPUTE_SESSION_STATUS",
+        {
+            "request_id": "create-001",
+            "compute_service_session_id": "css-001",
+            "status_revision": "7",
+            "status": "FAILED",
+            "cause": "resource-activation-failed",
+        },
+        49,
+    )
+
+    ack = await runtime.deliver_downlink(
+        "COMPUTE_CONNECT_CONFIG", connect_config("consumer"), 50
+    )
+
+    assert ack["accepted"] is False
+    assert ack["cause"] == "session-closed"
+    assert "8.8.8.9/32" not in sdk_fixture["backend"].routes
+
+
+async def test_c05_waits_for_earlier_c02_installation(sdk_fixture):
+    runtime = sdk_fixture["runtime"]
+    backend = sdk_fixture["backend"]
+    route_install_started = asyncio.Event()
+    release_route_install = asyncio.Event()
+    original_add = backend.add
+
+    async def blocking_add(cidr):
+        if cidr == "8.8.8.9/32":
+            route_install_started.set()
+            await release_route_install.wait()
+        await original_add(cidr)
+
+    backend.add = blocking_add
+    c02 = asyncio.create_task(
+        runtime.deliver_downlink(
+            "COMPUTE_CONNECT_CONFIG", connect_config("consumer"), 49
+        )
+    )
+    await route_install_started.wait()
+    close = {
+        "compute_service_session_id": "css-001",
+        "compute_instance_id": "ci-001",
+        "binding_ref": "binding-css-001-7f84",
+        "role": "consumer",
+        "receiver_agent_id": LOCAL_ID,
+        "cause": "released",
+    }
+    c05 = asyncio.create_task(
+        runtime.deliver_downlink("COMPUTE_SESSION_CLOSE", close, 50)
+    )
+    await asyncio.sleep(0)
+
+    assert not c05.done()
+    release_route_install.set()
+
+    assert (await c02)["accepted"] is True
+    assert (await c05)["closed"] is True
+    assert "8.8.8.9/32" not in backend.routes
 
 
 async def test_c05_closes_sdk_media_and_replays_same_c06(sdk_fixture):
@@ -501,6 +633,124 @@ async def test_c05_closes_sdk_media_and_replays_same_c06(sdk_fixture):
         "http://8.8.8.9:8788/v1/media-connections/media-producer-001",
     )
     assert "8.8.8.9/32" not in sdk_fixture["backend"].routes
+
+
+async def test_identity_removal_preserves_profile_until_c05_closes_config(
+    sdk_fixture,
+):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    await runtime.deliver_downlink(
+        "COMPUTE_CONNECT_CONFIG", connect_config("consumer"), 49
+    )
+    profile = sdk.local_profile
+    assert profile is not None
+    runtime.requests.clear()
+
+    with pytest.raises(AgentSdkError) as deregister_error:
+        await sdk.deregister_identity(profile.agent_id, reason="normal")
+    with pytest.raises(AgentSdkError) as reset_error:
+        await sdk.reset_agent()
+
+    assert deregister_error.value.code is ErrorCode.AGENT_STATE_INVALID
+    assert reset_error.value.code is ErrorCode.AGENT_STATE_INVALID
+    assert sdk.local_profile == profile
+    assert runtime.requests == []
+
+    close_waiter = asyncio.create_task(sdk.await_computing_session_closed("css-001"))
+    await asyncio.sleep(0)
+    close = {
+        "compute_service_session_id": "css-001",
+        "compute_instance_id": "ci-001",
+        "binding_ref": "binding-css-001-7f84",
+        "role": "consumer",
+        "receiver_agent_id": LOCAL_ID,
+        "cause": "released",
+    }
+    close_ack = await runtime.deliver_downlink("COMPUTE_SESSION_CLOSE", close, 50)
+    assert close_ack is not None
+    assert close_ack["closed"] is True
+    await close_waiter
+
+    result = await sdk.deregister_identity(profile.agent_id, reason="normal")
+
+    assert result.success is True
+    assert sdk.agent_lifecycle_state is AgentLifecycleState.NO_IDENTITY
+    assert sdk.local_profile is None
+    assert [request[1] for request in runtime.requests] == [
+        "/acn-agent/v1/agent-deletions"
+    ]
+
+
+async def test_non_terminal_c04_blocks_reset_before_c02_arrives(sdk_fixture):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    profile = sdk.local_profile
+    assert profile is not None
+    await runtime.deliver_group_config(group_payload())
+    await sdk.create_computing_session(create_request())
+
+    with pytest.raises(AgentSdkError) as reset_error:
+        await sdk.reset_agent()
+
+    assert reset_error.value.code is ErrorCode.AGENT_STATE_INVALID
+    assert sdk.local_profile == profile
+
+    await runtime.deliver_downlink(
+        "COMPUTE_SESSION_STATUS",
+        {
+            "request_id": "cancel-001",
+            "compute_service_session_id": "css-001",
+            "status_revision": "3",
+            "status": "REQUEST_CANCELLED",
+            "cause": "cancelled",
+        },
+        50,
+    )
+    result = await sdk.reset_agent()
+
+    assert result.success is True
+    assert sdk.agent_lifecycle_state is AgentLifecycleState.NO_IDENTITY
+
+
+async def test_in_flight_computing_request_blocks_reset_atomically(sdk_fixture):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    profile = sdk.local_profile
+    assert profile is not None
+    await runtime.deliver_group_config(group_payload())
+    request_started = asyncio.Event()
+    release_response = asyncio.Event()
+
+    async def delayed_terminal_response(method, path, body):
+        del method, path
+        request_started.set()
+        await release_response.wait()
+        return RuntimeHttpResponse(
+            202,
+            {
+                "message_type": "COMPUTE_SESSION_STATUS",
+                "request_id": body["request_id"],
+                "compute_service_session_id": "css-001",
+                "status_revision": "3",
+                "status": "REQUEST_CANCELLED",
+                "cause": "cancelled",
+            },
+        )
+
+    runtime.request_with_status = delayed_terminal_response
+    create = asyncio.create_task(sdk.create_computing_session(create_request()))
+    await request_started.wait()
+
+    with pytest.raises(AgentSdkError) as reset_error:
+        await sdk.reset_agent()
+
+    assert reset_error.value.code is ErrorCode.AGENT_STATE_INVALID
+    assert sdk.local_profile == profile
+
+    release_response.set()
+    assert (await create).status == "REQUEST_CANCELLED"
+    assert (await sdk.reset_agent()).success is True
 
 
 async def test_recognition_target_uses_c02_path_and_context(sdk_fixture):

@@ -160,6 +160,7 @@ async def test_agent_a_runs_acn_and_computing_consumer_flow():
         query_computing_session=AsyncMock(return_value=query_status),
         cancel_computing_session=AsyncMock(),
         release_computing_session=AsyncMock(return_value=release_status),
+        await_computing_session_closed=AsyncMock(),
         get_processed_video_stream=AsyncMock(return_value=stream),
         close=AsyncMock(),
     )
@@ -217,6 +218,9 @@ async def test_agent_a_runs_acn_and_computing_consumer_flow():
     release_request = sdk.release_computing_session.await_args.args[0]
     assert release_request.request_type is ComputeRequestType.RELEASE
     assert release_request.compute_service_session_id == "compute-session-1"
+    sdk.await_computing_session_closed.assert_awaited_once_with(
+        "compute-session-1", timeout_seconds=30.0
+    )
     sdk.cancel_computing_session.assert_not_awaited()
     assert sdk.deregister_identity.await_args_list[0].args == (
         "did:example:a-old",

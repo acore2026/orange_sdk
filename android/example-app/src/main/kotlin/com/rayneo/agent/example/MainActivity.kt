@@ -43,6 +43,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -95,6 +97,8 @@ class MainActivity : Activity() {
     private var videoPreviewStatus: TextView? = null
     private var videoPreviewHasFrame = false
     private var videoPreviewResolution = ""
+    private var videoPreviewStatistics = "正在统计…"
+    private var videoStatisticsJob: Job? = null
     private var lastSdkDiagnosticSummary: String? = null
     private var lastDiagnosticLocalTcpEndpoint: String? = null
     private var lastVideoPreviewSummary: String? = null
@@ -610,6 +614,7 @@ class MainActivity : Activity() {
             override fun onFirstFrameRendered() {
                 runOnUiThread {
                     videoPreviewHasFrame = true
+                    startVideoStatisticsUpdates()
                     renderProcessedVideoLiveStatus()
                     appendLog(
                         LabLogLevel.SUCCESS,
@@ -676,8 +681,14 @@ class MainActivity : Activity() {
 
     private fun setProcessedVideoStatus(title: String, detail: String) {
         runOnUiThread {
+            videoStatisticsJob?.cancel()
+            videoStatisticsJob = null
             videoPreviewHasFrame = false
-            (videoPreviewRenderer as? TextureViewEglRenderer)?.clearImage()
+            (videoPreviewRenderer as? TextureViewEglRenderer)?.apply {
+                if (title == "处理流已连接") resetStatistics()
+                clearImage()
+            }
+            videoPreviewStatistics = "正在统计…"
             videoPreviewStatus?.apply {
                 text = "$title\n$detail"
                 setTextColor(Palette.INK_MUTED)
@@ -692,7 +703,11 @@ class MainActivity : Activity() {
 
     private fun renderProcessedVideoLiveStatus() {
         videoPreviewStatus?.apply {
-            text = "● LIVE${videoPreviewResolution.takeIf(String::isNotBlank)?.let { "  $it" }.orEmpty()}"
+            text = buildString {
+                append("● LIVE")
+                videoPreviewResolution.takeIf(String::isNotBlank)?.let { append("  ", it) }
+                append('\n', videoPreviewStatistics)
+            }
             setTextColor(Palette.LINK)
             textSize = 11f
             background = rounded(Color.argb(205, 8, 17, 25), 8f, Palette.INK_LINE)
@@ -703,6 +718,35 @@ class MainActivity : Activity() {
             ).apply {
                 topMargin = dp(9)
                 marginEnd = dp(9)
+            }
+        }
+    }
+
+    private fun startVideoStatisticsUpdates() {
+        videoStatisticsJob?.cancel()
+        val renderer = videoPreviewRenderer as? TextureViewEglRenderer ?: return
+        videoStatisticsJob = scope.launch {
+            var previous = renderer.statisticsSnapshot()
+            while (isActive && videoPreviewRenderer === renderer) {
+                delay(1_000)
+                val current = renderer.statisticsSnapshot()
+                val elapsedSeconds =
+                    (current.capturedAtNanos - previous.capturedAtNanos).coerceAtLeast(1L) /
+                        1_000_000_000.0
+                val receiveFps = (current.framesReceived - previous.framesReceived) / elapsedSeconds
+                val renderFps = (current.framesRendered - previous.framesRendered) / elapsedSeconds
+                val lastFrameAge = current.lastFrameAgeMillis?.let { " · 最新 ${it}ms" }.orEmpty()
+                videoPreviewStatistics = String.format(
+                    Locale.US,
+                    "接收 %.1f fps · 显示 %.1f fps\n卡顿 %d · 最大间隔 %dms%s",
+                    receiveFps,
+                    renderFps,
+                    current.stutterCount,
+                    current.maximumFrameGapMillis,
+                    lastFrameAge,
+                )
+                if (videoPreviewHasFrame) renderProcessedVideoLiveStatus()
+                previous = current
             }
         }
     }
@@ -725,10 +769,13 @@ class MainActivity : Activity() {
     }
 
     private fun releaseProcessedVideoPreview() {
+        videoStatisticsJob?.cancel()
+        videoStatisticsJob = null
         detachProcessedVideoRenderer()?.let { eglBase -> runCatching { eglBase.release() } }
         videoPreviewStatus = null
         videoPreviewHasFrame = false
         videoPreviewResolution = ""
+        videoPreviewStatistics = "正在统计…"
     }
 
     private fun videoPreviewRendererName(): String = when (videoPreviewRenderer) {
@@ -900,12 +947,12 @@ class MainActivity : Activity() {
         resetInProgress = true
         resetArmed = false
         setResetAvailable(false)
-        setRunnerStatus(RunnerStatus("正在重置到状态1", "停止自动流程并清除本地身份状态"))
+        setRunnerStatus(RunnerStatus("正在重置到状态1", "先关闭算力会话，再清除本地身份状态"))
         scope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
                     if (activeRunner != null) {
-                        runCatching { activeRunner.stopComputingSession() }
+                        activeRunner.stopComputingSession()
                         activeRunner.resetAgent()
                     } else {
                         activeSdk.resetAgent()
@@ -1112,7 +1159,7 @@ class MainActivity : Activity() {
             return
         }
         stopButton?.isEnabled = false
-        setRunnerStatus(RunnerStatus("正在停止", "先向核心网发送 Agent 去注册请求"))
+        setRunnerStatus(RunnerStatus("正在停止", "先关闭算力会话，再向核心网发送 Agent 去注册请求"))
         val activeJob = runnerJob
         val activeRunner = runner
         val activeSdk = sdk
@@ -1129,7 +1176,7 @@ class MainActivity : Activity() {
                 try {
                     withContext(Dispatchers.IO) {
                         if (activeRunner != null) {
-                            runCatching { activeRunner.stopComputingSession() }
+                            activeRunner.stopComputingSession()
                             activeRunner.deregisterAgentForStop()
                         } else {
                             deregisterIdentityForStop(activeSdk, ::appendLog)
@@ -1137,9 +1184,13 @@ class MainActivity : Activity() {
                     }
                 } catch (error: CancellationException) {
                     throw error
-                } catch (_: Exception) {
-                    // The attempt and failure are logged by deregisterIdentityForStop.
-                    // A user-requested stop still releases all local resources.
+                } catch (error: Exception) {
+                    appendLog(
+                        LabLogLevel.ERROR,
+                        "APP STOP",
+                        "算力会话关闭或身份注销失败：" +
+                            "${error.message ?: error::class.java.simpleName}；Agent Profile 已保留",
+                    )
                 }
             }
             activeRunner?.close()

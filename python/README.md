@@ -8,7 +8,7 @@ SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.17.6-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
+- `agent_connect_sdk-0.17.7-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/interactive_linux_agent.py`：复用真实 Linux 全流程参数，每按一次回车只调用下一个 SDK 接口。
@@ -48,7 +48,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.17.6-py3-none-any.whl
+dist/agent_connect_sdk-0.17.7-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -60,7 +60,7 @@ dist/agent_connect_sdk-0.17.6-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.17.6-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.17.7-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -97,14 +97,14 @@ python -m pip install -e '.[test]'
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.17.6-py3-none-any.whl
+  ./agent_connect_sdk-0.17.7-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.17.6-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.17.7-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -421,13 +421,17 @@ Card 快照。状态3再次调用 `register_capabilities()` 表示替换整张 A
 `sdk.local_profile`。参数less `reset_agent()` 是应用控制状态机回到状态1的便捷接口：
 所有状态都不发 HTTP；状态2/3直接删除本地 Profile、身份申请上下文和完整 Agent Card
 快照并进入 `NO_IDENTITY`，不修改网侧身份；状态1调用幂等成功。
+存在进行中的算力请求、非终态会话或C-02配置时，`reset_agent()`和
+`deregister_identity()`会保留Profile并返回`AGENT_STATE_INVALID`。先调用
+`cancel_computing_session()`或`release_computing_session()`，再调用
+`await_computing_session_closed()`等待C-05清理媒体与路由，之后才能重置或注销。
 
 ```python
 profile = await sdk.apply_identity(
     owner="customer-a",
     name="Agent A",
     description="RayNeo edge agent",
-    metadata={"region": "CN", "os": "Linux", "version": "0.17.6"},
+    metadata={"region": "CN", "os": "Linux", "version": "0.17.7"},
 )
 
 ability = await sdk.get_network_ability(profile.agent_id)
@@ -646,6 +650,7 @@ release_status = await sdk.release_computing_session(
         compute_service_session_id=session_id,
     )
 )
+await sdk.await_computing_session_closed(session_id, timeout_seconds=30.0)
 ```
 
 SDK 在 `init()` 中通过公共 WebSocket 内部注册并处理
@@ -761,6 +766,14 @@ finally:
 result = await sdk.reset_agent()
 assert result.success
 assert sdk.agent_lifecycle_state is AgentLifecycleState.NO_IDENTITY
+```
+
+若存在算力会话，必须先取消或释放并等待C-05；清理失败时Profile会继续保留：
+
+```python
+await sdk.release_computing_session(release_request)
+await sdk.await_computing_session_closed(session_id, timeout_seconds=30.0)
+result = await sdk.reset_agent()
 ```
 
 需要显式指定 Agent DID 或注销原因时，仍可调用
@@ -1207,6 +1220,7 @@ ss -lunp | grep <MASQUE端口>
 | `query_computing_session(request, ...)` | 按会话 ID 或原 CREATE request ID 查询状态 | `ComputeSessionStatus` |
 | `cancel_computing_session(request, ...)` | 按会话 ID 或原 CREATE request ID 取消请求 | `ComputeSessionStatus` |
 | `release_computing_session(request, ...)` | 释放指定正式算力会话 | `ComputeSessionStatus` |
+| `await_computing_session_closed(compute_service_session_id, ...)` | 等待C-05完成本地媒体和路由清理；重置或注销前调用 | 无 |
 | `start_video_upload(compute_service_session_id, ..., timeout_seconds=120)` | producer 等待异步 C-02，创建完整 sendonly Offer，内部完成 Sandbox 协商；`stop()` 自动 DELETE 媒体资源 | `VideoUploadHandle` |
 | `get_processed_video_stream(compute_service_session_id, timeout_seconds=120)` | consumer 等待异步 C-02，创建完整 recvonly Offer，内部完成 Sandbox 协商；`close()` 自动 DELETE 媒体资源 | `RemoteVideoStream` |
 | `update_recognition_target(compute_service_session_id, request_id, text, language=None, ...)` | consumer 使用 C-02 路径替换当前持续识别目标 | `RecognitionTargetStatus` |

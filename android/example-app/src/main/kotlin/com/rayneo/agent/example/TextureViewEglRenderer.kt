@@ -2,6 +2,7 @@ package com.rayneo.agent.example
 
 import android.content.Context
 import android.graphics.SurfaceTexture
+import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.TextureView
 import org.webrtc.EglBase
@@ -34,6 +35,10 @@ internal class TextureViewEglRenderer @JvmOverloads constructor(
     private val firstFrameRendered = AtomicBoolean(false)
     private val framesReceived = AtomicLong(0)
     private val framesRendered = AtomicLong(0)
+    private val previousFrameArrivalNanos = AtomicLong(0)
+    private val lastFrameArrivalNanos = AtomicLong(0)
+    private val maximumFrameGapNanos = AtomicLong(0)
+    private val stutterCount = AtomicLong(0)
 
     @Volatile
     private var rendererEvents: RendererCommon.RendererEvents? = null
@@ -97,6 +102,31 @@ internal class TextureViewEglRenderer @JvmOverloads constructor(
         eglRenderer.clearImage()
     }
 
+    fun resetStatistics() {
+        framesReceived.set(0)
+        framesRendered.set(0)
+        previousFrameArrivalNanos.set(0)
+        lastFrameArrivalNanos.set(0)
+        maximumFrameGapNanos.set(0)
+        stutterCount.set(0)
+        lastRenderTimeNanos = 0
+    }
+
+    fun statisticsSnapshot(): VideoRenderStatistics {
+        val now = SystemClock.elapsedRealtimeNanos()
+        val lastArrival = lastFrameArrivalNanos.get()
+        return VideoRenderStatistics(
+            capturedAtNanos = now,
+            framesReceived = framesReceived.get(),
+            framesRendered = framesRendered.get(),
+            stutterCount = stutterCount.get(),
+            maximumFrameGapMillis = maximumFrameGapNanos.get() / NANOS_PER_MILLISECOND,
+            lastFrameAgeMillis = if (lastArrival == 0L) null else {
+                ((now - lastArrival).coerceAtLeast(0L)) / NANOS_PER_MILLISECOND
+            },
+        )
+    }
+
     fun release() {
         ThreadUtils.checkIsOnMainThread()
         if (!released.compareAndSet(false, true)) return
@@ -113,7 +143,11 @@ internal class TextureViewEglRenderer @JvmOverloads constructor(
             "frames_rendered=$rendered frames_pending_or_dropped=${(received - rendered).coerceAtLeast(0)} " +
             "surface_available=${surfaceAttached.get()} " +
             "first_frame_displayed=${firstFrameRendered.get()} last_frame=$lastFrameDescription " +
-            "last_render_time_ns=$lastRenderTimeNanos render_error=$renderError"
+            "last_render_time_ns=$lastRenderTimeNanos " +
+            "stutter_threshold_ms=$STUTTER_THRESHOLD_MILLISECONDS " +
+            "stutter_count=${stutterCount.get()} " +
+            "max_frame_gap_ms=${maximumFrameGapNanos.get() / NANOS_PER_MILLISECOND} " +
+            "render_error=$renderError"
     }
 
     override fun onMeasure(widthSpec: Int, heightSpec: Int) {
@@ -135,6 +169,14 @@ internal class TextureViewEglRenderer @JvmOverloads constructor(
 
     override fun onFrame(frame: VideoFrame) {
         if (!initialized.get() || released.get()) return
+        val now = SystemClock.elapsedRealtimeNanos()
+        val previous = previousFrameArrivalNanos.getAndSet(now)
+        lastFrameArrivalNanos.set(now)
+        if (previous != 0L) {
+            val gap = (now - previous).coerceAtLeast(0L)
+            updateMaximum(maximumFrameGapNanos, gap)
+            if (gap >= STUTTER_THRESHOLD_NANOS) stutterCount.incrementAndGet()
+        }
         framesReceived.incrementAndGet()
         val width = frame.rotatedWidth
         val height = frame.rotatedHeight
@@ -182,4 +224,27 @@ internal class TextureViewEglRenderer @JvmOverloads constructor(
         eglRenderer.releaseEglSurface(completion::countDown)
         ThreadUtils.awaitUninterruptibly(completion)
     }
+
+    private companion object {
+        const val NANOS_PER_MILLISECOND = 1_000_000L
+        const val STUTTER_THRESHOLD_MILLISECONDS = 200L
+        const val STUTTER_THRESHOLD_NANOS =
+            STUTTER_THRESHOLD_MILLISECONDS * NANOS_PER_MILLISECOND
+
+        fun updateMaximum(target: AtomicLong, candidate: Long) {
+            var observed = target.get()
+            while (candidate > observed && !target.compareAndSet(observed, candidate)) {
+                observed = target.get()
+            }
+        }
+    }
 }
+
+internal data class VideoRenderStatistics(
+    val capturedAtNanos: Long,
+    val framesReceived: Long,
+    val framesRendered: Long,
+    val stutterCount: Long,
+    val maximumFrameGapMillis: Long,
+    val lastFrameAgeMillis: Long?,
+)

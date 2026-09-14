@@ -5,6 +5,7 @@ import com.rayneo.agent.sdk.AgentSdkException
 import com.rayneo.agent.sdk.ErrorCode
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -354,7 +355,10 @@ class OkHttpRuntimeTransport(
             override fun onMessage(webSocket: WebSocket, text: String) {
                 synchronized(downlinkLock) { reconnectAttempt = 0 }
                 Log.d(TAG, "Runtime downlink WebSocket frame received bytes=${text.length}")
-                downlinkScope.launch {
+                // Start inline until the handler first suspends. Compute lifecycle handlers
+                // therefore enter their FIFO mutex in WebSocket frame order while independent
+                // group callbacks can still complete out of order.
+                downlinkScope.launch(start = CoroutineStart.UNDISPATCHED) {
                     processDownlinkFrame(webSocket, text, handler)
                 }
             }

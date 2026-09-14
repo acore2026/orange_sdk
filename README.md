@@ -62,9 +62,11 @@ AgentRuntime 同步本机信息。
 Python `reset_agent()` 与 Android `resetAgent()` 提供参数less 状态重置控制：状态2/3
 仅清除本地持久化的 Profile/Card 并回到状态1 `NO_IDENTITY`，不发送去注册消息、
 不修改网侧身份；状态1调用幂等成功且同样不发送 HTTP。Generic 与雷鸟示例 App 均提供
-二次确认的“重置到状态1”操作，成功后停止当前自动流程，不会立即重新申请身份。
-两个 App 的“停止”操作语义不同：存在本地身份时先调用 `deregisterIdentity(..., "normal")`
-完成网侧去注册，再关闭 SDK、MASQUE、TUN 与本地服务；Reset 始终保持仅重置本地状态。
+二次确认的“重置到状态1”操作，成功后停止当前自动流程，不会立即重新申请身份。存在
+进行中的算力会话或 C-02 配置时，`reset_agent/resetAgent` 和
+`deregister_identity/deregisterIdentity` 会保留 Profile 并返回状态错误；应用必须先调用
+`cancel/releaseComputingSession`，再等待 `awaitComputingSessionClosed` 确认 C-05 已清理媒体和
+路由。两个 App 的 Reset 和“停止”都执行这套顺序，网侧注销只在算力清理成功后发生。
 
 能力注册通过 `capabilities` 现场生成的测试 VC，其 `valid_from` 固定为实际签发时间前
 一个日历年；`proof.created` 仍是实际签发时间，`valid_until` 仍从实际签发时间计算。

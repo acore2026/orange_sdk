@@ -101,6 +101,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
@@ -239,7 +240,14 @@ class AgentSdk internal constructor(
     private val computingWaiters = mutableMapOf<String, MutableList<CompletableDeferred<ComputingSession>>>()
     private val computingStatusWaiters =
         mutableMapOf<String, MutableList<CompletableDeferred<ComputeSessionStatus>>>()
+    private val computingCloseWaiters =
+        mutableMapOf<String, MutableList<CompletableDeferred<Unit>>>()
+    private val computingRequestsInFlight = mutableSetOf<String>()
+    private val computingClosedSessionIds = mutableSetOf<String>()
+    private val computingControlMutex = Mutex()
     private val computingMutex = Mutex()
+    private val identityRemovalMutex = Mutex()
+    private var identityRemovalInProgress = false
     private val receivedA2aMutex = Mutex()
     private val receivedA2aMessageIds = linkedSetOf<String>()
     private val computeJson = Json
@@ -414,12 +422,16 @@ class AgentSdk internal constructor(
             return buildJsonObject { put("result", NetworkMessageAction.REJECT.name) }
         }
         return when {
-            messageType == COMPUTE_CONNECT_CONFIG -> handleComputeConnectConfig(payload)
+            messageType == COMPUTE_CONNECT_CONFIG -> computingControlMutex.withLock {
+                handleComputeConnectConfig(payload)
+            }
             messageType == COMPUTE_SESSION_STATUS -> {
-                handleComputeSessionStatus(payload)
+                computingControlMutex.withLock { handleComputeSessionStatus(payload) }
                 null
             }
-            messageType == COMPUTE_SESSION_CLOSE -> handleComputeSessionClose(payload)
+            messageType == COMPUTE_SESSION_CLOSE -> computingControlMutex.withLock {
+                handleComputeSessionClose(payload)
+            }
             messageType == "ACN_AGENT_GROUPING_INVITATION" -> {
                 val action = handleGroupInvitation(payload)
                 buildJsonObject {
@@ -665,11 +677,18 @@ class AgentSdk internal constructor(
                 "reason",
             )
         }
-        return operation("POST", "/acn-agent/v1/agent-deletions", buildJsonObject {
-            put("request_id", UUID.randomUUID().toString())
-            put("agent_id", agentId)
-            put("reason", reason)
-        }).also { if (it.success) clearAgentState() }
+        return identityRemovalMutex.withLock {
+            beginIdentityRemoval("deregisterIdentity")
+            try {
+                operation("POST", "/acn-agent/v1/agent-deletions", buildJsonObject {
+                    put("request_id", UUID.randomUUID().toString())
+                    put("agent_id", agentId)
+                    put("reason", reason)
+                }).also { if (it.success) clearAgentState() }
+            } finally {
+                computingMutex.withLock { identityRemovalInProgress = false }
+            }
+        }
     }
 
     /**
@@ -688,13 +707,66 @@ class AgentSdk internal constructor(
                 message = "Agent is already in NO_IDENTITY state",
             )
         }
-        clearAgentState()
-        return OperationResult(
-            success = true,
-            operationId = "",
-            message = "Local Agent state reset to NO_IDENTITY; network identity was not changed",
-        )
+        return identityRemovalMutex.withLock {
+            beginIdentityRemoval("resetAgent")
+            try {
+                clearAgentState()
+                OperationResult(
+                    success = true,
+                    operationId = "",
+                    message = "Local Agent state reset to NO_IDENTITY; network identity was not changed",
+                )
+            } finally {
+                computingMutex.withLock { identityRemovalInProgress = false }
+            }
+        }
     }
+
+    private suspend fun beginIdentityRemoval(operation: String) {
+        computingControlMutex.withLock {
+            computingMutex.withLock {
+                val activeSessionIds = activeComputingSessionIds()
+                val activeRequestIds = (
+                    computingRequestsInFlight + unresolvedComputeCreateRequestIds()
+                    ).distinct().sorted()
+                if (activeSessionIds.isNotEmpty() || activeRequestIds.isNotEmpty()) {
+                    val details = buildList {
+                        addAll(activeSessionIds)
+                        addAll(activeRequestIds.map { "request:$it" })
+                    }
+                    throw AgentSdkException(
+                        ErrorCode.AGENT_STATE_INVALID,
+                        "$operation requires all computing sessions to be released or cancelled " +
+                            "before clearing the Agent Profile: ${details.joinToString()}",
+                    )
+                }
+                identityRemovalInProgress = true
+            }
+        }
+    }
+
+    private fun activeComputingSessionIds(): List<String> =
+        (
+            computingSessions.keys + computingPendingMedia.keys + computingMedia.keys +
+                computingStatuses.filter { (sessionId, status) ->
+                    sessionId !in computingClosedSessionIds &&
+                        status.status !in COMPUTE_TERMINAL_STATUSES
+                }.keys
+            )
+            .distinct()
+            .sorted()
+
+    private fun unresolvedComputeCreateRequestIds(): List<String> =
+        computeCreateRequests.keys.filter { requestId ->
+            val status = computingStatusesByRequest[requestId]
+            val sessionId = status?.computeServiceSessionId
+            val sessionStatus = sessionId?.let(computingStatuses::get)
+            status == null || !(
+                status.status in COMPUTE_TERMINAL_STATUSES ||
+                    sessionStatus?.status in COMPUTE_TERMINAL_STATUSES ||
+                    sessionId?.let { it in computingClosedSessionIds } == true
+                )
+        }
 
     suspend fun getNetworkAbility(
         agentId: String,
@@ -982,6 +1054,40 @@ class AgentSdk internal constructor(
     ): ComputeSessionStatus {
         validateComputeRequest(request, ComputeRequestType.RELEASE)
         return sendComputeRequest(request, timeoutSeconds)
+    }
+
+    suspend fun awaitComputingSessionClosed(
+        computeServiceSessionId: String,
+        timeoutSeconds: Double = 30.0,
+    ) {
+        requireReady()
+        requireComputeString(computeServiceSessionId, "compute_service_session_id")
+        if (timeoutSeconds <= 0.0) {
+            invalidCompute("timeoutSeconds must be greater than zero", "timeoutSeconds")
+        }
+        val waiter = computingMutex.withLock {
+            if (computeServiceSessionId !in activeComputingSessionIds()) return
+            CompletableDeferred<Unit>().also {
+                computingCloseWaiters.getOrPut(computeServiceSessionId) { mutableListOf() } += it
+            }
+        }
+        try {
+            withTimeout((timeoutSeconds * 1000).toLong()) { waiter.await() }
+        } catch (error: TimeoutCancellationException) {
+            throw AgentSdkException(
+                ErrorCode.TIMEOUT,
+                "Timed out waiting for C-05 to close computing session $computeServiceSessionId",
+                retryable = true,
+                cause = error,
+            )
+        } finally {
+            computingMutex.withLock {
+                computingCloseWaiters[computeServiceSessionId]?.let { waiters ->
+                    waiters.remove(waiter)
+                    if (waiters.isEmpty()) computingCloseWaiters.remove(computeServiceSessionId)
+                }
+            }
+        }
     }
 
     suspend fun startVideoUpload(
@@ -1924,56 +2030,71 @@ class AgentSdk internal constructor(
             invalidCompute("timeoutSeconds must be greater than zero", "timeoutSeconds")
         }
         val body = computeJson.encodeToJsonElement(request).jsonObject
-        computingMutex.withLock {
-            val previous = computeRequests[request.requestId]
-            if (previous != null && previous != body) {
-                invalidCompute(
-                    "request_id was already used with different computing content",
-                    "request_id",
-                )
-            }
-            computeRequests[request.requestId] = body
-        }
-        computePreflight()
-        if (request.requestType == ComputeRequestType.CREATE) {
-            computingMutex.withLock { computeCreateRequests[request.requestId] = request }
-        }
-        val activeRuntime = checkNotNull(runtime)
-        val statusWaiter = CompletableDeferred<ComputeSessionStatus>()
-        val knownStatus = computingMutex.withLock {
-            computingStatusesByRequest[request.requestId] ?: run {
-                computingStatusWaiters.getOrPut(request.requestId) { mutableListOf() } += statusWaiter
-                null
+        computingControlMutex.withLock {
+            computingMutex.withLock {
+                if (identityRemovalInProgress) {
+                    throw AgentSdkException(
+                        ErrorCode.AGENT_STATE_INVALID,
+                        "Computing requests cannot start while the Agent Profile is being removed",
+                    )
+                }
+                val previous = computeRequests[request.requestId]
+                if (previous != null && previous != body) {
+                    invalidCompute(
+                        "request_id was already used with different computing content",
+                        "request_id",
+                    )
+                }
+                computeRequests[request.requestId] = body
+                computingRequestsInFlight += request.requestId
             }
         }
-        if (knownStatus != null) return knownStatus
-        return try {
-            withTimeout((timeoutSeconds * 1000).toLong()) {
-                coroutineScope {
-                    val httpStatus = async {
-                        val response = activeRuntime.requestWithStatus(
-                            "POST",
-                            COMPUTING_SESSION_REQUEST_PATH,
-                            body,
-                            timeoutSeconds,
-                        )
-                        parseComputeHttpResponse(request, response)
-                    }
-                    select {
-                        statusWaiter.onAwait { status ->
-                            httpStatus.cancel()
-                            status
+        try {
+            computePreflight()
+            if (request.requestType == ComputeRequestType.CREATE) {
+                computingMutex.withLock { computeCreateRequests[request.requestId] = request }
+            }
+            val activeRuntime = checkNotNull(runtime)
+            val statusWaiter = CompletableDeferred<ComputeSessionStatus>()
+            val knownStatus = computingMutex.withLock {
+                computingStatusesByRequest[request.requestId] ?: run {
+                    computingStatusWaiters.getOrPut(request.requestId) { mutableListOf() } += statusWaiter
+                    null
+                }
+            }
+            if (knownStatus != null) return knownStatus
+            return try {
+                withTimeout((timeoutSeconds * 1000).toLong()) {
+                    coroutineScope {
+                        val httpStatus = async {
+                            val response = activeRuntime.requestWithStatus(
+                                "POST",
+                                COMPUTING_SESSION_REQUEST_PATH,
+                                body,
+                                timeoutSeconds,
+                            )
+                            parseComputeHttpResponse(request, response)
                         }
-                        httpStatus.onAwait { it }
+                        select {
+                            statusWaiter.onAwait { status ->
+                                httpStatus.cancel()
+                                status
+                            }
+                            httpStatus.onAwait { it }
+                        }
+                    }
+                }
+            } finally {
+                computingMutex.withLock {
+                    computingStatusWaiters[request.requestId]?.let { waiters ->
+                        waiters.remove(statusWaiter)
+                        if (waiters.isEmpty()) computingStatusWaiters.remove(request.requestId)
                     }
                 }
             }
         } finally {
-            computingMutex.withLock {
-                computingStatusWaiters[request.requestId]?.let { waiters ->
-                    waiters.remove(statusWaiter)
-                    if (waiters.isEmpty()) computingStatusWaiters.remove(request.requestId)
-                }
+            computingControlMutex.withLock {
+                computingMutex.withLock { computingRequestsInFlight -= request.requestId }
             }
         }
     }
@@ -1994,15 +2115,17 @@ class AgentSdk internal constructor(
                     "Runtime returned invalid HTTP ${response.statusCode} for ${request.requestType}",
                 )
             }
-            return parseComputeStatus(response.body).also {
-                if (it.requestId != request.requestId) {
-                    throw AgentSdkException(
-                        ErrorCode.RUNTIME_REJECTED,
-                        "C-04 request_id does not match the computing request",
-                        "request_id",
-                    )
-                }
-                rememberComputeStatus(it)
+            val parsed = parseComputeStatus(response.body)
+            if (parsed.requestId != request.requestId) {
+                throw AgentSdkException(
+                    ErrorCode.RUNTIME_REJECTED,
+                    "C-04 request_id does not match the computing request",
+                    "request_id",
+                )
+            }
+            rememberComputeStatus(parsed)
+            return computingMutex.withLock {
+                computingStatusesByRequest[request.requestId] ?: parsed
             }
         }
         val error = response.body["error"] as? JsonObject
@@ -2103,26 +2226,54 @@ class AgentSdk internal constructor(
 
     private suspend fun rememberComputeStatus(status: ComputeSessionStatus) {
         computingMutex.withLock {
-            computingStatusesByRequest[status.requestId] = status
-            computingStatusWaiters.remove(status.requestId).orEmpty().forEach {
-                it.complete(status)
-            }
             val sessionId = status.computeServiceSessionId
             val revision = status.statusRevision?.toULongOrNull()
-            if (sessionId == null || revision == null) {
-                Log.i(TAG, computeStatusDiagnostic(status))
+            if (
+                sessionId != null && sessionId in computingClosedSessionIds &&
+                status.status !in COMPUTE_TERMINAL_STATUSES
+            ) {
+                Log.i(
+                    TAG,
+                    "Ignoring non-terminal computing status for locally closed " +
+                        "session_id=$sessionId status=${status.status}",
+                )
                 return@withLock
             }
-            val currentRevision = computingStatuses[sessionId]?.statusRevision?.toULongOrNull()
-            if (currentRevision == null || revision > currentRevision) {
+            if (sessionId != null && revision != null) {
+                val currentRevision = computingStatuses[sessionId]?.statusRevision?.toULongOrNull()
+                if (currentRevision != null && revision <= currentRevision) {
+                    val currentForRequest = computingStatusesByRequest[status.requestId]
+                    val requestRevision = currentForRequest?.statusRevision?.toULongOrNull()
+                    if (
+                        currentForRequest == null ||
+                        currentForRequest.computeServiceSessionId != sessionId ||
+                        requestRevision == null || revision > requestRevision
+                    ) {
+                        computingStatusesByRequest[status.requestId] = status
+                        computingStatusWaiters.remove(status.requestId).orEmpty().forEach {
+                            it.complete(status)
+                        }
+                    }
+                    Log.i(
+                        TAG,
+                        "Ignoring stale computing status request_id=${status.requestId} " +
+                            "session_id=$sessionId status_revision=$revision " +
+                            "current_revision=$currentRevision",
+                    )
+                    return@withLock
+                }
                 computingStatuses[sessionId] = status
-                Log.i(TAG, computeStatusDiagnostic(status))
                 if (status.status in COMPUTE_TERMINAL_STATUSES) {
                     computingWaiters.remove(sessionId).orEmpty().forEach {
                         it.completeExceptionally(terminalComputeException(status))
                     }
                 }
             }
+            computingStatusesByRequest[status.requestId] = status
+            computingStatusWaiters.remove(status.requestId).orEmpty().forEach {
+                it.complete(status)
+            }
+            Log.i(TAG, computeStatusDiagnostic(status))
         }
     }
 
@@ -2274,7 +2425,19 @@ class AgentSdk internal constructor(
         }
         val key = Triple(session.bindingRef, session.role.name, session.receiverAgentId)
         computingMutex.withLock {
+            if (identityRemovalInProgress) {
+                return computeConfigAck(session, false, "session-closed")
+            }
+            if (session.computeServiceSessionId in computingClosedSessionIds) {
+                return computeConfigAck(session, false, "session-closed")
+            }
             if (computingCloseResults.containsKey(key)) {
+                return computeConfigAck(session, false, "session-closed")
+            }
+            if (
+                computingStatuses[session.computeServiceSessionId]
+                    ?.status in COMPUTE_TERMINAL_STATUSES
+            ) {
                 return computeConfigAck(session, false, "session-closed")
             }
             computingSessions[session.computeServiceSessionId]?.let { current ->
@@ -2298,11 +2461,30 @@ class AgentSdk internal constructor(
         } catch (error: ComputeBindingException) {
             return computeConfigAck(session, false, error.protocolCause)
         }
-        computingMutex.withLock {
-            computingSessions[session.computeServiceSessionId] = session
-            computingWaiters.remove(session.computeServiceSessionId).orEmpty().forEach {
-                it.complete(session)
+        val rejectionAfterInstall = computingMutex.withLock {
+            val rejection = when {
+                identityRemovalInProgress || profile?.agentId != session.receiverAgentId ->
+                    "session-closed"
+                computingStatuses[session.computeServiceSessionId]
+                    ?.status in COMPUTE_TERMINAL_STATUSES -> "session-closed"
+                else -> null
             }
+            if (rejection == null) {
+                computingSessions[session.computeServiceSessionId] = session
+                computingWaiters.remove(session.computeServiceSessionId).orEmpty().forEach {
+                    it.complete(session)
+                }
+            }
+            rejection
+        }
+        if (rejectionAfterInstall != null) {
+            runCatching {
+                tunnelController.replaceGroupPeers(
+                    computingRouteKey(session.bindingRef),
+                    emptySet(),
+                )
+            }
+            return computeConfigAck(session, false, rejectionAfterInstall)
         }
         return computeConfigAck(session, true, "")
     }
@@ -2493,7 +2675,22 @@ class AgentSdk internal constructor(
                 false, "runtime-unhealthy",
             )
         }
-        computingMutex.withLock { computingCloseResults[key] = result }
+        computingMutex.withLock {
+            computingCloseResults[key] = result
+            if (result["closed"]?.jsonPrimitive?.booleanOrNull == true) {
+                computingClosedSessionIds += sessionId
+                computingCloseWaiters.remove(sessionId).orEmpty().forEach { it.complete(Unit) }
+            } else {
+                val failure = AgentSdkException(
+                    ErrorCode.COMPUTING_SESSION_INVALID,
+                    "C-05 failed to close computing session $sessionId " +
+                        "(cause=${result.stringOrNull("cause") ?: "runtime-unhealthy"})",
+                )
+                computingCloseWaiters.remove(sessionId).orEmpty().forEach {
+                    it.completeExceptionally(failure)
+                }
+            }
+        }
         return result
     }
 
@@ -2521,10 +2718,10 @@ class AgentSdk internal constructor(
     ): ComputingSession {
         requireComputeString(sessionId, "compute_service_session_id")
         val waiter = computingMutex.withLock {
-            computingSessions[sessionId]?.let { return it }
             computingStatuses[sessionId]?.takeIf { it.status in COMPUTE_TERMINAL_STATUSES }?.let {
                 throw terminalComputeException(it)
             }
+            computingSessions[sessionId]?.let { return it }
             CompletableDeferred<ComputingSession>().also {
                 computingWaiters.getOrPut(sessionId) { mutableListOf() } += it
             }
@@ -2717,6 +2914,10 @@ class AgentSdk internal constructor(
             computingWaiters.clear()
             computingStatusWaiters.values.flatten().forEach { it.completeExceptionally(closed) }
             computingStatusWaiters.clear()
+            computingCloseWaiters.values.flatten().forEach { it.completeExceptionally(closed) }
+            computingCloseWaiters.clear()
+            computingRequestsInFlight.clear()
+            computingClosedSessionIds.clear()
             computeRequests.clear()
             computeCreateRequests.clear()
             computingStatuses.clear()
@@ -2727,6 +2928,7 @@ class AgentSdk internal constructor(
             computingMediaLocks.clear()
             computingClosing.clear()
             computingCloseResults.clear()
+            identityRemovalInProgress = false
         }
         receivedA2aMutex.withLock { receivedA2aMessageIds.clear() }
         ueInfo = null

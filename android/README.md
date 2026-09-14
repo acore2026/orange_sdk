@@ -197,7 +197,10 @@ SDK 将 Agent 业务状态按 Runtime `IP:端口` 保存在应用私有
 才申请身份，状态2才发布 Agent Card，状态3直接复用，不重复调用
 `registerCapabilities()`。状态2再次申请身份时会先注销旧身份；状态2/3调用参数less
 `resetAgent()` 时，SDK 只删除本地 Profile/Card 记录并回到状态1，不发送去注册消息、
-不修改网侧身份；状态1调用同样不发 HTTP 并幂等成功。状态3调用 `updateCapabilities()` 时直接请求
+不修改网侧身份；状态1调用同样不发 HTTP 并幂等成功。存在进行中的算力请求、非终态会话或
+C-02配置时，`resetAgent()`和`deregisterIdentity()`都会保留Profile并返回
+`AGENT_STATE_INVALID`；应用必须先取消或释放会话，并等待C-05完成本地媒体与路由清理。
+状态3调用 `updateCapabilities()` 时直接请求
 `POST /arf/v1/agent-cards-update`，成功后身份不变并保持状态3。状态3再次调用
 `registerCapabilities()` 表示替换整张 Card：SDK 在本地校验后先注销旧身份、重新申请，
 再发布新的完整 Card；成功后从 `sdk.localProfile` 读取可能变化的 `agentId`。
@@ -360,13 +363,20 @@ check(result.success)
 check(sdk.agentLifecycleState == AgentLifecycleState.NO_IDENTITY)
 ```
 
+若当前存在算力会话，先结束会话并等待SDK处理C-05：
+
+```kotlin
+sdk.releaseComputingSession(releaseRequest)
+sdk.awaitComputingSessionClosed(computeServiceSessionId, timeoutSeconds = 30.0)
+val result = sdk.resetAgent()
+```
+
 Generic 与 RayNeo 示例 App 的运行页均提供“重置到状态1”。为防止触控或镜腿误触，
-Reset 需要连续确认两次；执行期间会等待当前 SDK 调用明确结束，再清除本地状态，避免
-尚未结束的调用在 Reset 后重新写入身份。成功后停止自动流程并关闭当前链路，不会向
+Reset 需要连续确认两次；执行期间先释放活动算力会话并等待C-05，再清除本地状态，避免
+尚未结束的算力配置在 Reset 后重新写入状态。成功后停止自动流程并关闭当前链路，不会向
 AgentRuntime 发送去注册请求，也不会自动重新申请身份；本地持久化删除失败时保留原状态。
-Generic 与 RayNeo App 的“停止”按钮会先以 `reason=normal` 调用
-`deregisterIdentity`，等待成功或明确失败并记录日志后，再关闭 SDK、MASQUE、TUN
-和本地服务；它与上述 local-only Reset 语义互不混用。
+Generic 与 RayNeo App 的“停止”按钮也先释放活动算力会话并等待C-05，再以
+`reason=normal`调用`deregisterIdentity`；任一步失败都会保留Profile并记录日志。
 
 Generic 与 RayNeo 运行页也提供 `Dump 日志`。它会生成一个可分享的文本诊断包，包含
 完整 App 流程日志、当前 SDK/群组端点、设备版本、网络接口与 Android 路由、进程可见的
