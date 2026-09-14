@@ -2,6 +2,29 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-14 — Android WebRTC限定使用CONNECT-IP用户面候选
+
+### 修改原因
+
+- Android libwebrtc 的 `networkPreference=VPN` 只调整候选优先级，仍会收集物理 Wi-Fi、
+  蜂窝和以太网候选；SDK随后按C-02 UE IPv4过滤SDP，在部分设备上会把全部候选删除，
+  导致媒体Offer尚未发送给Sandbox就失败。
+- `network_binding.ue_ipv4`用于校验PDU/CONNECT-IP绑定，候选应根据实际承载网络选择，
+  不能只靠SDP地址字符串判断。
+
+### 修改方式
+
+- Android WebRTC工厂忽略物理网络类型，只允许SDK VPN/TUN网络参与ICE收集；根据
+  libwebrtc回调携带的`adapterType`选择VPN候选，保留UE IPv4精确匹配作为UNKNOWN类型
+  的兼容路径。
+- VPN host候选地址被隐私名称遮蔽时，使用已由C-02校验过的UE IPv4发布；记录候选网络
+  类型、地址和类型，失败信息附带实际收集的adapter统计。
+- Android测试App升级为`0.2.30`，便于确认设备已安装本次修复。
+
+### 验证内容
+
+- Android候选策略单元测试、SDK/App全量测试和两种debug APK构建通过。
+
 ## 2026-09-14 — 延长异步算网配置等待时间
 
 ### 修改原因

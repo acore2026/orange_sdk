@@ -3,6 +3,7 @@ package com.rayneo.agent.sdk.webrtc
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.rayneo.agent.sdk.AgentSdkException
 import com.rayneo.agent.sdk.ErrorCode
@@ -35,6 +36,7 @@ import org.webrtc.SurfaceTextureHelper
 import org.webrtc.VideoCapturer
 import org.webrtc.VideoSink
 import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -54,7 +56,18 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
                     .createInitializationOptions(),
             )
         }
+        val options = PeerConnectionFactory.Options().apply {
+            // Computing media must use the CONNECT-IP VPN/TUN network. A preference only
+            // changes candidate priority and still lets libwebrtc publish physical Wi-Fi,
+            // cellular, and Ethernet candidates.
+            networkIgnoreMask =
+                PeerConnectionFactory.Options.ADAPTER_TYPE_ETHERNET or
+                PeerConnectionFactory.Options.ADAPTER_TYPE_WIFI or
+                PeerConnectionFactory.Options.ADAPTER_TYPE_CELLULAR or
+                PeerConnectionFactory.Options.ADAPTER_TYPE_LOOPBACK
+        }
         factory = PeerConnectionFactory.builder()
+            .setOptions(options)
             .setVideoEncoderFactory(
                 DefaultVideoEncoderFactory(egl.eglBaseContext, true, true),
             )
@@ -118,7 +131,11 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
             val resources = ProducerResources(pc, capturer, texture, source, track)
             return PreparedUpload(
                 resources,
-                sanitizeHostCandidates(local.description, session.networkBinding.ueIpv4),
+                publishUserPlaneOffer(
+                    local.description,
+                    session.networkBinding.ueIpv4,
+                    signals.localCandidates,
+                ),
                 signals,
             )
         } catch (error: Throwable) {
@@ -149,7 +166,11 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
                 ?: mediaFailure("local WebRTC Offer is unavailable")
             return PreparedConsumer(
                 pc,
-                sanitizeHostCandidates(local.description, session.networkBinding.ueIpv4),
+                publishUserPlaneOffer(
+                    local.description,
+                    session.networkBinding.ueIpv4,
+                    signals.localCandidates,
+                ),
                 signals,
             )
         } catch (error: Throwable) {
@@ -279,6 +300,7 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
         val iceComplete = CompletableDeferred<Unit>()
         val connectionChanged = CompletableDeferred<Unit>()
         val remoteVideo = CompletableDeferred<org.webrtc.VideoTrack>()
+        val localCandidates = CopyOnWriteArrayList<GatheredIceCandidate>()
     }
 
     private fun createPeer(signals: PeerSignals): PeerConnection {
@@ -313,7 +335,16 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
                     !signals.iceComplete.isCompleted
                 ) signals.iceComplete.complete(Unit)
             }
-            override fun onIceCandidate(candidate: IceCandidate) = Unit
+            override fun onIceCandidate(candidate: IceCandidate) {
+                val gathered = GatheredIceCandidate(candidate.sdp, candidate.adapterType)
+                signals.localCandidates += gathered
+                Log.i(
+                    TAG,
+                    "ICE candidate gathered adapter=${candidate.adapterType.name} " +
+                        "address=${candidateAddress(candidate.sdp) ?: "unknown"} " +
+                        "type=${candidateType(candidate.sdp) ?: "unknown"}",
+                )
+            }
             override fun onIceCandidatesRemoved(candidates: Array<IceCandidate>) = Unit
             override fun onAddStream(stream: MediaStream) = Unit
             override fun onRemoveStream(stream: MediaStream) = Unit
@@ -371,13 +402,6 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
         return enumerator.createCapturer(selected, null)
             ?: mediaFailure("unable to open camera $selected")
     }
-
-    private fun sanitizeHostCandidates(sdp: String, ueIpv4: String): String =
-        sdp.splitToSequence("\r\n").filter { line ->
-            if (!line.startsWith("a=candidate:")) return@filter true
-            val parts = line.split(Regex("\\s+"))
-            !(parts.size >= 8 && parts[7].equals("host", true) && parts[4] != ueIpv4)
-        }.joinToString("\r\n")
 
     private suspend fun releaseProducer(resources: ProducerResources) {
         if (!resources.released.compareAndSet(false, true)) return
@@ -443,9 +467,87 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
     }
 
     private companion object {
+        const val TAG = "AgentSdkWebRtc"
         val factoryInitialized = AtomicBoolean(false)
     }
 }
+
+internal data class GatheredIceCandidate(
+    val sdp: String,
+    val adapterType: PeerConnection.AdapterType,
+)
+
+/**
+ * Publishes only candidates gathered on the SDK-managed VPN/TUN interface.
+ *
+ * Android libwebrtc may obscure a VPN host address in SDP. The socket is still bound to the
+ * VPN network, so publish the C-02 UE IPv4 address for that host candidate. The exact-address
+ * fallback covers libwebrtc builds that report the candidate adapter as UNKNOWN.
+ */
+internal fun publishUserPlaneOffer(
+    sdp: String,
+    ueIpv4: String,
+    gatheredCandidates: List<GatheredIceCandidate>,
+): String {
+    val observed = gatheredCandidates.groupBy { normalizeCandidate(it.sdp) }
+    val selectedAdapters = linkedSetOf<PeerConnection.AdapterType>()
+    var selectedCount = 0
+    val lines = sdp.split("\r\n")
+    val published = lines.mapNotNull { line ->
+        if (!line.startsWith("a=candidate:")) return@mapNotNull line
+        val records = observed[normalizeCandidate(line)].orEmpty()
+        val address = candidateAddress(line)
+        val selected = records.firstOrNull {
+            it.adapterType == PeerConnection.AdapterType.VPN
+        } ?: records.firstOrNull {
+            it.adapterType == PeerConnection.AdapterType.UNKNOWN && address == ueIpv4
+        }
+        if (selected == null) return@mapNotNull null
+        selectedAdapters += selected.adapterType
+        selectedCount += 1
+        rewriteVpnHostAddress(line, ueIpv4)
+    }
+    if (selectedCount == 0) {
+        val summary = gatheredCandidates
+            .groupingBy { it.adapterType.name }
+            .eachCount()
+            .entries
+            .sortedBy { it.key }
+            .joinToString { "${it.key}=${it.value}" }
+            .ifBlank { "none" }
+        throw AgentSdkException(
+            ErrorCode.MEDIA_NEGOTIATION_FAILED,
+            "WebRTC did not gather an ICE candidate on the SDK VPN/TUN network " +
+                "for UE IPv4 $ueIpv4 (observed adapters: $summary)",
+        )
+    }
+    Log.i(
+        "AgentSdkWebRtc",
+        "Publishing $selectedCount user-plane ICE candidate(s) for UE IPv4 $ueIpv4 " +
+            "adapters=${selectedAdapters.joinToString { it.name }}",
+    )
+    return published.joinToString("\r\n")
+}
+
+private fun normalizeCandidate(line: String): String =
+    line.trim().removePrefix("a=")
+
+internal fun candidateAddress(line: String): String? =
+    candidateParts(line).getOrNull(4)
+
+internal fun candidateType(line: String): String? =
+    candidateParts(line).getOrNull(7)
+
+private fun rewriteVpnHostAddress(line: String, ueIpv4: String): String {
+    val parts = candidateParts(line).toMutableList()
+    if (parts.size >= 8 && parts[7].equals("host", ignoreCase = true)) {
+        parts[4] = ueIpv4
+    }
+    return parts.joinToString(" ")
+}
+
+private fun candidateParts(line: String): List<String> =
+    line.trim().split(Regex("\\s+"))
 
 private fun mediaFailure(message: String, cause: Throwable? = null): Nothing =
     throw AgentSdkException(ErrorCode.MEDIA_NEGOTIATION_FAILED, message, cause = cause)
