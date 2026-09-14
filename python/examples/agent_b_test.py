@@ -184,20 +184,19 @@ async def run_agent_b(
     video_file: Path | None = None
     if sdk is not None:
         client = sdk
-    elif args.video_source == "file":
+    else:
         from agent_sdk.webrtc import AiortcMediaOffloadAdapter
 
-        video_file = Path(args.video_file).expanduser().resolve()
-        if not video_file.is_file():
-            raise RuntimeError(f"local test video does not exist: {video_file}")
+        if args.video_source == "file":
+            video_file = Path(args.video_file).expanduser().resolve()
+            if not video_file.is_file():
+                raise RuntimeError(f"local test video does not exist: {video_file}")
         client = AgentSdk(
             _media_offload_adapter=AiortcMediaOffloadAdapter(
                 video_file_path=video_file,
                 loop_video_file=args.loop_video,
             )
         )
-    else:
-        client = AgentSdk()
     session_notifications: asyncio.Queue[ComputeNotification] = asyncio.Queue()
     message_listener = AgentBGroupListener(session_notifications)
     unregister_network = lambda: None
@@ -316,7 +315,7 @@ async def run_agent_b(
                 metadata={
                     "region": args.region,
                     "os": "Linux",
-                    "version": "0.17.5",
+                    "version": "0.17.6",
                 },
             )
             lifecycle_state = AgentLifecycleState.IDENTITY_READY

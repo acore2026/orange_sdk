@@ -8,7 +8,7 @@ SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.17.5-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
+- `agent_connect_sdk-0.17.6-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/interactive_linux_agent.py`：复用真实 Linux 全流程参数，每按一次回车只调用下一个 SDK 接口。
@@ -48,7 +48,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.17.5-py3-none-any.whl
+dist/agent_connect_sdk-0.17.6-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -60,7 +60,7 @@ dist/agent_connect_sdk-0.17.5-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.17.5-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.17.6-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -81,7 +81,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-该文件列出 `aiohttp`、`aioquic`、`cryptography`、`httpx` 和 `pyroute2`，并通过
+该文件列出 `aiohttp`、`aioquic`、`aiortc`、`cryptography`、`httpx` 和 `pyroute2`，并通过
 `-e .` 安装当前源码中的 `agent_sdk`，因此 examples 无需手工设置
 `PYTHONPATH`。源码的 PEP 517/PEP 660 构建只要求 `setuptools>=68`，不要求软件源
 额外提供 `wheel` 包。它只包含客户运行依赖；执行仓库测试时仍使用：
@@ -90,18 +90,21 @@ python -m pip install -r requirements.txt
 python -m pip install -e '.[test]'
 ```
 
-`pip` 会自动安装 `aiohttp`、`aioquic`、`cryptography`、`httpx` 和 `pyroute2` 等依赖。如果客户环境不能访问公网，应同时交付依赖 wheel，并使用：
+`pip` 会自动安装包括 `aiortc` 和 PyAV 在内的运行依赖。Python 3.14使用`aiortc>=1.14`；
+启动Agent B前可以用`python -c 'import aiortc, av'`验证视频运行时。缺少依赖时，
+`agent_b_test.py`会在建立网络和注册身份之前退出，并给出与当前Python解释器匹配的安装命令。
+如果客户环境不能访问公网，应同时交付依赖 wheel，并使用：
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.17.5-py3-none-any.whl
+  ./agent_connect_sdk-0.17.6-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.17.5-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.17.6-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -424,7 +427,7 @@ profile = await sdk.apply_identity(
     owner="customer-a",
     name="Agent A",
     description="RayNeo edge agent",
-    metadata={"region": "CN", "os": "Linux", "version": "0.17.5"},
+    metadata={"region": "CN", "os": "Linux", "version": "0.17.6"},
 )
 
 ability = await sdk.get_network_ability(profile.agent_id)

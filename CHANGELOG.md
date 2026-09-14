@@ -2,6 +2,28 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-14 — 修复Python视频运行时交付和启动检查
+
+### 修改原因
+
+- `setup.cfg`和`requirements.txt`已经声明`aiortc`，但现有`0.17.5` wheel生成于该依赖
+  加入之前，实际METADATA未包含`aiortc`；安装旧wheel不会自动获得WebRTC运行时。
+- Agent B直到收到算力会话并调用`start_video_upload()`时才发现依赖缺失，导致已经完成的
+  身份、建组和算力流程被浪费。
+
+### 修改方式
+
+- Python SDK升级为`0.17.6`，将`aiortc`最低版本提高到支持Python 3.14的`1.14`，并在包
+  分类中明确Python 3.13和3.14。
+- `AiortcMediaOffloadAdapter`创建时检查`aiortc`和PyAV；Agent B的文件与摄像头模式均在
+  网络初始化前创建该适配器，缺失依赖时直接输出当前Python解释器对应的安装命令。
+- 安装指南补齐视频依赖检查；ARM64镜像构建同时验证`aiortc`导入和本地测试视频解码。
+
+### 验证内容
+
+- 新增缺失`aiortc`时的启动前失败测试；重建wheel和源码包，检查wheel METADATA包含
+  `Requires-Dist: aiortc<2,>=1.14`，并执行Python全量测试。
+
 ## 2026-09-14 — 算力请求同时收敛HTTP与异步C-04
 
 ### 修改原因

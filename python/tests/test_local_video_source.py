@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 from pathlib import Path
+import sys
 from unittest.mock import Mock
 
 import av
+import pytest
 
+from agent_sdk import AgentSdkError, ErrorCode
 from agent_sdk.webrtc import AiortcMediaOffloadAdapter
 
 
@@ -15,6 +19,26 @@ VIDEO_PATH = (
     / "assets"
     / "video-offload-test.mp4"
 )
+
+
+def test_aiortc_adapter_fails_early_with_current_interpreter_install_command(
+    monkeypatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def import_without_aiortc(name, *args, **kwargs):
+        if name == "aiortc":
+            raise ModuleNotFoundError("No module named 'aiortc'", name="aiortc")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_aiortc)
+
+    with pytest.raises(AgentSdkError) as caught:
+        AiortcMediaOffloadAdapter(video_file_path=VIDEO_PATH)
+
+    assert caught.value.code is ErrorCode.MEDIA_NEGOTIATION_FAILED
+    assert "dependency is unavailable: aiortc" in str(caught.value)
+    assert f"{sys.executable} -m pip install" in str(caught.value)
 
 
 def test_bundled_video_is_a_decodable_720p_h264_stream() -> None:

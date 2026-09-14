@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import shlex
+import sys
 from typing import Any
 
 from .errors import AgentSdkError, ErrorCode
@@ -13,6 +15,24 @@ def _media_error(message: str, cause: BaseException | None = None) -> AgentSdkEr
     if cause is not None:
         error.__cause__ = cause
     return error
+
+
+def require_aiortc() -> None:
+    """Fail before network setup when the packaged WebRTC runtime is unavailable."""
+    try:
+        import aiortc  # noqa: F401
+        import av  # noqa: F401
+    except ImportError as exc:
+        package = exc.name or "aiortc"
+        command = (
+            f"{shlex.quote(sys.executable)} -m pip install "
+            "'aiortc>=1.14,<2'"
+        )
+        raise _media_error(
+            f"Python WebRTC dependency is unavailable: {package}; "
+            f"install it before starting the Agent: {command}",
+            exc,
+        ) from exc
 
 
 async def _wait_for_connection(pc: Any, timeout_seconds: float) -> None:
@@ -207,6 +227,7 @@ class AiortcMediaOffloadAdapter:
         video_file_path: str | Path | None = None,
         loop_video_file: bool = True,
     ) -> None:
+        require_aiortc()
         self._peers: set[Any] = set()
         self._video_file_path = (
             Path(video_file_path).expanduser().resolve()

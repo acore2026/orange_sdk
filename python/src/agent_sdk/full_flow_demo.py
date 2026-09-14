@@ -469,7 +469,7 @@ async def run_demo(
             owner="demo-owner",
             name="Agent A",
             description="wheel installation self-check",
-            metadata={"region": "CN", "os": "Linux", "version": "0.17.5"},
+            metadata={"region": "CN", "os": "Linux", "version": "0.17.6"},
         )
         show("2 apply_identity", profile.agent_id)
 
