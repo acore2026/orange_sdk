@@ -25,6 +25,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Dns
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -33,6 +35,7 @@ import okhttp3.WebSocketListener
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.InetAddress
 import java.net.Proxy
+import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
@@ -526,37 +529,68 @@ class OkHttpRuntimeTransport(
         method: String,
         path: String,
         body: JsonObject,
-    ): RuntimeHttpResponse =
-        withContext(Dispatchers.IO) {
-            val requestBody = body.toString().toRequestBody("application/json".toMediaType())
-            val builder = Request.Builder().url(baseUrl + path)
-            when (method.uppercase()) {
-                "POST" -> builder.post(requestBody)
-                "PUT" -> builder.put(requestBody)
-                "PATCH" -> builder.patch(requestBody)
-                else -> throw AgentSdkException(ErrorCode.INVALID_ARGUMENT, "Unsupported HTTP method")
-            }
-            try {
-                client.newCall(builder.build()).execute().use { response ->
-                    val text = response.body?.string() ?: "{}"
-                    val payload = json.parseToJsonElement(text) as? JsonObject
-                        ?: throw AgentSdkException(
-                            ErrorCode.RUNTIME_REJECTED,
-                            "Runtime response must be a JSON object",
-                        )
-                    RuntimeHttpResponse(response.code, payload)
-                }
-            } catch (error: AgentSdkException) {
-                throw error
-            } catch (error: Exception) {
-                throw AgentSdkException(
-                    ErrorCode.RUNTIME_UNREACHABLE,
-                    "Runtime request failed",
-                    retryable = true,
-                    cause = error,
+    ): RuntimeHttpResponse = requestWithStatus(method, path, body, 10.0)
+
+    override suspend fun requestWithStatus(
+        method: String,
+        path: String,
+        body: JsonObject,
+        timeoutSeconds: Double,
+    ): RuntimeHttpResponse {
+        val requestBody = body.toString().toRequestBody("application/json".toMediaType())
+        val builder = Request.Builder().url(baseUrl + path)
+        when (method.uppercase()) {
+            "POST" -> builder.post(requestBody)
+            "PUT" -> builder.put(requestBody)
+            "PATCH" -> builder.patch(requestBody)
+            else -> throw AgentSdkException(ErrorCode.INVALID_ARGUMENT, "Unsupported HTTP method")
+        }
+        return suspendCancellableCoroutine { continuation ->
+            val call = client.newCall(builder.build()).also {
+                it.timeout().timeout(
+                    (timeoutSeconds * 1000.0).toLong().coerceAtLeast(1L),
+                    TimeUnit.MILLISECONDS,
                 )
             }
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, error: IOException) {
+                    val failure = AgentSdkException(
+                        ErrorCode.RUNTIME_UNREACHABLE,
+                        "Runtime request failed",
+                        retryable = true,
+                        cause = error,
+                    )
+                    continuation.resumeWithException(failure)
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    val result = runCatching {
+                        response.use {
+                            val text = response.body?.string() ?: "{}"
+                            val payload = json.parseToJsonElement(text) as? JsonObject
+                                ?: throw AgentSdkException(
+                                    ErrorCode.RUNTIME_REJECTED,
+                                    "Runtime response must be a JSON object",
+                                )
+                            RuntimeHttpResponse(response.code, payload)
+                        }
+                    }
+                    result.onSuccess { value ->
+                        continuation.resume(value)
+                    }.onFailure { error ->
+                        val failure = if (error is AgentSdkException) error else AgentSdkException(
+                            ErrorCode.RUNTIME_UNREACHABLE,
+                            "Runtime request failed",
+                            retryable = true,
+                            cause = error,
+                        )
+                        continuation.resumeWithException(failure)
+                    }
+                }
+            })
         }
+    }
 
     override suspend fun request(method: String, path: String, body: JsonObject): JsonObject {
         val response = requestWithStatus(method, path, body)

@@ -70,6 +70,7 @@ import com.rayneo.agent.sdk.transport.ProofVerifier
 import com.rayneo.agent.sdk.transport.RuntimeTransport
 import com.rayneo.agent.sdk.transport.SandboxTransport
 import com.rayneo.agent.sdk.transport.RouteLocalAddressResolver
+import com.rayneo.agent.sdk.transport.RuntimeHttpResponse
 import com.rayneo.agent.sdk.transport.TunnelConfiguration
 import com.rayneo.agent.sdk.transport.TunnelController
 import com.rayneo.agent.sdk.transport.VideoTrack
@@ -95,6 +96,8 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.Json
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -102,6 +105,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.selects.select
 import java.io.File
 import java.net.URI
 import java.net.InetAddress
@@ -233,6 +237,8 @@ class AgentSdk internal constructor(
     private val computingClosing = mutableSetOf<String>()
     private val computingCloseResults = mutableMapOf<Triple<String, String, String>, JsonObject>()
     private val computingWaiters = mutableMapOf<String, MutableList<CompletableDeferred<ComputingSession>>>()
+    private val computingStatusWaiters =
+        mutableMapOf<String, MutableList<CompletableDeferred<ComputeSessionStatus>>>()
     private val computingMutex = Mutex()
     private val computeJson = Json
 
@@ -1914,9 +1920,49 @@ class AgentSdk internal constructor(
             computingMutex.withLock { computeCreateRequests[request.requestId] = request }
         }
         val activeRuntime = checkNotNull(runtime)
-        val response = withTimeout((timeoutSeconds * 1000).toLong()) {
-            activeRuntime.requestWithStatus("POST", COMPUTING_SESSION_REQUEST_PATH, body)
+        val statusWaiter = CompletableDeferred<ComputeSessionStatus>()
+        val knownStatus = computingMutex.withLock {
+            computingStatusesByRequest[request.requestId] ?: run {
+                computingStatusWaiters.getOrPut(request.requestId) { mutableListOf() } += statusWaiter
+                null
+            }
         }
+        if (knownStatus != null) return knownStatus
+        return try {
+            withTimeout((timeoutSeconds * 1000).toLong()) {
+                coroutineScope {
+                    val httpStatus = async {
+                        val response = activeRuntime.requestWithStatus(
+                            "POST",
+                            COMPUTING_SESSION_REQUEST_PATH,
+                            body,
+                            timeoutSeconds,
+                        )
+                        parseComputeHttpResponse(request, response)
+                    }
+                    select {
+                        statusWaiter.onAwait { status ->
+                            httpStatus.cancel()
+                            status
+                        }
+                        httpStatus.onAwait { it }
+                    }
+                }
+            }
+        } finally {
+            computingMutex.withLock {
+                computingStatusWaiters[request.requestId]?.let { waiters ->
+                    waiters.remove(statusWaiter)
+                    if (waiters.isEmpty()) computingStatusWaiters.remove(request.requestId)
+                }
+            }
+        }
+    }
+
+    private suspend fun parseComputeHttpResponse(
+        request: ComputeSessionRequest,
+        response: RuntimeHttpResponse,
+    ): ComputeSessionStatus {
         if (response.body.stringOrNull("message_type") == COMPUTE_SESSION_STATUS) {
             val allowedStatus = when (request.requestType) {
                 ComputeRequestType.CREATE -> setOf(202)
@@ -2039,6 +2085,9 @@ class AgentSdk internal constructor(
     private suspend fun rememberComputeStatus(status: ComputeSessionStatus) {
         computingMutex.withLock {
             computingStatusesByRequest[status.requestId] = status
+            computingStatusWaiters.remove(status.requestId).orEmpty().forEach {
+                it.complete(status)
+            }
             val sessionId = status.computeServiceSessionId
             val revision = status.statusRevision?.toULongOrNull()
             if (sessionId == null || revision == null) {
@@ -2647,6 +2696,8 @@ class AgentSdk internal constructor(
             )
             computingWaiters.values.flatten().forEach { it.completeExceptionally(closed) }
             computingWaiters.clear()
+            computingStatusWaiters.values.flatten().forEach { it.completeExceptionally(closed) }
+            computingStatusWaiters.clear()
             computeRequests.clear()
             computeCreateRequests.clear()
             computingStatuses.clear()

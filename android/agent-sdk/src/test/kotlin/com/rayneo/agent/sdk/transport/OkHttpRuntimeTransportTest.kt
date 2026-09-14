@@ -4,7 +4,11 @@ import com.rayneo.agent.sdk.AgentSdkException
 import com.rayneo.agent.sdk.ErrorCode
 import com.rayneo.agent.sdk.model.NetworkMessageAction
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
@@ -15,6 +19,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -171,6 +176,36 @@ class OkHttpRuntimeTransportTest {
                 "CLARIFICATION_REQUIRED",
                 response.body["status"]!!.jsonPrimitive.content,
             )
+        } finally {
+            transport.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `runtime request cancellation closes a pending HTTP call`() = runTest {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+        server.start()
+        val transport = OkHttpRuntimeTransport(server.hostName, server.port)
+        try {
+            val request = async {
+                transport.requestWithStatus(
+                    "POST",
+                    "/v1/computing/session-requests",
+                    buildJsonObject { put("request_id", "create-001") },
+                    timeoutSeconds = 30.0,
+                )
+            }
+            assertTrue(
+                withContext(Dispatchers.IO) {
+                    server.takeRequest(2, TimeUnit.SECONDS) != null
+                },
+            )
+
+            request.cancelAndJoin()
+
+            assertTrue(request.isCancelled)
         } finally {
             transport.close()
             server.shutdown()

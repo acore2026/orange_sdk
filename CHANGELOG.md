@@ -2,6 +2,29 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-14 — 算力请求同时收敛HTTP与异步C-04
+
+### 修改原因
+
+- 真网联调中，CREATE对应的HTTP调用仍在等待时，公共WebSocket已收到同一`request_id`的C-02和
+  `ACTIVE` C-04；Android SDK继续等待OkHttp默认10秒超时，最终向App返回
+  `Runtime request failed`，丢失了已经确认的会话ID。
+- 公开接口的`timeoutSeconds`只包在协程外层，实际HTTP请求受OkHttp默认10秒读取超时限制，
+  调用方设置的超时没有完整传入传输层。
+
+### 修改方式
+
+- CREATE、QUERY、CANCEL和RELEASE同时等待HTTP响应和公共WebSocket上同`request_id`的C-04；
+  异步C-04先到时立即返回其完整状态并取消仍在等待的HTTP调用。
+- Runtime传输支持按调用设置完整请求超时，并改为可随协程取消的异步OkHttp调用，避免已经取得
+  C-04后仍被阻塞的HTTP请求拖住SDK。
+- Android测试App升级为`0.2.34`、`versionCode=36`。
+
+### 验证内容
+
+- 新增HTTP持续等待但WebSocket先返回`ACTIVE` C-04的回归测试，并执行Android SDK/App全量测试
+  及Generic、RayNeo debug APK构建。
+
 ## 2026-09-14 — 恢复实机验证过的WebRTC VPN路由模型
 
 ### 修改原因

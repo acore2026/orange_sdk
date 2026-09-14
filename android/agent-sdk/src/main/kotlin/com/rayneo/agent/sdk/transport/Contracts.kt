@@ -40,6 +40,12 @@ interface RuntimeTransport {
         path: String,
         body: JsonObject,
     ): RuntimeHttpResponse = RuntimeHttpResponse(200, request(method, path, body))
+    suspend fun requestWithStatus(
+        method: String,
+        path: String,
+        body: JsonObject,
+        timeoutSeconds: Double,
+    ): RuntimeHttpResponse = requestWithStatus(method, path, body)
     suspend fun close()
 }
 

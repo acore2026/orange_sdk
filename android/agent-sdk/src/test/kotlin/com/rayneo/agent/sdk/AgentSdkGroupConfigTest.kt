@@ -36,6 +36,7 @@ import com.rayneo.agent.sdk.transport.TunnelController
 import com.rayneo.agent.sdk.transport.VideoTrack
 import com.rayneo.agent.sdk.transport.VideoUploadHandle
 import com.rayneo.agent.sdk.security.TestCapabilityVcIssuer
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -465,6 +466,31 @@ class AgentSdkGroupConfigTest {
         assertEquals("dog-vision", body["constraints"]!!.jsonObject["capability_id"]!!.jsonPrimitive.content)
         assertFalse(body.containsKey("proof"))
         assertFalse(body.containsKey("timestamp"))
+    }
+
+    @Test
+    fun `computing create accepts correlated C04 while HTTP response is pending`() = runTest {
+        initializeSdk()
+        runtime.deliverGroupConfig(groupConfig(includeSecondPeer = true))
+        runtime.computeRequestHandler = { body ->
+            runtime.deliverDownlink(
+                "COMPUTE_SESSION_STATUS",
+                buildJsonObject {
+                    put("request_id", body["request_id"]!!)
+                    put("compute_service_session_id", "css-async-001")
+                    put("status_revision", "7")
+                    put("status", "ACTIVE")
+                    put("cause", "")
+                },
+            )
+            CompletableDeferred<RuntimeHttpResponse>().await()
+        }
+
+        val status = sdk.createComputingSession(createComputeRequest(), timeoutSeconds = 2.0)
+
+        assertEquals("css-async-001", status.computeServiceSessionId)
+        assertEquals("ACTIVE", status.status)
+        assertEquals("7", status.statusRevision)
     }
 
     @Test
@@ -1347,6 +1373,7 @@ class AgentSdkGroupConfigTest {
         val paths = mutableListOf<String>()
         val bodies = mutableMapOf<String, JsonObject>()
         var ueInfoRequests = 0
+        var computeRequestHandler: (suspend (JsonObject) -> RuntimeHttpResponse)? = null
         var downlinkHandler: (suspend (String, Int, JsonObject) -> JsonObject?)? = null
 
         override suspend fun getUeInfo(): JsonObject {
@@ -1454,13 +1481,23 @@ class AgentSdkGroupConfigTest {
             method: String,
             path: String,
             body: JsonObject,
-        ): RuntimeHttpResponse = RuntimeHttpResponse(
-            if (
-                path == "/v1/computing/session-requests" &&
-                body["request_type"]?.jsonPrimitive?.content == "CREATE"
-            ) 202 else 200,
-            request(method, path, body),
-        )
+        ): RuntimeHttpResponse {
+            if (path == "/v1/computing/session-requests" && computeRequestHandler != null) {
+                lastMethod = method
+                lastPath = path
+                paths += path
+                lastBody = body
+                bodies[path] = body
+                return checkNotNull(computeRequestHandler).invoke(body)
+            }
+            return RuntimeHttpResponse(
+                if (
+                    path == "/v1/computing/session-requests" &&
+                    body["request_type"]?.jsonPrimitive?.content == "CREATE"
+                ) 202 else 200,
+                request(method, path, body),
+            )
+        }
         override suspend fun close() = Unit
     }
 
