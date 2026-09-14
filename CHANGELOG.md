@@ -2,6 +2,25 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-14 — 修复Android实机TUN候选被误删
+
+### 修改原因
+
+- 部分Android libwebrtc会在`onIceCandidate`与最终`localDescription`中以不同扩展属性表示同一
+  ICE候选。SDK此前要求两处候选字符串完全一致，导致已经收集到的C-02 UE IPv4候选仍在发布
+  Offer时被误判为不存在；网卡类型显示为`UNKNOWN`只是诊断信息，不是失败原因。
+
+### 修改方式
+
+- 发布Offer时直接按候选地址精确匹配C-02 `ue_ipv4`；回调候选只用于记录adapter诊断信息，
+  不再参与候选是否可用的判定。
+- Android测试App升级为`0.2.36`、`versionCode=38`。
+
+### 验证内容
+
+- 回归测试覆盖回调候选和最终SDP候选扩展属性不一致的Android实现；执行Android SDK/App测试
+  及Generic、RayNeo debug APK构建。
+
 ## 2026-09-14 — 修复C-02重建TUN期间的A2A投递竞态
 
 ### 修改原因

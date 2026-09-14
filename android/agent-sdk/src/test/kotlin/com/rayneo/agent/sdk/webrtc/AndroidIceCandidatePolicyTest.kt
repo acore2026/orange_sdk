@@ -32,13 +32,16 @@ class AndroidIceCandidatePolicyTest {
 
     @Test
     fun acceptsExactUeCandidateRegardlessOfAdapterLabel() {
-        val candidate = "candidate:3 1 UDP 3 10.60.0.2 42000 typ host"
-        val offer = "v=0\r\na=$candidate\r\n"
+        val gathered = "candidate:3 1 UDP 3 10.60.0.2 42000 typ host generation 0 network-id 2"
+        val localDescription = "candidate:3 1 UDP 3 10.60.0.2 42000 typ host generation 0"
+        val offer = "v=0\r\na=$localDescription\r\n"
 
         val published = publishUserPlaneOffer(
             offer,
             "10.60.0.2",
-            listOf(GatheredIceCandidate(candidate, PeerConnection.AdapterType.ETHERNET)),
+            // Android libwebrtc can normalize candidate extensions differently between
+            // onIceCandidate and PeerConnection.localDescription.
+            listOf(GatheredIceCandidate(gathered, PeerConnection.AdapterType.UNKNOWN)),
         )
 
         assertTrue(published.contains("10.60.0.2 42000 typ host"))

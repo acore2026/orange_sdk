@@ -517,17 +517,16 @@ internal fun publishUserPlaneOffer(
     ueIpv4: String,
     gatheredCandidates: List<GatheredIceCandidate>,
 ): String {
-    val observed = gatheredCandidates.groupBy { normalizeCandidate(it.sdp) }
     val selectedAdapters = linkedSetOf<PeerConnection.AdapterType>()
     var selectedCount = 0
     val lines = sdp.split("\r\n")
     val published = lines.mapNotNull { line ->
         if (!line.startsWith("a=candidate:")) return@mapNotNull line
-        val records = observed[normalizeCandidate(line)].orEmpty()
         val address = candidateAddress(line)
-        val selected = records.firstOrNull { address == ueIpv4 }
-        if (selected == null) return@mapNotNull null
-        selectedAdapters += selected.adapterType
+        if (address != ueIpv4) return@mapNotNull null
+        gatheredCandidates
+            .firstOrNull { candidateAddress(it.sdp) == ueIpv4 }
+            ?.let { selectedAdapters += it.adapterType }
         selectedCount += 1
         line
     }
@@ -552,9 +551,6 @@ internal fun publishUserPlaneOffer(
     )
     return published.joinToString("\r\n")
 }
-
-private fun normalizeCandidate(line: String): String =
-    line.trim().removePrefix("a=")
 
 internal fun candidateAddress(line: String): String? =
     candidateParts(line).getOrNull(4)
