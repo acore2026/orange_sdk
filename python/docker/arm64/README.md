@@ -102,7 +102,8 @@ docker exec agent-sdk-b ip route get 10.60.0.2
 通用可选变量包括 `AGENT_TCP_PORT`、`AGENT_UDP_PORT`、`AGENT_TUN_NAME`、
 `AGENT_TUN_MTU`、`AGENT_NAME`、`AGENT_OWNER`、`AGENT_REGION`、
 `AGENT_PRIORITY`、`AGENT_LOG_FILE`、`AGENT_LOG_LEVEL` 和
-`AGENT_FRESH_REGISTRATION`、`AGENT_DEREGISTER_ON_EXIT`。A 还支持
+`AGENT_FORCE_REGISTRATION`、`AGENT_FRESH_REGISTRATION`、
+`AGENT_DEREGISTER_ON_EXIT`。A 还支持
 `AGENT_TARGET_ID`、`AGENT_MESSAGE_JSON`、`AGENT_GROUP_NAME`、
 `AGENT_COMPUTE_CAPABILITY_ID`、CPU/内存/GPU/镜像等正式算力约束、
 `AGENT_COMPUTE_TERMINAL_ACTION` 和 `AGENT_PROCESSED_FRAME_COUNT`。B 还支持
@@ -130,6 +131,11 @@ ARM 测试镜像默认设置 `AGENT_FRESH_REGISTRATION=true` 和
 新版容器至少成功启动一次，不能在升级前直接删除，否则会失去注销网侧遗留身份所需
 的 Agent ID。需要临时恢复旧的复用行为时，必须显式设置
 `AGENT_FRESH_REGISTRATION=false`；测试验收不应这样设置。
+
+需要直接丢弃本地 Profile/Card 状态并重新申请身份、且不向网侧注销旧身份时，设置
+`AGENT_FORCE_REGISTRATION=true`。该变量优先于默认的
+`AGENT_FRESH_REGISTRATION=true`，因此无需同时修改后者；启动脚本会传入
+`--force-registration` 并调用 SDK 的本地 `reset_agent()`。
 
 身份、Agent 状态和自动生成的 TLS 私钥保存在 `/var/lib/agent-sdk`，A、B 使用独立
 持久卷；日志保存在各自 `/var/log/agent-sdk` 卷中。停止部署使用：

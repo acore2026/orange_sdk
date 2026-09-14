@@ -12,9 +12,11 @@ printf '%s\n' \
     '  AGENT_RUNTIME_IP, MASQUE_URL' \
     '' \
     'Test lifecycle defaults:' \
+    '  AGENT_FORCE_REGISTRATION=false' \
     '  AGENT_FRESH_REGISTRATION=true' \
     '  AGENT_DEREGISTER_ON_EXIT=true' \
     '  Persisted state is used only to deregister leftovers; it is not reused.' \
+    '  Force mode resets local state without deregistering the old identity.' \
     '' \
     'Required Docker options for the real SDK flow:' \
     '  --cap-add NET_ADMIN --device /dev/net/tun' \

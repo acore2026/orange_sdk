@@ -86,8 +86,10 @@ docker run --rm --platform linux/arm64 --entrypoint python "${IMAGE_TAG}" \
 docker run --rm --platform linux/arm64 --entrypoint agent-sdk-self-check \
     "${IMAGE_TAG}"
 docker run --rm --platform linux/arm64 --entrypoint sh "${IMAGE_TAG}" -c \
-    'grep -F "AGENT_FRESH_REGISTRATION:-true" /usr/local/bin/start-agent-a.sh >/dev/null &&
+    'grep -F "AGENT_FORCE_REGISTRATION:-false" /usr/local/bin/start-agent-a.sh >/dev/null &&
+     grep -F "AGENT_FRESH_REGISTRATION:-true" /usr/local/bin/start-agent-a.sh >/dev/null &&
      grep -F "AGENT_DEREGISTER_ON_EXIT:-true" /usr/local/bin/start-agent-a.sh >/dev/null &&
+     grep -F "AGENT_FORCE_REGISTRATION:-false" /usr/local/bin/start-agent-b.sh >/dev/null &&
      grep -F "AGENT_FRESH_REGISTRATION:-true" /usr/local/bin/start-agent-b.sh >/dev/null &&
      grep -F "AGENT_DEREGISTER_ON_EXIT:-true" /usr/local/bin/start-agent-b.sh >/dev/null'
 docker run --rm --platform linux/arm64 "${IMAGE_TAG}"

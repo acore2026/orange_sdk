@@ -60,6 +60,7 @@ async def test_agent_a_runs_acn_and_computing_consumer_flow():
     assert args.prompt is False
     assert args.dnn == "internet"
     assert args.fresh_registration is False
+    assert args.force_registration is False
     args.fresh_registration = True
     args.deregister_on_exit = True
     previous_profile = SimpleNamespace(
@@ -225,6 +226,7 @@ async def test_agent_b_publishes_capability_and_can_stop_before_session():
     args = _base_arguments(module)
     assert args.prompt is False
     assert args.fresh_registration is False
+    assert args.force_registration is False
     args.deregister_on_exit = True
     profile = SimpleNamespace(
         agent_id="did:example:b",
@@ -375,6 +377,78 @@ async def test_agent_b_fresh_registration_replaces_persisted_profile():
     sdk.get_network_ability.assert_awaited_once_with(profile.agent_id)
     sdk.register_capabilities.assert_awaited_once()
     sdk.close.assert_awaited_once()
+
+
+async def test_agent_b_force_registration_resets_only_local_state():
+    module = _load_example("agent_b_test")
+    args = _base_arguments(module)
+    args.force_registration = True
+    previous_profile = SimpleNamespace(
+        agent_id="did:example:b-old",
+        agent_name="Agent-B",
+        identity_vc={"id": "vc0-b-old"},
+    )
+    profile = SimpleNamespace(
+        agent_id="did:example:b-new",
+        agent_name="Agent-B",
+        identity_vc={"id": "vc0-b-new"},
+    )
+    ability = SimpleNamespace(
+        abilities=("agent_discovery",),
+        ability_vc={"id": "vc1-b-new"},
+        valid_until=None,
+    )
+    sdk = SimpleNamespace(
+        agent_lifecycle_state=AgentLifecycleState.CARD_PUBLISHED,
+        local_profile=previous_profile,
+        register_network_message_listener=MagicMock(return_value=lambda: None),
+        register_group_message_listener=MagicMock(return_value=lambda: None),
+        init=AsyncMock(
+            return_value=SimpleNamespace(
+                agent_tun_cidr="10.60.0.3/32",
+                agent_tcp_endpoint="10.60.0.3:4001",
+                masque_proxy_endpoint=args.masque_url,
+            )
+        ),
+        reset_agent=AsyncMock(
+            return_value=SimpleNamespace(success=True, message="local state reset")
+        ),
+        deregister_identity=AsyncMock(),
+        apply_identity=AsyncMock(return_value=profile),
+        get_network_ability=AsyncMock(return_value=ability),
+        register_capabilities=AsyncMock(
+            return_value=SimpleNamespace(success=True, message="")
+        ),
+        close=AsyncMock(),
+    )
+    stop_event = asyncio.Event()
+    stop_event.set()
+
+    result = await module.run_agent_b(args, sdk=sdk, stop_event=stop_event)
+
+    assert result["agent_id"] == profile.agent_id
+    sdk.reset_agent.assert_awaited_once_with()
+    sdk.deregister_identity.assert_not_awaited()
+    sdk.apply_identity.assert_awaited_once()
+    sdk.get_network_ability.assert_awaited_once_with(profile.agent_id)
+    sdk.register_capabilities.assert_awaited_once()
+    sdk.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("example_name", ["agent_a_test", "agent_b_test"])
+def test_registration_modes_are_mutually_exclusive(example_name):
+    module = _load_example(example_name)
+    with pytest.raises(SystemExit):
+        module.parser().parse_args(
+            [
+                "--runtime-ip",
+                "192.168.3.10",
+                "--masque-url",
+                "https://192.168.3.10:4433/.well-known/masque/ip",
+                "--fresh-registration",
+                "--force-registration",
+            ]
+        )
 
 
 async def test_agent_b_fresh_registration_fails_closed_when_cleanup_is_rejected():

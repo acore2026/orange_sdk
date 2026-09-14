@@ -1059,6 +1059,12 @@ WebSocket、A2A HTTP 监听仍然正常工作。交互步骤覆盖监听器注�
 回退到复用。ARM 测试镜像默认同时启用 `--fresh-registration` 和
 `--deregister-on-exit`，普通命令行调用仍保持向后兼容的默认行为。
 
+需要忽略网侧旧身份并强制从头测试时使用 `--force-registration`。脚本会在
+`sdk.init()` 恢复状态后调用本地接口 `reset_agent()`，删除持久化的 Profile/Card
+状态并回到 `NO_IDENTITY`，期间不会调用 `deregister_identity()`；随后重新执行
+身份申请、网络能力获取和 Agent Card 发布。`--force-registration` 与
+`--fresh-registration` 互斥。
+
 本测试使用两个独立脚本。B 先发布 `video_rendering` 能力并等待；A 按能力发现 B、
 建立二人群组，然后执行完整的算力媒体流程：
 

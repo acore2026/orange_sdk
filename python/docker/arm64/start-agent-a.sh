@@ -119,7 +119,9 @@ fi
 if ! is_true "${AGENT_COMPUTE_QUERY_SESSION:-true}"; then
     set -- "$@" --no-query-session
 fi
-if is_true "${AGENT_FRESH_REGISTRATION:-true}"; then
+if is_true "${AGENT_FORCE_REGISTRATION:-false}"; then
+    set -- "$@" --force-registration
+elif is_true "${AGENT_FRESH_REGISTRATION:-true}"; then
     set -- "$@" --fresh-registration
 fi
 if is_true "${AGENT_DEREGISTER_ON_EXIT:-true}"; then

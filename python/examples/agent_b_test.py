@@ -257,7 +257,26 @@ async def run_agent_b(
             agent_lifecycle_state=lifecycle_state.value,
             agent_id=profile.agent_id if profile else None,
         )
-        if (
+        if args.force_registration:
+            previous_agent_id = profile.agent_id if profile else None
+            await _before_step(
+                gate,
+                "sdk.reset_agent",
+                "Force 模式：只清除本地 Profile/Card 状态，不向网侧发送去注册请求。",
+            )
+            reset = await client.reset_agent()
+            if not reset.success:
+                raise RuntimeError(
+                    f"Agent B local state reset failed: {reset.message}"
+                )
+            _emit(
+                "LOCAL_AGENT_STATE_RESET",
+                previous_agent_id=previous_agent_id,
+                network_deregistration_sent=False,
+            )
+            lifecycle_state = AgentLifecycleState.NO_IDENTITY
+            profile = None
+        elif (
             args.fresh_registration
             and lifecycle_state is not AgentLifecycleState.NO_IDENTITY
         ):
@@ -554,12 +573,21 @@ def parser() -> argparse.ArgumentParser:
         default=1,
         help="number of remotely closed sessions required for success; 0 keeps serving",
     )
-    value.add_argument(
+    registration_mode = value.add_mutually_exclusive_group()
+    registration_mode.add_argument(
         "--fresh-registration",
         action="store_true",
         help=(
             "deregister any persisted identity during startup, then always "
             "apply and publish a new identity"
+        ),
+    )
+    registration_mode.add_argument(
+        "--force-registration",
+        action="store_true",
+        help=(
+            "clear the persisted local Profile/Card state without network "
+            "deregistration, then apply and publish a new identity"
         ),
     )
     value.add_argument("--deregister-on-exit", action="store_true")
@@ -571,6 +599,7 @@ async def main(args: argparse.Namespace) -> None:
         "TEST_STARTING",
         interactive=args.prompt,
         fresh_registration=args.fresh_registration,
+        force_registration=args.force_registration,
         deregister_on_exit=args.deregister_on_exit,
     )
     gate = EnterStepGate() if args.prompt else None
