@@ -51,6 +51,7 @@ class SdkFeatureCoverageWiringTest {
             "查询动作",
             "开始录音 · 仅转文字",
             "开始录音 · 转写并执行",
+            "最近转写结果",
         ).forEach { label ->
             assertTrue("Missing feature action: $label", activity.contains(label))
         }
@@ -76,6 +77,8 @@ class SdkFeatureCoverageWiringTest {
         assertTrue(rayneo.contains("VoiceMode.CONTROL_ACTION"))
         assertTrue(rayneoLayout.contains("@+id/asr_action"))
         assertTrue(rayneoLayout.contains("@+id/voice_control_action"))
+        assertTrue(rayneoLayout.contains("@+id/voice_result"))
+        assertTrue(rayneo.contains("sdkFeatureState?.lastTranscription"))
     }
 
     @Test

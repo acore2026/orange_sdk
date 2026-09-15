@@ -412,6 +412,11 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 }
                 null -> Unit
             }
+            voiceResult.text = when {
+                voiceRecordingMode != null -> "最近转写结果：正在录音…"
+                voiceActionRunning -> "最近转写结果：正在识别…"
+                else -> "最近转写结果：${sdkFeatureState?.lastTranscription?.ifBlank { "<未识别到文字>" } ?: "<暂无>"}"
+            }
         }
     }
 

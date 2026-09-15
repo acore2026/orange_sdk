@@ -109,6 +109,7 @@ class MainActivity : Activity() {
     private var controlGetButton: TextView? = null
     private var asrTranscribeButton: TextView? = null
     private var voiceControlButton: TextView? = null
+    private var voiceTranscriptionResult: TextView? = null
     private var capabilitySkillInput: EditText? = null
     private var capabilityVcInput: EditText? = null
     private var recognitionTargetInput: EditText? = null
@@ -183,6 +184,7 @@ class MainActivity : Activity() {
         controlGetButton = null
         asrTranscribeButton = null
         voiceControlButton = null
+        voiceTranscriptionResult = null
         capabilitySkillInput = null
         capabilityVcInput = null
         recognitionTargetInput = null
@@ -693,6 +695,20 @@ class MainActivity : Activity() {
             checkNotNull(asrTranscribeButton),
             checkNotNull(voiceControlButton),
         ))
+        voiceTranscriptionResult = TextView(this@MainActivity).apply {
+            text = "最近转写结果：<暂无>"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            maxLines = 6
+            setTextIsSelectable(true)
+            setPadding(dp(11), dp(10), dp(11), dp(10))
+            background = rounded(Palette.INK_INPUT, 9f, Palette.INK_LINE)
+        }.also {
+            addView(it, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(7) })
+        }
 
         groupSnapshotButton = actionButton("读取群组快照", filled = false) {
             runSdkFeatureAction("群组快照") { inspectGroupSnapshot() }
@@ -893,6 +909,11 @@ class MainActivity : Activity() {
                 "Group=${if (groupReady) "READY" else "WAIT"} · " +
                 "Compute=${state.computeStatus ?: if (sessionReady) "READY" else "WAIT"} · " +
                 "Media=${state.videoUploadState ?: state.processedVideoState ?: "WAIT"}"
+        }
+        voiceTranscriptionResult?.text = when {
+            voiceRecordingMode != null -> "最近转写结果：正在录音…"
+            sdkFeatureActionRunning -> "最近转写结果：正在识别…"
+            else -> "最近转写结果：${state?.lastTranscription?.ifBlank { "<未识别到文字>" } ?: "<暂无>"}"
         }
     }
 
