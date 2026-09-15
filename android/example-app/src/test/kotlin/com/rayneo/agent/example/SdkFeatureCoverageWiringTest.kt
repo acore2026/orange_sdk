@@ -23,6 +23,8 @@ class SdkFeatureCoverageWiringTest {
             "sdk.updateRecognitionTarget(",
             "sdk.getRecognitionTarget(",
             "sdk.createControlAction(",
+            "sdk.transcribeAudio(",
+            "sdk.createAudioControlAction(",
             "sdk.getControlAction(",
         ).forEach { call ->
             assertTrue("Missing example-app coverage for $call", runner.contains(call))
@@ -47,12 +49,33 @@ class SdkFeatureCoverageWiringTest {
             "读取目标",
             "创建动作",
             "查询动作",
+            "开始录音 · 仅转文字",
+            "开始录音 · 转写并执行",
         ).forEach { label ->
             assertTrue("Missing feature action: $label", activity.contains(label))
         }
         assertTrue(activity.contains("state?.processedVideoState != null"))
         assertTrue(activity.contains("state?.producerVideoReady == true"))
         assertTrue(activity.contains("activeConfig?.role == TestRole.A"))
+    }
+
+    @Test
+    fun bothAppsExposeStandaloneAsrAndBoundVoiceActions() {
+        val manifest = File("src/main/AndroidManifest.xml").readText()
+        val recorder = File(
+            "src/main/kotlin/com/rayneo/agent/example/VoiceAudioRecorder.kt",
+        ).readText()
+        val rayneo = File(
+            "src/rayneo/kotlin/com/rayneo/agent/example/RayNeoMainActivity.kt",
+        ).readText()
+        val rayneoLayout = File("src/rayneo/res/layout/activity_rayneo_main.xml").readText()
+
+        assertTrue(manifest.contains("android.permission.RECORD_AUDIO"))
+        assertTrue(recorder.contains("MediaRecorder.AudioSource.MIC"))
+        assertTrue(rayneo.contains("VoiceMode.TRANSCRIBE"))
+        assertTrue(rayneo.contains("VoiceMode.CONTROL_ACTION"))
+        assertTrue(rayneoLayout.contains("@+id/asr_action"))
+        assertTrue(rayneoLayout.contains("@+id/voice_control_action"))
     }
 
     @Test

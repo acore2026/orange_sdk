@@ -599,6 +599,49 @@ val current = sdk.getControlAction(sessionId, action.actionId)
 `getControlAction` 调用 `GET /v1/control-actions/{action_id}` 并要求 HTTP 200。
 Sandbox 到 producer Runtime 的动作转发由 Runtime 内部处理，不新增应用回调。
 
+pruned_sandbox 的独立 ASR 服务使用 9004 端口，不依赖 C-02 或算力会话，因此可以在
+`AgentSdk.create()` 之后、`initialize()` 之前调用：
+
+```kotlin
+val transcription = sdk.transcribeAudio(
+    asrUrl = "http://101.245.78.174:9004/api/v1/transcribe",
+    request = AudioTranscriptionRequest(
+        audio = recordedBytes,
+        fileName = "speech.m4a",
+        contentType = "audio/mp4",
+        sessionId = "demo-room",
+        taskId = "task-001",
+        source = "glasses",
+        language = "zh",
+    ),
+)
+println(transcription.text)
+```
+
+`transcribeAudio` 使用 `multipart/form-data` 上传 `file/session_id/task_id/source`，并返回
+转写文本、语言概率、分段时间和处理耗时。调用方传入完整 ASR URL；SDK 不从 C-02 推导
+9004 地址。支持 `wav/mp3/m4a/flac/ogg/webm`。
+
+consumer 已收到 C-02 后，可以把录音直接创建为运行期控制动作：
+
+```kotlin
+val voiceAction = sdk.createAudioControlAction(
+    computeServiceSessionId = sessionId,
+    request = AudioControlActionRequest(
+        requestId = "voice-action-001",
+        audio = recordedBytes,
+        fileName = "speech.m4a",
+        contentType = "audio/mp4",
+        language = "zh",
+    ),
+)
+println(voiceAction.transcription?.text)
+```
+
+该接口使用 C-02 的 `service_endpoint` 调用 `POST /v1/audio-control-actions`，自动携带
+`computing_context`，要求 HTTP 202，并把响应中的 `transcription` 与标准控制动作状态一起
+返回。后续仍使用 `getControlAction` 查询动作执行结果。
+
 If the requester tells the producer to start, the application sends only
 `compute_service_session_id` through the existing `sendMessage` API. It does
 not send a Sandbox address, port, URL, binding, or credential. The producer SDK

@@ -3,6 +3,8 @@ package com.rayneo.agent.sdk
 import com.rayneo.agent.sdk.model.AgentProfile
 import com.rayneo.agent.sdk.model.AgentLifecycleState
 import com.rayneo.agent.sdk.model.AcnContext
+import com.rayneo.agent.sdk.model.AudioControlActionRequest
+import com.rayneo.agent.sdk.model.AudioTranscriptionRequest
 import com.rayneo.agent.sdk.model.ComputeConstraints
 import com.rayneo.agent.sdk.model.ComputeInputFormat
 import com.rayneo.agent.sdk.model.ComputeRequestType
@@ -41,6 +43,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -86,6 +89,8 @@ class AgentSdkGroupConfigTest {
         assertTrue(publicMethods.any { it.name == "updateRecognitionTarget" })
         assertTrue(publicMethods.any { it.name == "getRecognitionTarget" })
         assertTrue(publicMethods.any { it.name == "createControlAction" })
+        assertTrue(publicMethods.any { it.name == "createAudioControlAction" })
+        assertTrue(publicMethods.any { it.name == "transcribeAudio" })
         assertTrue(publicMethods.any { it.name == "getControlAction" })
         assertEquals(ComputeSessionRequest::class.java, create.parameterTypes[0])
     }
@@ -1001,6 +1006,56 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
+    fun `standalone ASR upload works before SDK initialization`() = runTest {
+        val result = sdk.transcribeAudio(
+            "http://sandbox.example:9004/api/v1/transcribe",
+            AudioTranscriptionRequest(
+                audio = byteArrayOf(1, 2, 3),
+                fileName = "speech.m4a",
+                contentType = "audio/mp4",
+                sessionId = "voice-session-001",
+                taskId = "voice-task-001",
+                source = "glasses",
+                language = "zh",
+            ),
+        )
+
+        assertEquals("transcript-001", result.transcriptId)
+        assertEquals("向左移动", result.text)
+        assertEquals("zh", result.language)
+        assertEquals(1, result.segments.size)
+        val upload = sandbox.uploads.single()
+        assertEquals("http://sandbox.example:9004/api/v1/transcribe", upload.url)
+        assertEquals("voice-session-001", upload.fields["session_id"])
+        assertEquals("glasses", upload.fields["source"])
+        assertEquals(null, upload.sourceIpv4)
+    }
+
+    @Test
+    fun `audio control action uploads transcription through consumer binding`() = runTest {
+        initializeSdk()
+        runtime.deliverDownlink("COMPUTE_CONNECT_CONFIG", computeConnectConfig("consumer"))
+
+        val action = sdk.createAudioControlAction(
+            "css-001",
+            AudioControlActionRequest(
+                requestId = "voice-action-001",
+                audio = byteArrayOf(4, 5, 6),
+                fileName = "voice.m4a",
+                contentType = "audio/mp4",
+            ),
+        )
+
+        assertEquals("向左移动", action.transcription?.text)
+        assertEquals(ControlAction.movement, action.normalizedAction)
+        val upload = sandbox.uploads.single()
+        assertEquals("http://8.8.8.9:8788/v1/audio-control-actions", upload.url)
+        assertEquals("8.8.8.7", upload.sourceIpv4)
+        assertEquals("voice-action-001", upload.fields["request_id"])
+        assertEquals("voice.m4a", upload.fileName)
+    }
+
+    @Test
     fun `capability update calls direct update endpoint`() = runTest {
         initializeSdk(restoreProfile = false)
         val profile = sdk.applyIdentity(
@@ -1883,7 +1938,15 @@ class AgentSdkGroupConfigTest {
     }
 
     private class FakeSandbox : SandboxTransport {
+        data class Upload(
+            val url: String,
+            val fields: Map<String, String>,
+            val fileName: String,
+            val sourceIpv4: String?,
+        )
+
         val requests = mutableListOf<Triple<String, String, JsonObject?>>()
+        val uploads = mutableListOf<Upload>()
         var failuresRemaining = 0
         var recognitionTarget: JsonObject? = null
         var controlAction: JsonObject? = null
@@ -1985,6 +2048,58 @@ class AgentSdkGroupConfigTest {
                     )
                 })
             })
+        }
+
+        override suspend fun uploadWithStatus(
+            url: String,
+            fields: Map<String, String>,
+            fileFieldName: String,
+            fileName: String,
+            contentType: String,
+            content: ByteArray,
+            timeoutSeconds: Double,
+            sourceIpv4: String?,
+        ): RuntimeHttpResponse {
+            uploads += Upload(url, fields, fileName, sourceIpv4)
+            if (url.endsWith("/api/v1/transcribe")) {
+                return RuntimeHttpResponse(200, buildJsonObject {
+                    put("transcriptId", "transcript-001")
+                    put("sessionId", fields.getValue("session_id"))
+                    put("taskId", fields.getValue("task_id"))
+                    put("source", fields.getValue("source"))
+                    put("text", "向左移动")
+                    put("language", "zh")
+                    put("languageProbability", 0.99)
+                    put("durationMs", 800)
+                    put("processingMs", 120)
+                    put("createdAtMs", 1_789_000_000_000)
+                    put("stopReason", null as String?)
+                    put("segments", buildJsonArray {
+                        add(buildJsonObject {
+                            put("startSec", 0.0)
+                            put("endSec", 0.8)
+                            put("text", "向左移动")
+                        })
+                    })
+                    put("audioFilename", fileName)
+                })
+            }
+            val context = Json.parseToJsonElement(fields.getValue("computing_context")).jsonObject
+            controlAction = buildJsonObject {
+                put("request_id", fields.getValue("request_id"))
+                put("action_id", "voice-action-001")
+                put("computing_context", context)
+                put("normalized_action", "movement")
+                put("normalized_parameters", buildJsonObject { put("direction", "left") })
+                put("status", "RUNNING")
+                put("cause", "")
+                put("transcription", buildJsonObject {
+                    put("text", "向左移动")
+                    put("language", "zh")
+                    put("transcript_id", "transcript-001")
+                })
+            }
+            return RuntimeHttpResponse(202, checkNotNull(controlAction))
         }
 
         override suspend fun close() = Unit

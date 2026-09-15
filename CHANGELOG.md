@@ -2,6 +2,28 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-15 — 增加独立语音转写与运行期语音动作
+
+### 修改原因
+
+- pruned_sandbox 除 C-02 绑定后的语音动作扩展外，还在 9004 端口提供独立
+  `POST /api/v1/transcribe`；Android SDK 和联调 App 原先都没有上传录音、返回纯文本的接口。
+
+### 修改方式
+
+- Android SDK 新增 `transcribeAudio`，允许在 `initialize` 和算力会话之前直接调用完整 ASR
+  URL，上传 multipart 音频并解析文本、语言、概率、耗时与分段结果。
+- 新增 `createAudioControlAction`，在 consumer C-02 已生效后向 Sandbox 上传录音，自动加入
+  `computing_context`，并在 `ControlActionStatus` 中返回 `transcription`。
+- Generic 与 RayNeo App 新增麦克风录音和“语音转文字”“语音控制”入口；独立转写默认使用
+  当前部署服务器的 9004 端口，语音控制按钮仅在处理流会话建立后启用。
+- Android测试App升级为`0.2.39`、`versionCode=41`。
+
+### 验证内容
+
+- 单元测试覆盖初始化前独立 ASR、consumer 语音动作、multipart 请求字段和两个 App Flavor
+  的录音入口；执行 Android SDK/App 单元测试、Lint 及 Generic/RayNeo Debug APK 构建。
+
 ## 2026-09-15 — 补齐 Android 联调 App 的 SDK 功能入口
 
 ### 修改原因

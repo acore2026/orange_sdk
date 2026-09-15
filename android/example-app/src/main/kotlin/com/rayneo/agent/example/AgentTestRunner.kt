@@ -4,6 +4,8 @@ import com.rayneo.agent.sdk.AgentSdk
 import com.rayneo.agent.sdk.model.AcnContext
 import com.rayneo.agent.sdk.model.AgentLifecycleState
 import com.rayneo.agent.sdk.model.AgentProfile
+import com.rayneo.agent.sdk.model.AudioControlActionRequest
+import com.rayneo.agent.sdk.model.AudioTranscriptionRequest
 import com.rayneo.agent.sdk.model.ComputeConstraints
 import com.rayneo.agent.sdk.model.ComputeInputFormat
 import com.rayneo.agent.sdk.model.ComputeRequestType
@@ -66,6 +68,7 @@ data class SdkFeatureState(
     val processedVideoState: String?,
     val recognitionTargetRevision: String?,
     val controlActionId: String?,
+    val lastTranscription: String?,
 ) {
     val computeSessionReady: Boolean get() = !computeSessionId.isNullOrBlank()
     val producerVideoReady: Boolean get() = videoUploadState != null
@@ -162,6 +165,7 @@ class AgentTestRunner(
     @Volatile private var lastComputeStatus: String? = null
     @Volatile private var recognitionTargetRevision: String? = null
     @Volatile private var lastControlActionId: String? = null
+    @Volatile private var lastTranscription: String? = null
     private val receivedVideoSinks = mutableListOf<Pair<VideoTrack, VideoSink>>()
 
     fun retryCurrentStep() {
@@ -211,7 +215,7 @@ class AgentTestRunner(
                     metadata = buildJsonObject {
                         put("region", "CN")
                         put("os", "Android")
-                        put("version", "0.2.38")
+                        put("version", "0.2.39")
                     },
                 )
             }
@@ -271,6 +275,7 @@ class AgentTestRunner(
         processedVideoState = processedVideoStream?.state,
         recognitionTargetRevision = recognitionTargetRevision,
         controlActionId = lastControlActionId,
+        lastTranscription = lastTranscription,
     )
 
     private fun emitFeatureState() = onFeatureStateChanged(featureState())
@@ -373,7 +378,8 @@ class AgentTestRunner(
             appendLine("video_upload_state=${videoUploadHandle?.state ?: "<none>"}")
             appendLine("processed_video_state=${processedVideoStream?.state ?: "<none>"}")
             appendLine("recognition_target_revision=${recognitionTargetRevision ?: "<none>"}")
-            append("last_control_action_id=${lastControlActionId ?: "<none>"}")
+            appendLine("last_control_action_id=${lastControlActionId ?: "<none>"}")
+            append("last_transcription=${lastTranscription ?: "<none>"}")
         }
     }
 
@@ -562,6 +568,59 @@ class AgentTestRunner(
         val summary = "action_id=${action.actionId}，status=${action.status}，" +
             "normalized_action=${action.normalizedAction ?: "<none>"}"
         onLog(LabLogLevel.SUCCESS, "CONTROL CREATE", summary)
+        emitFeatureState()
+        summary
+    }
+
+    suspend fun transcribeAudio(
+        audio: ByteArray,
+        fileName: String,
+        contentType: String,
+    ): String = operationMutex.withLock {
+        ensureResetNotRequested()
+        val operationId = UUID.randomUUID().toString()
+        val transcription = sdk.transcribeAudio(
+            asrUrl = "http://${config.serverIp}:9004/api/v1/transcribe",
+            request = AudioTranscriptionRequest(
+                audio = audio,
+                fileName = fileName,
+                contentType = contentType,
+                sessionId = activeComputeSessionId ?: "agent-link-$operationId",
+                taskId = "asr-$operationId",
+                source = "android-${config.role.name.lowercase()}",
+                language = "zh",
+            ),
+        )
+        lastTranscription = transcription.text
+        val summary = "transcript_id=${transcription.transcriptId}，" +
+            "language=${transcription.language ?: "<unknown>"}，text=${transcription.text}"
+        onLog(LabLogLevel.SUCCESS, "ASR 9004", summary)
+        emitFeatureState()
+        summary
+    }
+
+    suspend fun createAudioControlAction(
+        audio: ByteArray,
+        fileName: String,
+        contentType: String,
+    ): String = operationMutex.withLock {
+        ensureResetNotRequested()
+        val action = sdk.createAudioControlAction(
+            computeServiceSessionId = requireConsumerSessionId(),
+            request = AudioControlActionRequest(
+                requestId = UUID.randomUUID().toString(),
+                audio = audio,
+                fileName = fileName,
+                contentType = contentType,
+                language = "zh",
+            ),
+        )
+        lastControlActionId = action.actionId
+        lastTranscription = action.transcription?.text
+        val summary = "text=${action.transcription?.text ?: "<none>"}，" +
+            "action_id=${action.actionId}，status=${action.status}，" +
+            "normalized_action=${action.normalizedAction ?: "<none>"}"
+        onLog(LabLogLevel.SUCCESS, "VOICE CONTROL", summary)
         emitFeatureState()
         summary
     }
@@ -978,6 +1037,7 @@ class AgentTestRunner(
         lastComputeStatus = "CLOSED"
         recognitionTargetRevision = null
         lastControlActionId = null
+        lastTranscription = null
         onComputeActionAvailability(config.role == TestRole.A && manualMessageSession != null)
         emitFeatureState()
         return "${requestType.name} 已完成，C-05 已确认，本地状态=CLOSED"

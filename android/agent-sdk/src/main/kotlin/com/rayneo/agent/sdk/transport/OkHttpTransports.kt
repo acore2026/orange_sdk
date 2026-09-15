@@ -26,6 +26,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.Dns
 import okhttp3.Call
 import okhttp3.Callback
@@ -114,6 +115,74 @@ internal class OkHttpSandboxTransport(
             throw AgentSdkException(
                 ErrorCode.MEDIA_NEGOTIATION_FAILED,
                 "Sandbox media request failed",
+                retryable = true,
+                cause = error,
+            )
+        }
+    }
+
+    override suspend fun uploadWithStatus(
+        url: String,
+        fields: Map<String, String>,
+        fileFieldName: String,
+        fileName: String,
+        contentType: String,
+        content: ByteArray,
+        timeoutSeconds: Double,
+        sourceIpv4: String?,
+    ): RuntimeHttpResponse = withContext(Dispatchers.IO) {
+        if (sourceIpv4 != null && sourceIpv4.isBlank()) {
+            throw AgentSdkException(ErrorCode.INVALID_ARGUMENT, "sourceIpv4 must not be blank")
+        }
+        val timeoutMillis = (timeoutSeconds * 1_000).toLong().coerceAtLeast(1)
+        val client = baseClient.newBuilder()
+            .callTimeout(timeoutMillis, TimeUnit.MILLISECONDS)
+            .proxy(Proxy.NO_PROXY)
+            .dns(object : Dns {
+                override fun lookup(hostname: String): List<InetAddress> =
+                    Dns.SYSTEM.lookup(hostname).filter { it.address.size == 4 }
+                        .ifEmpty {
+                            throw java.net.UnknownHostException(
+                                "No IPv4 address for $hostname",
+                            )
+                        }
+            })
+            .build()
+        val multipart = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .apply {
+                fields.forEach { (name, value) -> addFormDataPart(name, value) }
+                addFormDataPart(
+                    fileFieldName,
+                    fileName,
+                    content.toRequestBody(contentType.toMediaType()),
+                )
+            }
+            .build()
+        try {
+            client.newCall(Request.Builder().url(url).post(multipart).build()).execute().use { response ->
+                val text = response.body?.string().orEmpty()
+                val payload = if (text.isBlank()) {
+                    JsonObject(emptyMap())
+                } else {
+                    runCatching { json.parseToJsonElement(text) as? JsonObject }.getOrNull()
+                        ?: buildJsonObject { put("message", text) }
+                }
+                RuntimeHttpResponse(response.code, payload)
+            }
+        } catch (error: AgentSdkException) {
+            throw error
+        } catch (error: java.net.SocketTimeoutException) {
+            throw AgentSdkException(
+                ErrorCode.TIMEOUT,
+                "Sandbox audio upload timed out",
+                retryable = true,
+                cause = error,
+            )
+        } catch (error: Exception) {
+            throw AgentSdkException(
+                ErrorCode.MEDIA_NEGOTIATION_FAILED,
+                "Sandbox audio upload failed",
                 retryable = true,
                 cause = error,
             )

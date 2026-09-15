@@ -57,6 +57,16 @@ internal interface SandboxTransport {
         timeoutSeconds: Double,
         sourceIpv4: String,
     ): RuntimeHttpResponse
+    suspend fun uploadWithStatus(
+        url: String,
+        fields: Map<String, String>,
+        fileFieldName: String,
+        fileName: String,
+        contentType: String,
+        content: ByteArray,
+        timeoutSeconds: Double,
+        sourceIpv4: String?,
+    ): RuntimeHttpResponse
     suspend fun close()
 }
 

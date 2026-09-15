@@ -245,6 +245,54 @@ data class ControlActionRequest(
     val target: ControlActionTarget? = null,
 )
 
+data class AudioControlActionRequest(
+    val requestId: String,
+    val audio: ByteArray,
+    val fileName: String,
+    val contentType: String,
+    val language: String = "zh",
+    val stopReason: String? = null,
+)
+
+data class AudioTranscriptionRequest(
+    val audio: ByteArray,
+    val fileName: String,
+    val contentType: String,
+    val sessionId: String = "demo-room",
+    val taskId: String = "demo-room",
+    val source: String = "agent-sdk",
+    val language: String? = null,
+    val stopReason: String? = null,
+)
+
+data class AudioTranscriptionSegment(
+    val startSeconds: Double,
+    val endSeconds: Double,
+    val text: String,
+)
+
+data class AudioTranscriptionResult(
+    val transcriptId: String,
+    val sessionId: String,
+    val taskId: String,
+    val source: String,
+    val text: String,
+    val language: String?,
+    val languageProbability: Double?,
+    val durationMs: Long,
+    val processingMs: Long,
+    val createdAtMs: Long,
+    val stopReason: String?,
+    val segments: List<AudioTranscriptionSegment>,
+    val audioFilename: String,
+)
+
+data class VoiceTranscription(
+    val text: String,
+    val language: String,
+    val transcriptId: String? = null,
+)
+
 data class ControlActionStatus(
     val requestId: String,
     val actionId: String,
@@ -254,4 +302,5 @@ data class ControlActionStatus(
     val normalizedAction: ControlAction? = null,
     val normalizedParameters: JsonObject? = null,
     val result: JsonObject? = null,
+    val transcription: VoiceTranscription? = null,
 )

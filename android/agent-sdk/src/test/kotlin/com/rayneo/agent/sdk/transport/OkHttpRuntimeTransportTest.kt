@@ -31,6 +31,38 @@ import java.net.SocketException
 
 class OkHttpRuntimeTransportTest {
     @Test
+    fun `Sandbox transport uploads multipart audio and standalone ASR needs no UE address`() = runTest {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody("""{"text":"向左移动"}"""),
+        )
+        server.start()
+        val transport = OkHttpSandboxTransport()
+        try {
+            val response = transport.uploadWithStatus(
+                url = server.url("/api/v1/transcribe").toString(),
+                fields = mapOf("language" to "zh", "source" to "glasses"),
+                fileFieldName = "file",
+                fileName = "speech.m4a",
+                contentType = "audio/mp4",
+                content = byteArrayOf(1, 2, 3),
+                timeoutSeconds = 2.0,
+                sourceIpv4 = null,
+            )
+            assertEquals(200, response.statusCode)
+            val request = server.takeRequest(2, TimeUnit.SECONDS)!!
+            val body = request.body.readUtf8()
+            assertTrue(request.getHeader("Content-Type")!!.startsWith("multipart/form-data;"))
+            assertTrue(body.contains("name=\"language\""))
+            assertTrue(body.contains("zh"))
+            assertTrue(body.contains("filename=\"speech.m4a\""))
+        } finally {
+            transport.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun `Sandbox transport supports Sandbox resource methods`() = runTest {
         val server = MockWebServer()
         server.enqueue(

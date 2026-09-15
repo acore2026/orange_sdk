@@ -81,6 +81,11 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     private var stopInProgress = false
     private var computeAvailable = false
     private var computeStarting = false
+    private val voiceRecorder by lazy { VoiceAudioRecorder(this) }
+    private var voiceRecordingMode: VoiceMode? = null
+    private var pendingVoicePermissionMode: VoiceMode? = null
+    private var voiceActionRunning = false
+    private var sdkFeatureState: SdkFeatureState? = null
     private val videoRenderers = CopyOnWriteArraySet<SurfaceViewRenderer>()
     @Volatile
     private var videoEglBase: EglBase? = null
@@ -98,6 +103,18 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 setStatus("需要 VPN 权限", "单击“启用 Agent 网络”后，在系统页面确认网络连接请求")
                 setPrimaryAction(PrimaryMode.RETRY, "启用 Agent 网络")
             }
+        }
+
+    private val microphonePermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            val mode = pendingVoicePermissionMode
+            pendingVoicePermissionMode = null
+            appendLog(
+                if (granted) LabLogLevel.SUCCESS else LabLogLevel.ERROR,
+                "MICROPHONE",
+                if (granted) "麦克风权限已授予" else "麦克风权限被拒绝，无法录音",
+            )
+            if (granted && mode != null) startVoiceRecording(mode)
         }
 
     private val connection = object : ServiceConnection {
@@ -152,6 +169,10 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         val focusHolder = FocusHolder(true)
         mBindingPair.setLeft {
             primaryAction.setOnClickListener { handlePrimaryAction() }
+            asrAction.setOnClickListener { toggleVoiceRecording(VoiceMode.TRANSCRIBE) }
+            voiceControlAction.setOnClickListener {
+                toggleVoiceRecording(VoiceMode.CONTROL_ACTION)
+            }
             resetAction.setOnClickListener { requestAgentReset() }
             dumpAction.setOnClickListener { dumpLogs() }
             stopAction.setOnClickListener { stopAndFinish() }
@@ -162,6 +183,26 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                         if (action is TempleAction.Click) handlePrimaryAction()
                     },
                     focusChangeHandler = { focused -> updateFocus(ActionTarget.PRIMARY, focused) },
+                ),
+                FocusInfo(
+                    asrAction,
+                    eventHandler = { action ->
+                        if (action is TempleAction.Click) {
+                            toggleVoiceRecording(VoiceMode.TRANSCRIBE)
+                        }
+                    },
+                    focusChangeHandler = { focused -> updateFocus(ActionTarget.ASR, focused) },
+                ),
+                FocusInfo(
+                    voiceControlAction,
+                    eventHandler = { action ->
+                        if (action is TempleAction.Click) {
+                            toggleVoiceRecording(VoiceMode.CONTROL_ACTION)
+                        }
+                    },
+                    focusChangeHandler = { focused ->
+                        updateFocus(ActionTarget.VOICE_CONTROL, focused)
+                    },
                 ),
                 FocusInfo(
                     resetAction,
@@ -208,6 +249,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         mBindingPair.updateView {
             val target = when (action) {
                 ActionTarget.PRIMARY -> primaryAction
+                ActionTarget.ASR -> asrAction
+                ActionTarget.VOICE_CONTROL -> voiceControlAction
                 ActionTarget.RESET -> resetAction
                 ActionTarget.DUMP -> dumpAction
                 ActionTarget.STOP -> stopAction
@@ -282,6 +325,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                     onComputeActionAvailability = ::setComputeActionAvailable,
                     processedVideoRenderSinks = ::processedVideoRenderSinks,
                     onProcessedVideoStatus = ::setProcessedVideoStatus,
+                    onFeatureStateChanged = ::setSdkFeatureState,
                 )
                 sdk = sdkValue
                 runner = flow
@@ -333,6 +377,125 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             if (available && !computeStarting) {
                 setStatus("群组已就绪 · 可申请算力", "单击后由 SDK 等待 consumer C-02 并连接处理流")
                 setPrimaryAction(PrimaryMode.COMPUTE, "申请算力会话")
+            }
+        }
+    }
+
+    private fun setSdkFeatureState(state: SdkFeatureState) {
+        runOnUiThread {
+            sdkFeatureState = state
+            refreshVoiceActions()
+        }
+    }
+
+    private fun refreshVoiceActions() {
+        val directReady = runner != null
+        val controlReady = sdkFeatureState?.processedVideoState != null
+        val busy = voiceActionRunning || voiceRecordingMode != null
+        mBindingPair.updateView {
+            asrAction.isEnabled = directReady && !busy
+            voiceControlAction.isEnabled = controlReady && !busy
+            asrAction.alpha = if (asrAction.isEnabled) 1f else 0.45f
+            voiceControlAction.alpha = if (voiceControlAction.isEnabled) 1f else 0.45f
+            asrAction.text = "语音转文字"
+            voiceControlAction.text = "语音控制"
+            when (voiceRecordingMode) {
+                VoiceMode.TRANSCRIBE -> {
+                    asrAction.isEnabled = true
+                    asrAction.alpha = 1f
+                    asrAction.text = "停止并转写"
+                }
+                VoiceMode.CONTROL_ACTION -> {
+                    voiceControlAction.isEnabled = true
+                    voiceControlAction.alpha = 1f
+                    voiceControlAction.text = "停止并执行"
+                }
+                null -> Unit
+            }
+        }
+    }
+
+    private fun toggleVoiceRecording(mode: VoiceMode) {
+        if (voiceRecordingMode == mode && voiceRecorder.isRecording) {
+            stopAndSubmitVoice(mode)
+            return
+        }
+        if (voiceRecorder.isRecording || voiceActionRunning || runner == null) return
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingVoicePermissionMode = mode
+            appendLog(LabLogLevel.INFO, "MICROPHONE", "等待麦克风权限；授权后自动开始录音")
+            microphonePermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+            return
+        }
+        startVoiceRecording(mode)
+    }
+
+    private fun startVoiceRecording(mode: VoiceMode) {
+        try {
+            voiceRecorder.start()
+            voiceRecordingMode = mode
+            appendLog(
+                LabLogLevel.INFO,
+                "VOICE RECORD",
+                if (mode == VoiceMode.TRANSCRIBE) "录音开始；再次单击上传 ASR 9004"
+                else "录音开始；再次单击创建运行期语音动作",
+            )
+            setStatus("正在录音", "再次单击当前语音按钮停止并提交")
+            refreshVoiceActions()
+        } catch (error: Exception) {
+            val detail = error.message ?: error::class.java.simpleName
+            appendLog(LabLogLevel.ERROR, "VOICE RECORD", "录音启动失败：$detail")
+            setStatus("录音启动失败", detail)
+        }
+    }
+
+    private fun stopAndSubmitVoice(mode: VoiceMode) {
+        val activeRunner = runner ?: return
+        val recording = try {
+            voiceRecorder.stop()
+        } catch (error: Exception) {
+            voiceRecordingMode = null
+            refreshVoiceActions()
+            val detail = error.message ?: error::class.java.simpleName
+            appendLog(LabLogLevel.ERROR, "VOICE RECORD", "录音结束失败：$detail")
+            setStatus("录音失败", detail)
+            return
+        }
+        voiceRecordingMode = null
+        voiceActionRunning = true
+        refreshVoiceActions()
+        setStatus("正在上传语音", if (mode == VoiceMode.TRANSCRIBE) "ASR :9004 转写中" else "Sandbox 语音动作处理中")
+        lifecycleScope.launch {
+            try {
+                val audio = withContext(Dispatchers.IO) { recording.file.readBytes() }
+                val detail = when (mode) {
+                    VoiceMode.TRANSCRIBE -> activeRunner.transcribeAudio(
+                        audio,
+                        recording.fileName,
+                        recording.contentType,
+                    )
+                    VoiceMode.CONTROL_ACTION -> activeRunner.createAudioControlAction(
+                        audio,
+                        recording.fileName,
+                        recording.contentType,
+                    )
+                }
+                setStatus(
+                    if (mode == VoiceMode.TRANSCRIBE) "语音转文字成功" else "语音动作已创建",
+                    detail.take(300),
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                val detail = error.message ?: error::class.java.simpleName
+                appendLog(LabLogLevel.ERROR, "VOICE", "语音接口失败：$detail")
+                setStatus("语音接口失败", detail)
+            } finally {
+                recording.file.delete()
+                voiceActionRunning = false
+                refreshVoiceActions()
             }
         }
     }
@@ -461,6 +624,10 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private fun performAgentReset() {
+        voiceRecorder.cancel()
+        voiceRecordingMode = null
+        pendingVoicePermissionMode = null
+        refreshVoiceActions()
         val activeSdk = sdk ?: return
         val activeRunner = runner
         val activeJob = runnerJob
@@ -674,6 +841,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
 
     private fun stopAndFinish() {
         if (isFinishing || stopInProgress) return
+        voiceRecorder.cancel()
+        voiceRecordingMode = null
         stopInProgress = true
         setPrimaryAction(PrimaryMode.BUSY, "正在关闭…")
         setStatus("正在停止", "先关闭算力会话，再向核心网发送 Agent 去注册请求")
@@ -688,6 +857,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private suspend fun closeResources(deregisterIdentity: Boolean = false) {
+        voiceRecorder.cancel()
+        voiceRecordingMode = null
         val activeJob = runnerJob
         val activeRunner = runner
         val activeSdk = sdk
@@ -716,6 +887,9 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         }
         activeRunner?.close()
         runner = null
+        sdkFeatureState = null
+        voiceActionRunning = false
+        runOnUiThread { refreshVoiceActions() }
         messageSession = null
         withContext(Dispatchers.IO) { runCatching { activeSdk?.close() } }
         sdk = null
@@ -730,6 +904,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     override fun onDestroy() {
+        voiceRecorder.cancel()
         val activeJob = runnerJob
         val activeSdk = sdk
         runnerJob = null
@@ -751,7 +926,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private enum class PrimaryMode { BUSY, RETRY, SEND, COMPUTE }
-    private enum class ActionTarget { PRIMARY, RESET, DUMP, STOP }
+    private enum class ActionTarget { PRIMARY, ASR, VOICE_CONTROL, RESET, DUMP, STOP }
+    private enum class VoiceMode { TRANSCRIBE, CONTROL_ACTION }
 
     private companion object {
         const val MAX_VISIBLE_LOG_LINES = 7

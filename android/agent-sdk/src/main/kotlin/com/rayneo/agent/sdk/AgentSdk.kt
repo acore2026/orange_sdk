@@ -5,6 +5,10 @@ import com.rayneo.agent.sdk.group.GroupMemberCache
 import com.rayneo.agent.sdk.masque.NativeMasqueTransport
 import com.rayneo.agent.sdk.masque.NativeMasqueBridge
 import com.rayneo.agent.sdk.model.AgentProfile
+import com.rayneo.agent.sdk.model.AudioControlActionRequest
+import com.rayneo.agent.sdk.model.AudioTranscriptionRequest
+import com.rayneo.agent.sdk.model.AudioTranscriptionResult
+import com.rayneo.agent.sdk.model.AudioTranscriptionSegment
 import com.rayneo.agent.sdk.model.AcnContext
 import com.rayneo.agent.sdk.model.AgentLifecycleState
 import com.rayneo.agent.sdk.model.ComputeConnectionParameters
@@ -36,6 +40,7 @@ import com.rayneo.agent.sdk.model.RecognitionTargetStatus
 import com.rayneo.agent.sdk.model.RuntimeDataPlane
 import com.rayneo.agent.sdk.model.SdkInitResult
 import com.rayneo.agent.sdk.model.Snssai
+import com.rayneo.agent.sdk.model.VoiceTranscription
 import com.rayneo.agent.sdk.security.AndroidDeviceSecurity
 import com.rayneo.agent.sdk.security.DisabledMessageSignatureVerifier
 import com.rayneo.agent.sdk.security.DisabledProofVerifier
@@ -80,6 +85,7 @@ import com.rayneo.agent.sdk.vpn.AgentVpnService
 import com.rayneo.agent.sdk.vpn.VpnTunnelController
 import com.rayneo.agent.sdk.webrtc.AndroidWebRtcMediaAdapter
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -87,6 +93,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -1426,6 +1433,95 @@ class AgentSdk internal constructor(
         )
     }
 
+    suspend fun createAudioControlAction(
+        computeServiceSessionId: String,
+        request: AudioControlActionRequest,
+        timeoutSeconds: Double = 120.0,
+    ): ControlActionStatus {
+        validateSandboxTimeout(timeoutSeconds)
+        validateComputeRequestId(request.requestId, "request_id")
+        val fileName = validateAudioUpload(request.audio, request.fileName, request.contentType)
+        requireComputeString(request.language, "language")
+        request.stopReason?.let { requireComputeString(it, "stopReason") }
+        val session = waitForComputingSession(computeServiceSessionId, timeoutSeconds)
+        requireConsumerSession(session, "createAudioControlAction")
+        val fields = buildMap {
+            put("request_id", request.requestId)
+            put("computing_context", mediaContext(session).toString())
+            put("language", request.language)
+            request.stopReason?.let { put("stop_reason", it) }
+        }
+        val response = sandboxTransport.uploadWithStatus(
+            url = audioControlActionsUrl(session),
+            fields = fields,
+            fileFieldName = "file",
+            fileName = fileName,
+            contentType = request.contentType,
+            content = request.audio,
+            timeoutSeconds = timeoutSeconds,
+            sourceIpv4 = session.networkBinding.ueIpv4,
+        )
+        return parseControlActionResponse(
+            response = response,
+            session = session,
+            expectedHttpStatus = 202,
+            expectedRequestId = request.requestId,
+            requireContext = true,
+            requireNormalized = true,
+            requireTranscription = true,
+        )
+    }
+
+    /**
+     * Uploads one audio clip to the standalone ASR helper exposed by pruned_sandbox on port 9004.
+     * This operation deliberately does not require [initialize] or a C-02 computing binding.
+     */
+    suspend fun transcribeAudio(
+        asrUrl: String,
+        request: AudioTranscriptionRequest,
+        timeoutSeconds: Double = 120.0,
+    ): AudioTranscriptionResult {
+        validateSandboxTimeout(timeoutSeconds)
+        val endpoint = runCatching { URI(asrUrl) }.getOrNull()
+        if (endpoint == null || endpoint.scheme !in setOf("http", "https") ||
+            endpoint.host.isNullOrBlank()
+        ) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "asrUrl must be an absolute HTTP or HTTPS URL",
+                "asrUrl",
+            )
+        }
+        val fileName = validateAudioUpload(
+            audio = request.audio,
+            fileName = request.fileName,
+            contentType = request.contentType,
+        )
+        val sessionId = requireComputeString(request.sessionId, "sessionId")
+        val taskId = requireComputeString(request.taskId, "taskId")
+        val source = requireComputeString(request.source, "source")
+        request.language?.let { requireComputeString(it, "language") }
+        request.stopReason?.let { requireComputeString(it, "stopReason") }
+        val fields = buildMap {
+            put("session_id", sessionId)
+            put("task_id", taskId)
+            put("source", source)
+            request.language?.let { put("language", it) }
+            request.stopReason?.let { put("stop_reason", it) }
+        }
+        val response = sandboxTransport.uploadWithStatus(
+            url = endpoint.toASCIIString(),
+            fields = fields,
+            fileFieldName = "file",
+            fileName = fileName,
+            contentType = request.contentType,
+            content = request.audio,
+            timeoutSeconds = timeoutSeconds,
+            sourceIpv4 = null,
+        )
+        return parseAudioTranscriptionResponse(response)
+    }
+
     suspend fun getControlAction(
         computeServiceSessionId: String,
         actionId: String,
@@ -1449,6 +1545,125 @@ class AgentSdk internal constructor(
             session = session,
             expectedHttpStatus = 200,
             expectedActionId = normalizedActionId,
+        )
+    }
+
+    private fun validateAudioUpload(
+        audio: ByteArray,
+        fileName: String,
+        contentType: String,
+    ): String {
+        if (audio.isEmpty()) {
+            throw AgentSdkException(ErrorCode.INVALID_ARGUMENT, "audio must not be empty", "audio")
+        }
+        if (audio.size > MAX_AUDIO_UPLOAD_BYTES) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "audio must not exceed 50 MiB",
+                "audio",
+            )
+        }
+        val normalizedFileName = fileName.replace('\\', '/').substringAfterLast('/')
+        if (normalizedFileName.isBlank()) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "fileName must be a non-empty file name",
+                "fileName",
+            )
+        }
+        val suffix = normalizedFileName.substringAfterLast('.', missingDelimiterValue = "")
+            .lowercase()
+        if (suffix !in SUPPORTED_AUDIO_SUFFIXES) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "audio file must use wav, mp3, m4a, flac, ogg, or webm",
+                "fileName",
+            )
+        }
+        requireComputeString(contentType, "contentType")
+        return normalizedFileName
+    }
+
+    private fun parseAudioTranscriptionResponse(
+        response: RuntimeHttpResponse,
+    ): AudioTranscriptionResult {
+        if (response.statusCode != 200) {
+            val detail = response.body.stringOrNull("message")
+                ?: (response.body["error"] as? JsonObject)?.stringOrNull("message")
+            throw AgentSdkException(
+                ErrorCode.SANDBOX_REJECTED,
+                detail?.takeIf(String::isNotBlank)
+                    ?: "ASR returned HTTP ${response.statusCode}",
+                retryable = response.statusCode >= 500,
+            )
+        }
+        fun requiredString(field: String, allowEmpty: Boolean = false): String {
+            val value = response.body.stringOrNull(field)
+                ?: invalidControlResponse("$field must be a string", field)
+            if (!allowEmpty && value.isBlank()) {
+                invalidControlResponse("$field must be a non-empty string", field)
+            }
+            return value
+        }
+        fun requiredLong(field: String): Long {
+            val value = response.body[field]?.jsonPrimitive?.longOrNull
+                ?: invalidControlResponse("$field must be an integer", field)
+            if (value < 0) invalidControlResponse("$field must not be negative", field)
+            return value
+        }
+        fun nullableString(field: String): String? {
+            val raw = response.body[field] ?: return null
+            if (raw is JsonNull) return null
+            return response.body.stringOrNull(field)
+                ?: invalidControlResponse("$field must be null or a string", field)
+        }
+        val segments = (response.body["segments"] as? JsonArray)
+            ?.mapIndexed { index, raw ->
+                val value = raw as? JsonObject ?: invalidControlResponse(
+                    "segments[$index] must be an object",
+                    "segments",
+                )
+                val start = value["startSec"]?.jsonPrimitive?.doubleOrNull
+                    ?: invalidControlResponse(
+                        "segments[$index].startSec must be a number",
+                        "segments",
+                    )
+                val end = value["endSec"]?.jsonPrimitive?.doubleOrNull
+                    ?: invalidControlResponse(
+                        "segments[$index].endSec must be a number",
+                        "segments",
+                    )
+                val text = value.stringOrNull("text")
+                    ?: invalidControlResponse(
+                        "segments[$index].text must be a string",
+                        "segments",
+                    )
+                AudioTranscriptionSegment(start, end, text)
+            }
+            ?: invalidControlResponse("segments must be an array", "segments")
+        val probabilityRaw = response.body["languageProbability"]
+        val probability = when (probabilityRaw) {
+            null, JsonNull -> null
+            else -> probabilityRaw.jsonPrimitive.doubleOrNull
+                ?: invalidControlResponse(
+                    "languageProbability must be null or a number",
+                    "languageProbability",
+                )
+        }
+        return AudioTranscriptionResult(
+            transcriptId = requiredString("transcriptId"),
+            sessionId = requiredString("sessionId"),
+            taskId = requiredString("taskId"),
+            source = requiredString("source"),
+            text = requiredString("text", allowEmpty = true),
+            language = nullableString("language"),
+            languageProbability = probability,
+            durationMs = requiredLong("durationMs"),
+            processingMs = requiredLong("processingMs"),
+            createdAtMs = requiredLong("createdAtMs"),
+            stopReason = nullableString("stopReason"),
+            segments = segments,
+            audioFilename = requiredString("audioFilename"),
         )
     }
 
@@ -1504,6 +1719,7 @@ class AgentSdk internal constructor(
         expectedActionId: String? = null,
         requireContext: Boolean = false,
         requireNormalized: Boolean = false,
+        requireTranscription: Boolean = false,
     ): ControlActionStatus {
         if (response.statusCode != expectedHttpStatus) {
             val error = response.body["error"] as? JsonObject
@@ -1568,6 +1784,36 @@ class AgentSdk internal constructor(
         val result = response.body["result"]?.let {
             it as? JsonObject ?: invalidControlResponse("result must be an object", "result")
         }
+        val transcription = response.body["transcription"]?.let { raw ->
+            val value = raw as? JsonObject
+                ?: invalidControlResponse("transcription must be an object", "transcription")
+            val text = value.stringOrNull("text")?.takeIf(String::isNotBlank)
+                ?: invalidControlResponse(
+                    "transcription.text must be a non-empty string",
+                    "transcription.text",
+                )
+            val language = value.stringOrNull("language")?.takeIf(String::isNotBlank)
+                ?: invalidControlResponse(
+                    "transcription.language must be a non-empty string",
+                    "transcription.language",
+                )
+            val transcriptId = value["transcript_id"]?.let { rawId ->
+                if (rawId is JsonNull) null else {
+                    value.stringOrNull("transcript_id")?.takeIf(String::isNotBlank)
+                        ?: invalidControlResponse(
+                            "transcription.transcript_id must be null or a non-empty string",
+                            "transcription.transcript_id",
+                        )
+                }
+            }
+            VoiceTranscription(text, language, transcriptId)
+        }
+        if (requireTranscription && transcription == null) {
+            invalidControlResponse(
+                "audio control response requires transcription",
+                "transcription",
+            )
+        }
         val context = if (rawContext == null) null else ComputingContext(
             computeServiceSessionId = session.computeServiceSessionId,
             computeInstanceId = session.computeInstanceId,
@@ -1584,6 +1830,7 @@ class AgentSdk internal constructor(
             normalizedAction = normalizedAction,
             normalizedParameters = normalizedParameters,
             result = result,
+            transcription = transcription,
         )
     }
 
@@ -2872,6 +3119,11 @@ class AgentSdk internal constructor(
             .resolve("/v1/control-actions")
             .toString()
 
+    private fun audioControlActionsUrl(session: ComputingSession): String =
+        URI(session.serviceEndpoint.trimEnd('/') + "/")
+            .resolve("/v1/audio-control-actions")
+            .toString()
+
     private class ComputeBindingException(val protocolCause: String) : RuntimeException(protocolCause)
 
     suspend fun getGroupSnapshot(groupId: String): GroupConfigSnapshot? =
@@ -3357,6 +3609,8 @@ class AgentSdk internal constructor(
         private val CONTROL_ACTION_STATUSES = setOf(
             "ACCEPTED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED", "UNKNOWN",
         )
+        private val SUPPORTED_AUDIO_SUFFIXES = setOf("wav", "mp3", "m4a", "flac", "ogg", "webm")
+        private const val MAX_AUDIO_UPLOAD_BYTES = 50 * 1024 * 1024
         private const val UINT32_MAX = 4_294_967_295L
         private val COMPUTE_TERMINAL_STATUSES = setOf(
             "REJECTED",

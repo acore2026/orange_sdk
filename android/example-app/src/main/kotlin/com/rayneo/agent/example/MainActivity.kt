@@ -107,12 +107,17 @@ class MainActivity : Activity() {
     private var recognitionGetButton: TextView? = null
     private var controlCreateButton: TextView? = null
     private var controlGetButton: TextView? = null
+    private var asrTranscribeButton: TextView? = null
+    private var voiceControlButton: TextView? = null
     private var capabilitySkillInput: EditText? = null
     private var capabilityVcInput: EditText? = null
     private var recognitionTargetInput: EditText? = null
     private var controlActionInput: EditText? = null
     private var sdkFeatureState: SdkFeatureState? = null
     private var sdkFeatureActionRunning = false
+    private val voiceRecorder by lazy { VoiceAudioRecorder(this) }
+    private var voiceRecordingMode: VoiceMode? = null
+    private var pendingVoicePermissionMode: VoiceMode? = null
     private var videoPreviewRenderer: VideoSink? = null
     private var videoPreviewEglBase: EglBase? = null
     private var videoPreviewStatus: TextView? = null
@@ -148,6 +153,9 @@ class MainActivity : Activity() {
     }
 
     private fun showConfigScreen() {
+        voiceRecorder.cancel()
+        voiceRecordingMode = null
+        pendingVoicePermissionMode = null
         releaseProcessedVideoPreview()
         fields.clear()
         manualMessagePanel = null
@@ -173,6 +181,8 @@ class MainActivity : Activity() {
         recognitionGetButton = null
         controlCreateButton = null
         controlGetButton = null
+        asrTranscribeButton = null
+        voiceControlButton = null
         capabilitySkillInput = null
         capabilityVcInput = null
         recognitionTargetInput = null
@@ -672,6 +682,18 @@ class MainActivity : Activity() {
             setPadding(0, dp(6), 0, dp(10))
         }.also(::addView)
 
+        addView(featureCaption("语音识别 · pruned_sandbox :9004"))
+        asrTranscribeButton = actionButton("开始录音 · 仅转文字", filled = false) {
+            toggleVoiceRecording(VoiceMode.TRANSCRIBE)
+        }
+        voiceControlButton = actionButton("开始录音 · 转写并执行", filled = false) {
+            toggleVoiceRecording(VoiceMode.CONTROL_ACTION)
+        }
+        addView(featureButtonRow(
+            checkNotNull(asrTranscribeButton),
+            checkNotNull(voiceControlButton),
+        ))
+
         groupSnapshotButton = actionButton("读取群组快照", filled = false) {
             runSdkFeatureAction("群组快照") { inspectGroupSnapshot() }
         }
@@ -818,9 +840,10 @@ class MainActivity : Activity() {
 
     private fun refreshSdkFeatureControls() {
         val state = sdkFeatureState
+        val featureBusy = sdkFeatureActionRunning || voiceRecordingMode != null
         fun TextView?.available(value: Boolean) {
             this ?: return
-            isEnabled = value && !sdkFeatureActionRunning
+            isEnabled = value && !featureBusy
             alpha = if (isEnabled) 1f else .42f
         }
         val cardReady = state?.cardPublished == true
@@ -839,18 +862,122 @@ class MainActivity : Activity() {
         recognitionGetButton.available(consumerRuntimeReady)
         controlCreateButton.available(consumerRuntimeReady)
         controlGetButton.available(consumerRuntimeReady && state?.controlActionId != null)
+        asrTranscribeButton.available(cardReady)
+        voiceControlButton.available(consumerRuntimeReady)
+        when (voiceRecordingMode) {
+            VoiceMode.TRANSCRIBE -> asrTranscribeButton?.apply {
+                isEnabled = true
+                alpha = 1f
+                text = "停止并提交 · 仅转文字"
+            }
+            VoiceMode.CONTROL_ACTION -> voiceControlButton?.apply {
+                isEnabled = true
+                alpha = 1f
+                text = "停止并提交 · 转写并执行"
+            }
+            null -> {
+                asrTranscribeButton?.text = "开始录音 · 仅转文字"
+                voiceControlButton?.text = "开始录音 · 转写并执行"
+            }
+        }
         videoUploadToggleButton?.text = if (state?.videoUploadState == "PAUSED") {
             "恢复摄像头上传"
         } else {
             "暂停摄像头上传"
         }
         sdkFeatureStatus?.text = when {
-            sdkFeatureActionRunning -> "接口调用中，其他功能按钮暂时锁定"
+            sdkFeatureActionRunning -> "语音上传或接口调用中，其他功能按钮暂时锁定"
+            voiceRecordingMode != null -> "正在录音；再次点击当前语音按钮停止并提交"
             state == null -> "等待 SDK 初始化"
             else -> "Card=${if (cardReady) "READY" else "WAIT"} · " +
                 "Group=${if (groupReady) "READY" else "WAIT"} · " +
                 "Compute=${state.computeStatus ?: if (sessionReady) "READY" else "WAIT"} · " +
                 "Media=${state.videoUploadState ?: state.processedVideoState ?: "WAIT"}"
+        }
+    }
+
+    private fun toggleVoiceRecording(mode: VoiceMode) {
+        if (voiceRecordingMode == mode && voiceRecorder.isRecording) {
+            stopAndSubmitVoice(mode)
+            return
+        }
+        if (voiceRecorder.isRecording || sdkFeatureActionRunning) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingVoicePermissionMode = mode
+            appendLog(LabLogLevel.INFO, "MICROPHONE", "等待麦克风权限；授权后自动开始录音")
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), AUDIO_PERMISSION_REQUEST)
+            return
+        }
+        startVoiceRecording(mode)
+    }
+
+    private fun startVoiceRecording(mode: VoiceMode) {
+        try {
+            voiceRecorder.start()
+            voiceRecordingMode = mode
+            appendLog(
+                LabLogLevel.INFO,
+                "VOICE RECORD",
+                if (mode == VoiceMode.TRANSCRIBE) "开始录音，停止后上传 ASR 9004"
+                else "开始录音，停止后创建运行期语音动作",
+            )
+            refreshSdkFeatureControls()
+        } catch (error: Exception) {
+            val detail = error.message ?: error::class.java.simpleName
+            appendLog(LabLogLevel.ERROR, "VOICE RECORD", "录音启动失败：$detail")
+            setRunnerStatus(RunnerStatus("录音启动失败", detail))
+        }
+    }
+
+    private fun stopAndSubmitVoice(mode: VoiceMode) {
+        val activeRunner = runner ?: return
+        val recording = try {
+            voiceRecorder.stop()
+        } catch (error: Exception) {
+            voiceRecordingMode = null
+            refreshSdkFeatureControls()
+            val detail = error.message ?: error::class.java.simpleName
+            appendLog(LabLogLevel.ERROR, "VOICE RECORD", "录音结束失败：$detail")
+            setRunnerStatus(RunnerStatus("录音失败", detail))
+            return
+        }
+        voiceRecordingMode = null
+        sdkFeatureActionRunning = true
+        refreshSdkFeatureControls()
+        scope.launch {
+            try {
+                val audio = withContext(Dispatchers.IO) { recording.file.readBytes() }
+                val detail = when (mode) {
+                    VoiceMode.TRANSCRIBE -> activeRunner.transcribeAudio(
+                        audio,
+                        recording.fileName,
+                        recording.contentType,
+                    )
+                    VoiceMode.CONTROL_ACTION -> activeRunner.createAudioControlAction(
+                        audio,
+                        recording.fileName,
+                        recording.contentType,
+                    )
+                }
+                setRunnerStatus(
+                    RunnerStatus(
+                        if (mode == VoiceMode.TRANSCRIBE) "语音转文字成功" else "语音动作已创建",
+                        detail.take(300),
+                    ),
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                val detail = error.message ?: error::class.java.simpleName
+                appendLog(LabLogLevel.ERROR, "VOICE", "语音接口失败：$detail")
+                setRunnerStatus(RunnerStatus("语音接口失败", detail))
+            } finally {
+                recording.file.delete()
+                sdkFeatureActionRunning = false
+                setSdkFeatureState(activeRunner.featureState())
+            }
         }
     }
 
@@ -1141,6 +1268,18 @@ class MainActivity : Activity() {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == AUDIO_PERMISSION_REQUEST) {
+            val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+            val mode = pendingVoicePermissionMode
+            pendingVoicePermissionMode = null
+            appendLog(
+                if (granted) LabLogLevel.SUCCESS else LabLogLevel.ERROR,
+                "MICROPHONE",
+                if (granted) "麦克风权限已授予" else "麦克风权限被拒绝，无法录音",
+            )
+            if (granted && mode != null) startVoiceRecording(mode)
+            return
+        }
         if (requestCode != CAMERA_PERMISSION_REQUEST) return
         val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
         appendLog(
@@ -1429,6 +1568,9 @@ class MainActivity : Activity() {
     }
 
     private fun stopOrReturn() {
+        voiceRecorder.cancel()
+        voiceRecordingMode = null
+        pendingVoicePermissionMode = null
         disarmReset()
         if (runnerJob == null && sdk == null) {
             showConfigScreen()
@@ -1680,6 +1822,7 @@ class MainActivity : Activity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     override fun onDestroy() {
+        voiceRecorder.cancel()
         runnerJob?.cancel()
         runner?.close()
         val previewEglBase = detachProcessedVideoRenderer()
@@ -1715,9 +1858,12 @@ class MainActivity : Activity() {
     private companion object {
         const val VPN_PERMISSION_REQUEST = 1001
         const val CAMERA_PERMISSION_REQUEST = 1002
+        const val AUDIO_PERMISSION_REQUEST = 1003
         const val PREFERENCES = "agent-link-lab"
         const val MAX_LOG_LINES = 300
         const val MAX_DIAGNOSTIC_LOG_LINES = 2_000
         const val APP_LOG_TAG = "AgentLinkLab"
     }
+
+    private enum class VoiceMode { TRANSCRIBE, CONTROL_ACTION }
 }
