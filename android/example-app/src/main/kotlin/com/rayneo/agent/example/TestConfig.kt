@@ -1,5 +1,7 @@
 package com.rayneo.agent.example
 
+import java.net.URI
+
 enum class TestRole(
     val displayName: String,
     val defaultRuntimePort: Int,
@@ -19,6 +21,7 @@ data class TestConfig(
     val localTcpPort: Int,
     val localUdpPort: Int,
     val masqueToken: String?,
+    val intentServiceUrl: String,
     val owner: String,
     val agentName: String,
     val capability: String,
@@ -40,6 +43,14 @@ data class TestConfig(
             if (port !in 1..65535) add("$name 必须在 1..65535")
         }
         if (masquePath.isBlank()) add("MASQUE 路径不能为空")
+        if (role == TestRole.A) {
+            val endpoint = runCatching { URI(intentServiceUrl) }.getOrNull()
+            if (endpoint == null || endpoint.scheme !in setOf("http", "https") ||
+                endpoint.host.isNullOrBlank()
+            ) {
+                add("意图识别地址必须是完整 HTTP/HTTPS URL")
+            }
+        }
         if (owner.isBlank()) add("Owner 不能为空")
         if (agentName.isBlank()) add("Agent 名称不能为空")
         if (capability.isBlank()) add("发现能力不能为空")
@@ -57,8 +68,12 @@ object RayNeoX3ProDeployment {
     const val RUNTIME_PORT = 8088
     const val MASQUE_PORT = 8443
     const val MASQUE_PATH = "/.well-known/masque/ip"
+    const val INTENT_SERVICE_URL = "http://101.245.78.174:8011/api/v1/intent"
 
-    fun agentAConfig(masqueToken: String? = null): TestConfig = TestConfig(
+    fun agentAConfig(
+        masqueToken: String? = null,
+        intentServiceUrl: String? = null,
+    ): TestConfig = TestConfig(
         role = TestRole.A,
         serverIp = SERVER_IP,
         runtimePort = RUNTIME_PORT,
@@ -67,6 +82,7 @@ object RayNeoX3ProDeployment {
         localTcpPort = 4001,
         localUdpPort = 28443,
         masqueToken = masqueToken?.takeIf(String::isNotBlank),
+        intentServiceUrl = intentServiceUrl?.takeIf(String::isNotBlank) ?: INTENT_SERVICE_URL,
         owner = "rayneo-x3-pro-owner-a",
         agentName = "RayNeo-X3-Pro-A",
         capability = "dog-vision",

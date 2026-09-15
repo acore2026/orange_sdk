@@ -2,6 +2,31 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-15 — 意图识别驱动 Agent Discovery
+
+### 修改原因
+
+- pruned_sandbox 新增文字意图分类与槽位提取接口；Android App 原先直接按固定 skill 发现
+  Agent B，没有先确认用户意图，也没有把巡逻区域带入任务描述。
+
+### 修改方式
+
+- Android SDK 新增 `recognizeIntent`，允许在初始化或 C-02 之前调用完整意图服务 URL；兼容
+  `patrol` 内部响应与 `security patrol` 公共响应，并统一返回 executor、area/direction/object
+  槽位、置信度和实际后端。
+- Agent A 启动后先发送“派机器狗巡逻A区域”，仅在结果为 `security patrol` 时把业务意图映射
+  为配置的 `dog-vision` skill，再发送 H-DISCOVERY；任务描述同步携带原文、意图和区域。
+- Generic App 可配置意图服务 URL，RayNeo Flavor 支持 `intent_url` Intent extra；界面和诊断
+  日志持续显示已识别意图、区域及 discovery skill。测试 App 升级为 `0.2.41`、
+  `versionCode=43`。
+- 文档记录当前 H-DISCOVERY 线协议没有结构化槽位和 `task_id`，以及 pruned_sandbox 8011
+  默认只监听容器回环地址的部署限制。
+
+### 验证内容
+
+- 单元测试覆盖初始化前文本意图请求、巡逻意图归一化、区域提取、无 UE 地址 JSON 请求及
+  App 的意图先于发现调用顺序；执行 SDK/Generic/RayNeo 单元测试、Lint 和构建。
+
 ## 2026-09-15 — 持久显示语音转写结果
 
 ### 修改原因

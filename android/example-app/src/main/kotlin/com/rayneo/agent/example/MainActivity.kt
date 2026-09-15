@@ -241,6 +241,11 @@ class MainActivity : Activity() {
                 addView(body("A 端填写建组参数；双方日志页会在群组就绪后显示消息发送区。"))
                 aOnlyContainer = LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.VERTICAL
+                    addView(field(
+                        "intent_url",
+                        "意图识别 URL",
+                        "http://server:8011/api/v1/intent",
+                    ))
                     addView(field("dnn", "DNN", "internet"))
                     addView(field("group_name", "群组名称", "android-ab-test-group"))
                 }.also(::addView)
@@ -911,11 +916,20 @@ class MainActivity : Activity() {
                 "Media=${state.videoUploadState ?: state.processedVideoState ?: "WAIT"}"
         }
         voiceTranscriptionResult?.text = when {
-            voiceRecordingMode != null -> "最近转写结果：正在录音…"
-            sdkFeatureActionRunning -> "最近转写结果：正在识别…"
-            else -> "最近转写结果：${state?.lastTranscription?.ifBlank { "<未识别到文字>" } ?: "<暂无>"}"
+            voiceRecordingMode != null -> intentDisplay(state) + "\n最近转写结果：正在录音…"
+            sdkFeatureActionRunning -> intentDisplay(state) + "\n最近转写结果：正在识别…"
+            else -> intentDisplay(state) + "\n最近转写结果：" +
+                (state?.lastTranscription?.ifBlank { "<未识别到文字>" } ?: "<暂无>")
         }
     }
+
+    private fun intentDisplay(state: SdkFeatureState?): String =
+        if (state?.recognizedIntent == null) {
+            "启动意图：<等待识别>"
+        } else {
+            "启动意图：${state.recognizedIntent} · area=${state.recognizedArea ?: "<none>"} · " +
+                "skill=${state.discoverySkill ?: "<none>"}"
+        }
 
     private fun toggleVoiceRecording(mode: VoiceMode) {
         if (voiceRecordingMode == mode && voiceRecorder.isRecording) {
@@ -1655,22 +1669,29 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun readConfig(): TestConfig = TestConfig(
-        role = selectedRole,
-        serverIp = value("server_ip"),
-        runtimePort = intValue("runtime_port"),
-        masquePort = intValue("masque_port"),
-        masquePath = value("masque_path"),
-        localTcpPort = intValue("tcp_port"),
-        localUdpPort = intValue("udp_port"),
-        masqueToken = value("masque_token").ifBlank { null },
-        owner = value("owner"),
-        agentName = value("agent_name"),
-        capability = value("capability"),
-        dnn = value("dnn"),
-        groupName = value("group_name"),
-        message = value("message"),
-    )
+    private fun readConfig(): TestConfig {
+        val serverIp = value("server_ip")
+        val intentUrl = value("intent_url").takeUnless {
+            it.isBlank() || it == "http://:8011/api/v1/intent"
+        } ?: "http://$serverIp:8011/api/v1/intent"
+        return TestConfig(
+            role = selectedRole,
+            serverIp = serverIp,
+            runtimePort = intValue("runtime_port"),
+            masquePort = intValue("masque_port"),
+            masquePath = value("masque_path"),
+            localTcpPort = intValue("tcp_port"),
+            localUdpPort = intValue("udp_port"),
+            masqueToken = value("masque_token").ifBlank { null },
+            intentServiceUrl = intentUrl,
+            owner = value("owner"),
+            agentName = value("agent_name"),
+            capability = value("capability"),
+            dnn = value("dnn"),
+            groupName = value("group_name"),
+            message = value("message"),
+        )
+    }
 
     private fun restoreFormValues() {
         val preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
@@ -1699,6 +1720,15 @@ class MainActivity : Activity() {
                 ?: storedCapability?.let { if (it == "text") "dog-vision" else it },
         )
         setValue("dnn", intent.getStringExtra("dnn") ?: preferences.getString("dnn", "internet"))
+        val configuredServer = fields["server_ip"]?.text?.toString().orEmpty()
+        setValue(
+            "intent_url",
+            intent.getStringExtra("intent_url")
+                ?: preferences.getString("intent_url", null)
+                ?: configuredServer.takeIf(String::isNotBlank)
+                    ?.let { "http://$it:8011/api/v1/intent" }
+                ?: "",
+        )
         setValue("group_name", intent.getStringExtra("group_name")
             ?: preferences.getString("group_name", "android-ab-test-group"))
         setValue("message", intent.getStringExtra("message")
@@ -1718,6 +1748,7 @@ class MainActivity : Activity() {
             .putString("owner", config.owner)
             .putString("agent_name", config.agentName)
             .putString("capability", config.capability)
+            .putString("intent_url", config.intentServiceUrl)
             .putString("dnn", config.dnn)
             .putString("group_name", config.groupName)
             .putString("message", config.message)

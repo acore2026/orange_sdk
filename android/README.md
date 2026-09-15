@@ -599,6 +599,30 @@ val current = sdk.getControlAction(sessionId, action.actionId)
 `getControlAction` 调用 `GET /v1/control-actions/{action_id}` 并要求 HTTP 200。
 Sandbox 到 producer Runtime 的动作转发由 Runtime 内部处理，不新增应用回调。
 
+pruned_sandbox 的文字意图接口同样不依赖 C-02 或算力会话。SDK 接受完整 URL，并把内部
+分类名和参数归一化为园区业务意图与槽位：
+
+```kotlin
+val result = sdk.recognizeIntent(
+    intentUrl = "http://intent.example:8011/api/v1/intent",
+    text = "派机器狗巡逻A区域",
+)
+check(result.intent == "security patrol")
+println(result.area) // A
+```
+
+当前 pruned_sandbox 的直接响应使用 `intent=patrol`、`argument=A区域`，而 9004 ASR 返回的
+嵌套公共格式使用 `intent=security patrol`、`area=A`；`recognizeIntent` 兼容两种形式，并
+统一返回公共名称。pruned_sandbox 默认让 8011 只监听容器内的 `127.0.0.1`，Android 实机
+使用前必须由部署方提供可达的反向代理 URL，或把该服务改为可控网络内的外部监听地址。
+
+意图驱动发现时，App 将 `security patrol` 映射为 Agent Card 已发布的 `dog-vision` skill，
+并把原始文本、意图和 `area` 写入 `task_description`。当前 H-DISCOVERY 线协议包含
+`request_id`、`agent_id`、`task_description`、`required_skills`、`discovery_scope`、
+`max_results`、`timestamp` 和 `proof`，SDK 会补齐所有必填控制字段。协议仍缺少两类业务关联：
+结构化的 `intent/slots` 字段，以及连接意图、发现、建组和算力会话的 `task_id`。在网侧协议
+扩展前，槽位只能编码到 `task_description`，skill 映射由应用显式维护。
+
 pruned_sandbox 的独立 ASR 服务使用 9004 端口，不依赖 C-02 或算力会话，因此可以在
 `AgentSdk.create()` 之后、`initialize()` 之前调用：
 

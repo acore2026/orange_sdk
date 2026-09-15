@@ -25,6 +25,10 @@ class TestConfigTest {
         assertEquals(8443, config.masquePort)
         assertEquals("dog-vision", config.capability)
         assertEquals(
+            "http://101.245.78.174:8011/api/v1/intent",
+            config.intentServiceUrl,
+        )
+        assertEquals(
             "https://101.245.78.174:8443/.well-known/masque/ip",
             config.masqueServerUrl,
         )
@@ -56,6 +60,15 @@ class TestConfigTest {
         assertTrue(config.validate().any { it.contains("Runtime HTTP 端口") })
     }
 
+    @Test
+    fun roleARequiresAnAbsoluteIntentServiceUrl() {
+        val invalidA = validConfig().copy(intentServiceUrl = "127.0.0.1:8011")
+        val validB = invalidA.copy(role = TestRole.B)
+
+        assertTrue(invalidA.validate().any { it.contains("意图识别地址") })
+        assertTrue(validB.validate().isEmpty())
+    }
+
     private fun validConfig(
         role: TestRole = TestRole.A,
         runtimePort: Int = 8088,
@@ -72,6 +85,7 @@ class TestConfigTest {
         localTcpPort = 4001,
         localUdpPort = 28443,
         masqueToken = null,
+        intentServiceUrl = "http://intent.test:8011/api/v1/intent",
         owner = "test-owner",
         agentName = "Agent-${role.name}",
         capability = "text",

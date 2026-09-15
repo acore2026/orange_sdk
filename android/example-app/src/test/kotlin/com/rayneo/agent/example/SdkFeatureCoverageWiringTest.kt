@@ -24,6 +24,7 @@ class SdkFeatureCoverageWiringTest {
             "sdk.getRecognitionTarget(",
             "sdk.createControlAction(",
             "sdk.transcribeAudio(",
+            "sdk.recognizeIntent(",
             "sdk.createAudioControlAction(",
             "sdk.getControlAction(",
         ).forEach { call ->
@@ -52,6 +53,7 @@ class SdkFeatureCoverageWiringTest {
             "开始录音 · 仅转文字",
             "开始录音 · 转写并执行",
             "最近转写结果",
+            "启动意图",
         ).forEach { label ->
             assertTrue("Missing feature action: $label", activity.contains(label))
         }
@@ -79,6 +81,23 @@ class SdkFeatureCoverageWiringTest {
         assertTrue(rayneoLayout.contains("@+id/voice_control_action"))
         assertTrue(rayneoLayout.contains("@+id/voice_result"))
         assertTrue(rayneo.contains("sdkFeatureState?.lastTranscription"))
+        assertTrue(rayneo.contains("recognizedIntent"))
+    }
+
+    @Test
+    fun agentADiscoversOnlyAfterSecurityPatrolIntentIsMappedToSkill() {
+        val runner = File(
+            "src/main/kotlin/com/rayneo/agent/example/AgentTestRunner.kt",
+        ).readText()
+
+        val intentCall = runner.indexOf("sdk.recognizeIntent(")
+        val intentGuard = runner.indexOf("result.intent == SECURITY_PATROL_INTENT")
+        val discovery = runner.indexOf("sdk.discoverAgents(")
+        assertTrue(intentCall >= 0)
+        assertTrue(intentGuard > intentCall)
+        assertTrue(discovery > intentGuard)
+        assertTrue(runner.contains("requiredSkills = listOf(requiredSkill)"))
+        assertTrue(runner.contains("PATROL_UTTERANCE = \"派机器狗巡逻A区域\""))
     }
 
     @Test

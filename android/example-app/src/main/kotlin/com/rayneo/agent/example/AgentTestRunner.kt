@@ -69,6 +69,9 @@ data class SdkFeatureState(
     val recognitionTargetRevision: String?,
     val controlActionId: String?,
     val lastTranscription: String?,
+    val recognizedIntent: String?,
+    val recognizedArea: String?,
+    val discoverySkill: String?,
 ) {
     val computeSessionReady: Boolean get() = !computeSessionId.isNullOrBlank()
     val producerVideoReady: Boolean get() = videoUploadState != null
@@ -166,6 +169,9 @@ class AgentTestRunner(
     @Volatile private var recognitionTargetRevision: String? = null
     @Volatile private var lastControlActionId: String? = null
     @Volatile private var lastTranscription: String? = null
+    @Volatile private var recognizedIntent: String? = null
+    @Volatile private var recognizedArea: String? = null
+    @Volatile private var discoverySkill: String? = null
     private val receivedVideoSinks = mutableListOf<Pair<VideoTrack, VideoSink>>()
 
     fun retryCurrentStep() {
@@ -178,7 +184,8 @@ class AgentTestRunner(
             LabLogLevel.INFO,
             "BOOT",
             "角色=${config.role.name}，Runtime=http://${config.serverIp}:${config.runtimePort}，" +
-                "MASQUE=${config.masqueServerUrl}",
+                "MASQUE=${config.masqueServerUrl}" +
+                if (config.role == TestRole.A) "，Intent=${config.intentServiceUrl}" else "",
         )
         val initialized = retryableStep("INIT", "建立端侧链路") {
             sdk.initialize(
@@ -215,7 +222,7 @@ class AgentTestRunner(
                     metadata = buildJsonObject {
                         put("region", "CN")
                         put("os", "Android")
-                        put("version", "0.2.40")
+                        put("version", "0.2.41")
                     },
                 )
             }
@@ -276,6 +283,9 @@ class AgentTestRunner(
         recognitionTargetRevision = recognitionTargetRevision,
         controlActionId = lastControlActionId,
         lastTranscription = lastTranscription,
+        recognizedIntent = recognizedIntent,
+        recognizedArea = recognizedArea,
+        discoverySkill = discoverySkill,
     )
 
     private fun emitFeatureState() = onFeatureStateChanged(featureState())
@@ -379,7 +389,10 @@ class AgentTestRunner(
             appendLine("processed_video_state=${processedVideoStream?.state ?: "<none>"}")
             appendLine("recognition_target_revision=${recognitionTargetRevision ?: "<none>"}")
             appendLine("last_control_action_id=${lastControlActionId ?: "<none>"}")
-            append("last_transcription=${lastTranscription ?: "<none>"}")
+            appendLine("last_transcription=${lastTranscription ?: "<none>"}")
+            appendLine("recognized_intent=${recognizedIntent ?: "<none>"}")
+            appendLine("recognized_area=${recognizedArea ?: "<none>"}")
+            append("discovery_skill=${discoverySkill ?: "<none>"}")
         }
     }
 
@@ -808,15 +821,53 @@ class AgentTestRunner(
     }
 
     private suspend fun runAgentA(profile: AgentProfile) {
-        val discovered = retryableStep("H-DISCOVERY", "按能力发现 Agent B") {
+        onLog(
+            LabLogLevel.INFO,
+            "INTENT",
+            "POST ${config.intentServiceUrl} text=$PATROL_UTTERANCE",
+        )
+        val recognition = retryableStep("INTENT", "识别巡逻意图并提取槽位") {
+            sdk.recognizeIntent(
+                intentUrl = config.intentServiceUrl,
+                text = PATROL_UTTERANCE,
+            ).also { result ->
+                check(result.matched && result.intent == SECURITY_PATROL_INTENT) {
+                    "意图未命中 $SECURITY_PATROL_INTENT：intent=${result.intent}，" +
+                        "matched=${result.matched}"
+                }
+            }
+        }
+        val requiredSkill = config.capability
+        recognizedIntent = recognition.intent
+        recognizedArea = recognition.area
+        discoverySkill = requiredSkill
+        emitFeatureState()
+        onLog(
+            LabLogLevel.SUCCESS,
+            "INTENT",
+            "intent=${recognition.intent}，executor=${recognition.executor ?: "<none>"}，" +
+                "area=${recognition.area ?: "<none>"}，backend=${recognition.backend ?: "<none>"}，" +
+                "映射 discovery skill=$requiredSkill",
+        )
+        val taskDescription = buildString {
+            append(PATROL_UTTERANCE)
+            append("；intent=${recognition.intent}")
+            recognition.area?.let { append("；area=$it") }
+        }
+        onLog(
+            LabLogLevel.INFO,
+            "H-DISCOVERY",
+            "task_description=$taskDescription，required_skills=[$requiredSkill]",
+        )
+        val discovered = retryableStep("H-DISCOVERY", "按巡逻能力发现 Agent B") {
             sdk.discoverAgents(
                 agentId = profile.agentId,
-                taskDescription = "Android A/B MASQUE end-to-end test",
-                requiredSkills = listOf(config.capability),
+                taskDescription = taskDescription,
+                requiredSkills = listOf(requiredSkill),
                 maxResults = 10,
             ).firstOrNull { candidate ->
-                candidate.agentId != profile.agentId && config.capability in candidate.skills
-            } ?: error("没有发现声明 ${config.capability} 能力的 Agent B")
+                candidate.agentId != profile.agentId && requiredSkill in candidate.skills
+            } ?: error("没有发现声明 $requiredSkill 能力的 Agent B")
         }
         onLog(
             LabLogLevel.SUCCESS,
@@ -1120,6 +1171,8 @@ class AgentTestRunner(
     }
 
     private companion object {
+        const val PATROL_UTTERANCE = "派机器狗巡逻A区域"
+        const val SECURITY_PATROL_INTENT = "security patrol"
         const val COMPUTE_REQUEST_MESSAGE_TYPE = "COMPUTE_SESSION_REQUEST"
         const val COMPUTE_SESSION_MESSAGE_TYPE = "computing_video_session"
         const val COMPUTE_SESSION_ID_FIELD = "compute_service_session_id"

@@ -287,6 +287,28 @@ data class AudioTranscriptionResult(
     val audioFilename: String,
 )
 
+/**
+ * Normalized result returned by the standalone pruned_sandbox intent service.
+ *
+ * [intent] uses the public business names (for example `security patrol`) while [scene]
+ * preserves the classifier's internal name (for example `patrol`). [slots] contains the
+ * extracted business arguments such as `area`, `direction`, or `object`.
+ */
+data class IntentRecognitionResult(
+    val status: String,
+    val intent: String,
+    val scene: String,
+    val executor: String?,
+    val slots: Map<String, String>,
+    val matched: Boolean,
+    val confidence: Double?,
+    val backend: String?,
+) {
+    val area: String? get() = slots["area"]
+    val direction: String? get() = slots["direction"]
+    val objectName: String? get() = slots["object"]
+}
+
 data class VoiceTranscription(
     val text: String,
     val language: String,

@@ -9,6 +9,7 @@ import com.rayneo.agent.sdk.model.AudioControlActionRequest
 import com.rayneo.agent.sdk.model.AudioTranscriptionRequest
 import com.rayneo.agent.sdk.model.AudioTranscriptionResult
 import com.rayneo.agent.sdk.model.AudioTranscriptionSegment
+import com.rayneo.agent.sdk.model.IntentRecognitionResult
 import com.rayneo.agent.sdk.model.AcnContext
 import com.rayneo.agent.sdk.model.AgentLifecycleState
 import com.rayneo.agent.sdk.model.ComputeConnectionParameters
@@ -1522,6 +1523,32 @@ class AgentSdk internal constructor(
         return parseAudioTranscriptionResponse(response)
     }
 
+    /**
+     * Classifies one text command with the standalone pruned_sandbox intent service.
+     * This operation does not require [initialize] or a C-02 computing binding.
+     *
+     * The service currently returns internal classifier names such as `patrol`; this method
+     * normalizes them to the public business contract such as `security patrol` and exposes
+     * extracted arguments through [IntentRecognitionResult.slots].
+     */
+    suspend fun recognizeIntent(
+        intentUrl: String,
+        text: String,
+        timeoutSeconds: Double = 15.0,
+    ): IntentRecognitionResult {
+        validateSandboxTimeout(timeoutSeconds)
+        val endpoint = requireStandaloneHttpUrl(intentUrl, "intentUrl")
+        val normalizedText = requireComputeString(text, "text")
+        val response = sandboxTransport.requestWithStatus(
+            method = "POST",
+            url = endpoint.toASCIIString(),
+            body = buildJsonObject { put("text", normalizedText) },
+            timeoutSeconds = timeoutSeconds,
+            sourceIpv4 = null,
+        )
+        return parseIntentRecognitionResponse(response)
+    }
+
     suspend fun getControlAction(
         computeServiceSessionId: String,
         actionId: String,
@@ -1665,6 +1692,82 @@ class AgentSdk internal constructor(
             segments = segments,
             audioFilename = requiredString("audioFilename"),
         )
+    }
+
+    private fun parseIntentRecognitionResponse(
+        response: RuntimeHttpResponse,
+    ): IntentRecognitionResult {
+        if (response.statusCode != 200) {
+            val detail = response.body.stringOrNull("message")
+                ?: (response.body["error"] as? JsonObject)?.stringOrNull("message")
+            throw AgentSdkException(
+                ErrorCode.SANDBOX_REJECTED,
+                detail?.takeIf(String::isNotBlank)
+                    ?: "Intent service returned HTTP ${response.statusCode}",
+                retryable = response.statusCode >= 500,
+            )
+        }
+
+        val nested = response.body["intent"] as? JsonObject
+        val payload = nested ?: response.body
+        val rawIntent = payload.stringOrNull("intent")
+            ?.trim()
+            ?.lowercase()
+            ?.takeIf(String::isNotBlank)
+            ?: invalidControlResponse("intent must be a non-empty string", "intent")
+        val scene = when (rawIntent) {
+            "security patrol" -> "patrol"
+            "find object" -> "find_object"
+            else -> response.body.stringOrNull("scene")?.trim()?.lowercase()
+                ?.takeIf(String::isNotBlank) ?: rawIntent
+        }
+        val publicIntent = when (scene) {
+            "patrol" -> "security patrol"
+            "find_object" -> "find object"
+            else -> rawIntent
+        }
+        val argument = response.body.stringOrNull("normalized_argument")
+            ?: response.body.stringOrNull("argument")
+        val slots = buildMap {
+            val area = payload.stringOrNull("area")
+                ?: argument?.takeIf { scene == "patrol" }?.removeSuffix("区域")?.trim()
+            val direction = payload.stringOrNull("direction")
+                ?: argument?.takeIf { scene == "movement" }
+            val objectName = payload.stringOrNull("object")
+                ?: argument?.takeIf { scene in setOf("find_object", "grab") }
+            area?.takeIf(String::isNotBlank)?.let { put("area", it) }
+            direction?.takeIf(String::isNotBlank)?.let { put("direction", it) }
+            objectName?.takeIf(String::isNotBlank)?.let { put("object", it) }
+        }
+        val matched = payload["matched"]?.jsonPrimitive?.booleanOrNull
+            ?: (scene != "other")
+        val confidence = response.body["confidence"]?.jsonPrimitive?.doubleOrNull
+        val status = response.body.stringOrNull("status") ?: "success"
+        return IntentRecognitionResult(
+            status = status,
+            intent = publicIntent,
+            scene = scene,
+            executor = payload.stringOrNull("executor")
+                ?: if (matched) "robot dog" else null,
+            slots = slots,
+            matched = matched,
+            confidence = confidence,
+            backend = payload.stringOrNull("backend") ?: response.body.stringOrNull("backend"),
+        )
+    }
+
+    private fun requireStandaloneHttpUrl(value: String, field: String): URI {
+        val endpoint = runCatching { URI(value) }.getOrNull()
+        if (endpoint == null || endpoint.scheme !in setOf("http", "https") ||
+            endpoint.host.isNullOrBlank()
+        ) {
+            throw AgentSdkException(
+                ErrorCode.INVALID_ARGUMENT,
+                "$field must be an absolute HTTP or HTTPS URL",
+                field,
+            )
+        }
+        return endpoint
     }
 
     private fun validateControlActionRequest(request: ControlActionRequest) {

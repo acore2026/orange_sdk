@@ -12,6 +12,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.Response
@@ -30,6 +31,39 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.net.SocketException
 
 class OkHttpRuntimeTransportTest {
+    @Test
+    fun `Sandbox transport posts standalone JSON without a UE address`() = runTest {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"status":"success","intent":"patrol","argument":"A区域"}""",
+            ),
+        )
+        server.start()
+        val transport = OkHttpSandboxTransport()
+        try {
+            val response = transport.requestWithStatus(
+                method = "POST",
+                url = server.url("/api/v1/intent").toString(),
+                body = buildJsonObject { put("text", "派机器狗巡逻A区域") },
+                timeoutSeconds = 2.0,
+                sourceIpv4 = null,
+            )
+            assertEquals(200, response.statusCode)
+            val request = server.takeRequest(2, TimeUnit.SECONDS)!!
+            assertEquals("POST", request.method)
+            assertEquals("/api/v1/intent", request.path)
+            assertEquals(
+                "派机器狗巡逻A区域",
+                Json.parseToJsonElement(request.body.readUtf8())
+                    .jsonObject["text"]!!.jsonPrimitive.content,
+            )
+        } finally {
+            transport.close()
+            server.shutdown()
+        }
+    }
+
     @Test
     fun `Sandbox transport uploads multipart audio and standalone ASR needs no UE address`() = runTest {
         val server = MockWebServer()

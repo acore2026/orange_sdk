@@ -91,6 +91,7 @@ class AgentSdkGroupConfigTest {
         assertTrue(publicMethods.any { it.name == "createControlAction" })
         assertTrue(publicMethods.any { it.name == "createAudioControlAction" })
         assertTrue(publicMethods.any { it.name == "transcribeAudio" })
+        assertTrue(publicMethods.any { it.name == "recognizeIntent" })
         assertTrue(publicMethods.any { it.name == "getControlAction" })
         assertEquals(ComputeSessionRequest::class.java, create.parameterTypes[0])
     }
@@ -1032,6 +1033,51 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
+    fun `standalone intent recognition normalizes patrol and extracts area before initialization`() =
+        runTest {
+            val result = sdk.recognizeIntent(
+                "http://sandbox.example:8011/api/v1/intent",
+                "派机器狗巡逻A区域",
+            )
+
+            assertEquals("security patrol", result.intent)
+            assertEquals("patrol", result.scene)
+            assertEquals("robot dog", result.executor)
+            assertEquals("A", result.area)
+            assertTrue(result.matched)
+            assertEquals("rules", result.backend)
+            val request = sandbox.requests.single()
+            assertEquals("POST", request.first)
+            assertEquals("http://sandbox.example:8011/api/v1/intent", request.second)
+            assertEquals("派机器狗巡逻A区域", request.third!!["text"]!!.jsonPrimitive.content)
+            assertEquals(null, sandbox.requestSourceIpv4.single())
+        }
+
+    @Test
+    fun `standalone intent recognition accepts public nested intent contract`() = runTest {
+        sandbox.intentResponse = buildJsonObject {
+            put("status", "success")
+            put("intent", buildJsonObject {
+                put("executor", "robot dog")
+                put("intent", "security patrol")
+                put("area", "A")
+                put("matched", true)
+                put("backend", "qwen")
+            })
+        }
+
+        val result = sdk.recognizeIntent(
+            "http://sandbox.example:8011/api/v1/intent",
+            "派机器狗巡逻A区域",
+        )
+
+        assertEquals("security patrol", result.intent)
+        assertEquals("patrol", result.scene)
+        assertEquals("A", result.area)
+        assertEquals("qwen", result.backend)
+    }
+
+    @Test
     fun `audio control action uploads transcription through consumer binding`() = runTest {
         initializeSdk()
         runtime.deliverDownlink("COMPUTE_CONNECT_CONFIG", computeConnectConfig("consumer"))
@@ -1946,19 +1992,33 @@ class AgentSdkGroupConfigTest {
         )
 
         val requests = mutableListOf<Triple<String, String, JsonObject?>>()
+        val requestSourceIpv4 = mutableListOf<String?>()
         val uploads = mutableListOf<Upload>()
         var failuresRemaining = 0
         var recognitionTarget: JsonObject? = null
         var controlAction: JsonObject? = null
+        var intentResponse = buildJsonObject {
+            put("status", "success")
+            put("intent", "patrol")
+            put("scene", "patrol")
+            put("argument", "A区域")
+            put("normalized_argument", "A区域")
+            put("confidence", 1.0)
+            put("backend", "rules")
+        }
 
         override suspend fun requestWithStatus(
             method: String,
             url: String,
             body: JsonObject?,
             timeoutSeconds: Double,
-            sourceIpv4: String,
+            sourceIpv4: String?,
         ): RuntimeHttpResponse {
             requests += Triple(method, url, body)
+            requestSourceIpv4 += sourceIpv4
+            if (url.endsWith("/api/v1/intent")) {
+                return RuntimeHttpResponse(200, intentResponse)
+            }
             if (method == "DELETE") return RuntimeHttpResponse(204, JsonObject(emptyMap()))
             if ("/v1/recognition-targets/" in url) {
                 if (method == "PUT") {

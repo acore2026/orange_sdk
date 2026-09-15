@@ -57,10 +57,10 @@ internal class OkHttpSandboxTransport(
         url: String,
         body: JsonObject?,
         timeoutSeconds: Double,
-        sourceIpv4: String,
+        sourceIpv4: String?,
     ): RuntimeHttpResponse = withContext(Dispatchers.IO) {
-        if (sourceIpv4.isBlank()) {
-            throw AgentSdkException(ErrorCode.INVALID_ARGUMENT, "sourceIpv4 is required")
+        if (sourceIpv4 != null && sourceIpv4.isBlank()) {
+            throw AgentSdkException(ErrorCode.INVALID_ARGUMENT, "sourceIpv4 must not be blank")
         }
         val timeoutMillis = (timeoutSeconds * 1_000).toLong().coerceAtLeast(1)
         val client = baseClient.newBuilder()
@@ -107,14 +107,14 @@ internal class OkHttpSandboxTransport(
         } catch (error: java.net.SocketTimeoutException) {
             throw AgentSdkException(
                 ErrorCode.TIMEOUT,
-                "Sandbox media request timed out",
+                "Sandbox request timed out",
                 retryable = true,
                 cause = error,
             )
         } catch (error: Exception) {
             throw AgentSdkException(
                 ErrorCode.MEDIA_NEGOTIATION_FAILED,
-                "Sandbox media request failed",
+                "Sandbox request failed",
                 retryable = true,
                 cause = error,
             )
