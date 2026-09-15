@@ -96,6 +96,7 @@ class SdkFeatureCoverageWiringTest {
         assertTrue(intentCall >= 0)
         assertTrue(intentGuard > intentCall)
         assertTrue(discovery > intentGuard)
+        assertTrue(runner.contains("val requiredSkill = checkNotNull(recognition.executor).trim()"))
         assertTrue(runner.contains("requiredSkills = listOf(requiredSkill)"))
         assertTrue(runner.contains("PATROL_UTTERANCE = \"派机器狗巡逻A区域\""))
     }

@@ -1081,11 +1081,13 @@ WebSocket、A2A HTTP 监听仍然正常工作。交互步骤覆盖监听器注�
 身份申请、网络能力获取和 Agent Card 发布。`--force-registration` 与
 `--fresh-registration` 互斥。
 
-Linux A/B 与 Android 测试 App 的默认能力统一为 `dog-vision`。如果 Linux B 的
+Linux B 与 Android B 默认同时发布 Agent skill `robot dog` 和算力能力 `dog-vision`：
+意图响应的 `executor=robot dog` 直接用于发现，C-01 继续使用
+`capability_id=dog-vision`。如果 Linux B 的
 状态目录中保存的是旧版 `video_rendering` Agent Card，首次与 Android A 联调时应带
-`--force-registration`，让 B 重新发布 `dog-vision` 后再等待发现。
+`--force-registration`，让 B 重新发布两个能力后再等待发现。
 
-本测试使用两个独立脚本。B 先发布 `dog-vision` 能力并等待；A 按能力发现 B、
+本测试使用两个独立脚本。B 先发布 `robot dog` 与 `dog-vision` 并等待；A 按能力发现 B、
 建立二人群组，然后执行完整的算力媒体流程：
 
 1. A 使用正式 `ComputeSessionRequest` 调用 `create_computing_session()`；
@@ -1110,6 +1112,7 @@ sudo -E .venv/bin/python examples/agent_b_test.py \
   --runtime-ip 192.168.3.10 \
   --runtime-port 8089 \
   --masque-url https://192.168.3.10:8444/.well-known/masque/ip \
+  --agent-skill 'robot dog' \
   --capability dog-vision \
   --force-registration \
   --video-source file \

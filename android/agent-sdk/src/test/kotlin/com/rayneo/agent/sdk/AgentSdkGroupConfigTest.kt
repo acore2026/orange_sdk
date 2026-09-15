@@ -1999,6 +1999,7 @@ class AgentSdkGroupConfigTest {
         var controlAction: JsonObject? = null
         var intentResponse = buildJsonObject {
             put("status", "success")
+            put("executor", "robot dog")
             put("intent", "patrol")
             put("scene", "patrol")
             put("argument", "A区域")

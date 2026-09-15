@@ -235,7 +235,7 @@ class MainActivity : Activity() {
                 addView(section("04  Agent Profile"))
                 addView(field("owner", "Owner", "测试终端归属标识"))
                 addView(field("agent_name", "Agent 名称", "Agent-A"))
-                addView(field("capability", "B 发布 / A 申请的算力能力", "dog-vision"))
+                addView(field("capability", "算力 capability_id", "dog-vision"))
 
                 addView(section("05  建组与双向消息"))
                 addView(body("A 端填写建组参数；双方日志页会在群组就绪后显示消息发送区。"))

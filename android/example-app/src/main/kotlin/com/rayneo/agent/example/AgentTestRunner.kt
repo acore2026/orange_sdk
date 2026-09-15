@@ -222,7 +222,7 @@ class AgentTestRunner(
                     metadata = buildJsonObject {
                         put("region", "CN")
                         put("os", "Android")
-                        put("version", "0.2.41")
+                        put("version", "0.2.42")
                     },
                 )
             }
@@ -250,7 +250,7 @@ class AgentTestRunner(
                     priority = 1,
                     credentials = listOf(networkAbility.abilityVc),
                     capabilities = if (config.role == TestRole.B) {
-                        listOf(config.capability)
+                        listOf(DEFAULT_EXECUTOR_SKILL, config.capability).distinct()
                     } else {
                         emptyList()
                     },
@@ -261,7 +261,8 @@ class AgentTestRunner(
                 LabLogLevel.SUCCESS,
                 "H-PROFILE",
                 if (config.role == TestRole.B) {
-                    "已发布能力 ${config.capability}，等待 Agent A 发现"
+                    "已发布 skill=$DEFAULT_EXECUTOR_SKILL、capability_id=${config.capability}，" +
+                        "等待 Agent A 发现"
                 } else {
                     "Agent A Profile 已发布"
                 },
@@ -835,9 +836,12 @@ class AgentTestRunner(
                     "意图未命中 $SECURITY_PATROL_INTENT：intent=${result.intent}，" +
                         "matched=${result.matched}"
                 }
+                check(!result.executor.isNullOrBlank()) {
+                    "意图响应缺少可用于 Agent Discovery 的 executor skill"
+                }
             }
         }
-        val requiredSkill = config.capability
+        val requiredSkill = checkNotNull(recognition.executor).trim()
         recognizedIntent = recognition.intent
         recognizedArea = recognition.area
         discoverySkill = requiredSkill
@@ -847,7 +851,7 @@ class AgentTestRunner(
             "INTENT",
             "intent=${recognition.intent}，executor=${recognition.executor ?: "<none>"}，" +
                 "area=${recognition.area ?: "<none>"}，backend=${recognition.backend ?: "<none>"}，" +
-                "映射 discovery skill=$requiredSkill",
+                "discovery skill 直接使用 executor=$requiredSkill",
         )
         val taskDescription = buildString {
             append(PATROL_UTTERANCE)
@@ -1173,6 +1177,7 @@ class AgentTestRunner(
     private companion object {
         const val PATROL_UTTERANCE = "派机器狗巡逻A区域"
         const val SECURITY_PATROL_INTENT = "security patrol"
+        const val DEFAULT_EXECUTOR_SKILL = "robot dog"
         const val COMPUTE_REQUEST_MESSAGE_TYPE = "COMPUTE_SESSION_REQUEST"
         const val COMPUTE_SESSION_MESSAGE_TYPE = "computing_video_session"
         const val COMPUTE_SESSION_ID_FIELD = "compute_service_session_id"

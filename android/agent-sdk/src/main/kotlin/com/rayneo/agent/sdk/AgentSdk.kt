@@ -1747,8 +1747,7 @@ class AgentSdk internal constructor(
             status = status,
             intent = publicIntent,
             scene = scene,
-            executor = payload.stringOrNull("executor")
-                ?: if (matched) "robot dog" else null,
+            executor = payload.stringOrNull("executor"),
             slots = slots,
             matched = matched,
             confidence = confidence,

@@ -349,7 +349,7 @@ async def run_agent_b(
                 profile.agent_id,
                 priority=args.priority,
                 credentials=[ability.ability_vc],
-                capabilities=[args.capability],
+                capabilities=list(dict.fromkeys((args.agent_skill, args.capability))),
                 test_vc_private_key_path=args.third_party_private_key,
             )
             if not registration.success:
@@ -367,6 +367,7 @@ async def run_agent_b(
         _emit(
             "B_READY",
             agent_id=profile.agent_id,
+            agent_skill=args.agent_skill,
             capability=args.capability,
             video_source=args.video_source,
             video_file=str(video_file) if video_file is not None else None,
@@ -461,6 +462,7 @@ async def run_agent_b(
 
         return {
             "agent_id": profile.agent_id,
+            "agent_skill": args.agent_skill,
             "capability": args.capability,
             "last_message": message_listener.last_message,
             "completed_sessions": completed_sessions,
@@ -515,6 +517,11 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--owner", default="ab-test-owner-b")
     value.add_argument("--description", default="Agent B video offload producer test")
     value.add_argument("--region", default="CN")
+    value.add_argument(
+        "--agent-skill",
+        default="robot dog",
+        help="Agent Card skill matched against the intent response executor",
+    )
     value.add_argument("--capability", default="dog-vision")
     value.add_argument("--priority", type=int, default=1)
     value.add_argument(

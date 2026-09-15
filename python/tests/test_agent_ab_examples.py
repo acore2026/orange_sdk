@@ -50,6 +50,7 @@ def test_agent_b_defaults_to_the_bundled_local_video():
 
     assert args.video_source == "file"
     assert args.loop_video is True
+    assert args.agent_skill == "robot dog"
     assert args.capability == "dog-vision"
     assert args.media_timeout == 120.0
     assert "local_vlan_ip" not in vars(args)
@@ -64,6 +65,7 @@ def test_linux_ab_defaults_use_the_android_dog_vision_capability():
     assert agent_a.compute_capability_id == "dog-vision"
     assert agent_a.media_timeout == 120.0
     assert agent_b.capability == "dog-vision"
+    assert agent_b.agent_skill == "robot dog"
 
 
 async def test_agent_a_runs_acn_and_computing_consumer_flow():
@@ -284,10 +286,12 @@ async def test_agent_b_publishes_capability_and_can_stop_before_session():
     )
 
     assert result["agent_id"] == "did:example:b"
+    assert result["agent_skill"] == "robot dog"
     assert result["capability"] == "dog-vision"
     assert result["completed_sessions"] == []
     assert sdk.register_capabilities.await_args.kwargs["capabilities"] == [
-        "dog-vision"
+        "robot dog",
+        "dog-vision",
     ]
     assert sdk.register_capabilities.await_args.kwargs["credentials"] == [
         ability.ability_vc

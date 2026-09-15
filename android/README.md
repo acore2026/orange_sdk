@@ -616,12 +616,13 @@ println(result.area) // A
 统一返回公共名称。pruned_sandbox 默认让 8011 只监听容器内的 `127.0.0.1`，Android 实机
 使用前必须由部署方提供可达的反向代理 URL，或把该服务改为可控网络内的外部监听地址。
 
-意图驱动发现时，App 将 `security patrol` 映射为 Agent Card 已发布的 `dog-vision` skill，
-并把原始文本、意图和 `area` 写入 `task_description`。当前 H-DISCOVERY 线协议包含
+意图驱动发现时，App 直接把响应中的 `executor` 作为 H-DISCOVERY `required_skills`，
+并把原始文本、意图和 `area` 写入 `task_description`。Agent B 发布 `robot dog` skill，
+后续算力请求继续使用独立的 `dog-vision` capability ID。当前 H-DISCOVERY 线协议包含
 `request_id`、`agent_id`、`task_description`、`required_skills`、`discovery_scope`、
 `max_results`、`timestamp` 和 `proof`，SDK 会补齐所有必填控制字段。协议仍缺少两类业务关联：
 结构化的 `intent/slots` 字段，以及连接意图、发现、建组和算力会话的 `task_id`。在网侧协议
-扩展前，槽位只能编码到 `task_description`，skill 映射由应用显式维护。
+扩展前，槽位只能编码到 `task_description`。
 
 pruned_sandbox 的独立 ASR 服务使用 9004 端口，不依赖 C-02 或算力会话，因此可以在
 `AgentSdk.create()` 之后、`initialize()` 之前调用：

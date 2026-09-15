@@ -2,6 +2,26 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-15 — 使用 executor 作为 Discovery Skill
+
+### 修改原因
+
+- 意图服务响应中的 `executor` 已定义为 Agent skill，App 不应再维护
+  `security patrol → dog-vision` 映射；`dog-vision` 是后续算力请求的 capability ID。
+
+### 修改方式
+
+- Agent A 将意图响应中的 `executor` 原值直接写入 H-DISCOVERY `required_skills`，缺少该字段
+  时停止发现并进入可重试状态。
+- Android 与 Python Agent B 同时发布 `robot dog` Agent skill 和 `dog-vision` 算力能力，使
+  executor 驱动发现与现有视频算力链路可以独立匹配。
+- Android测试App升级为`0.2.42`、`versionCode=44`。
+
+### 验证内容
+
+- 更新意图解析与 A/B 示例测试，并执行 Android SDK/App 单元测试、Lint、AAR 及双 Flavor
+  APK 构建；执行 Python A/B 示例测试。
+
 ## 2026-09-15 — 意图识别驱动 Agent Discovery
 
 ### 修改原因
