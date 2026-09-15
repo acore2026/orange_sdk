@@ -8,6 +8,8 @@ import com.rayneo.agent.sdk.model.ComputeConstraints
 import com.rayneo.agent.sdk.model.ComputeInputFormat
 import com.rayneo.agent.sdk.model.ComputeRequestType
 import com.rayneo.agent.sdk.model.ComputeSessionRequest
+import com.rayneo.agent.sdk.model.ControlActionRequest
+import com.rayneo.agent.sdk.model.ControlInputType
 import com.rayneo.agent.sdk.model.GroupConfigSnapshot
 import com.rayneo.agent.sdk.model.MessageReceipt
 import com.rayneo.agent.sdk.model.NetworkMessageAction
@@ -54,6 +56,20 @@ data class ManualMessageSession(
     val targetAgentId: String,
     val targetAgentName: String,
 )
+
+data class SdkFeatureState(
+    val cardPublished: Boolean,
+    val groupReady: Boolean,
+    val computeSessionId: String?,
+    val computeStatus: String?,
+    val videoUploadState: String?,
+    val processedVideoState: String?,
+    val recognitionTargetRevision: String?,
+    val controlActionId: String?,
+) {
+    val computeSessionReady: Boolean get() = !computeSessionId.isNullOrBlank()
+    val producerVideoReady: Boolean get() = videoUploadState != null
+}
 
 private data class PendingComputeNotification(
     val groupId: String,
@@ -126,6 +142,7 @@ class AgentTestRunner(
     private val onProducerSessionReady: () -> Unit = {},
     private val processedVideoRenderSinks: () -> List<VideoSink> = { emptyList() },
     private val onProcessedVideoStatus: (String, String) -> Unit = { _, _ -> },
+    private val onFeatureStateChanged: (SdkFeatureState) -> Unit = {},
 ) {
     private val retrySignal = Channel<Unit>(Channel.CONFLATED)
     private val sendMutex = Mutex()
@@ -142,6 +159,9 @@ class AgentTestRunner(
     @Volatile private var videoUploadHandle: VideoUploadHandle? = null
     @Volatile private var processedVideoStream: ProcessedVideoStream? = null
     @Volatile private var pendingComputeNotification: PendingComputeNotification? = null
+    @Volatile private var lastComputeStatus: String? = null
+    @Volatile private var recognitionTargetRevision: String? = null
+    @Volatile private var lastControlActionId: String? = null
     private val receivedVideoSinks = mutableListOf<Pair<VideoTrack, VideoSink>>()
 
     fun retryCurrentStep() {
@@ -191,7 +211,7 @@ class AgentTestRunner(
                     metadata = buildJsonObject {
                         put("region", "CN")
                         put("os", "Android")
-                        put("version", "0.2.37")
+                        put("version", "0.2.38")
                     },
                 )
             }
@@ -238,8 +258,22 @@ class AgentTestRunner(
         } else {
             onLog(LabLogLevel.SUCCESS, "H-PROFILE", "Agent Card 已发布，跳过重复 registerCapabilities")
         }
+        emitFeatureState()
         if (config.role == TestRole.A) runAgentA(activeProfile) else runAgentB()
     }
+
+    fun featureState(): SdkFeatureState = SdkFeatureState(
+        cardPublished = sdk.agentLifecycleState == AgentLifecycleState.CARD_PUBLISHED,
+        groupReady = manualMessageSession != null,
+        computeSessionId = activeComputeSessionId,
+        computeStatus = lastComputeStatus,
+        videoUploadState = videoUploadHandle?.state,
+        processedVideoState = processedVideoStream?.state,
+        recognitionTargetRevision = recognitionTargetRevision,
+        controlActionId = lastControlActionId,
+    )
+
+    private fun emitFeatureState() = onFeatureStateChanged(featureState())
 
     fun close() {
         onResetAvailability(false)
@@ -261,31 +295,30 @@ class AgentTestRunner(
 
     suspend fun stopComputingSession() = operationMutex.withLock {
         val sessionId = activeComputeSessionId
-        var sessionClosed = sessionId == null
+        val createRequestId = createComputeRequest?.requestId
+        var sessionClosed = sessionId == null && createRequestId == null
         try {
             if (sessionId != null) {
-                onLog(LabLogLevel.INFO, "COMPUTE RELEASE", "释放 session_id=$sessionId")
-                sdk.releaseComputingSession(
-                    ComputeSessionRequest(
-                        messageType = COMPUTE_REQUEST_MESSAGE_TYPE,
-                        requestType = ComputeRequestType.RELEASE,
-                        inputFormat = ComputeInputFormat.STRUCTURED,
-                        requestId = UUID.randomUUID().toString(),
-                        computeServiceSessionId = sessionId,
+                terminateComputingSession(ComputeRequestType.RELEASE)
+                sessionClosed = true
+            } else if (createRequestId != null) {
+                onLog(
+                    LabLogLevel.INFO,
+                    "COMPUTE CANCEL",
+                    "CREATE 尚未返回 session_id，按 target_request_id=$createRequestId 取消",
+                )
+                val status = sdk.cancelComputingSession(
+                    computeRequest(
+                        requestType = ComputeRequestType.CANCEL,
+                        targetRequestId = createRequestId,
                     ),
                     timeoutSeconds = 30.0,
-                ).also { status ->
-                    onLog(
-                        LabLogLevel.SUCCESS,
-                        "COMPUTE RELEASE",
-                        "session_id=$sessionId，status=${status.status}",
-                    )
-                }
-                sdk.awaitComputingSessionClosed(sessionId, timeoutSeconds = 30.0)
+                )
+                lastComputeStatus = status.status
                 onLog(
                     LabLogLevel.SUCCESS,
-                    "COMPUTE RELEASE",
-                    "已收到 C-05 并清理本地算力配置；现在允许清除 Agent Profile",
+                    "COMPUTE CANCEL",
+                    "target_request_id=$createRequestId，status=${status.status}",
                 )
                 sessionClosed = true
             }
@@ -303,7 +336,9 @@ class AgentTestRunner(
             if (sessionClosed) {
                 activeComputeSessionId = null
                 createComputeRequest = null
+                lastComputeStatus = "CLOSED"
             }
+            emitFeatureState()
         }
     }
 
@@ -334,8 +369,11 @@ class AgentTestRunner(
             appendLine("active_group_id=${messaging?.groupId ?: "<none>"}")
             appendLine("message_target_agent_id=${messaging?.targetAgentId ?: "<none>"}")
             appendLine("compute_service_session_id=${activeComputeSessionId ?: "<none>"}")
+            appendLine("compute_status=${lastComputeStatus ?: "<none>"}")
             appendLine("video_upload_state=${videoUploadHandle?.state ?: "<none>"}")
-            append("processed_video_state=${processedVideoStream?.state ?: "<none>"}")
+            appendLine("processed_video_state=${processedVideoStream?.state ?: "<none>"}")
+            appendLine("recognition_target_revision=${recognitionTargetRevision ?: "<none>"}")
+            append("last_control_action_id=${lastControlActionId ?: "<none>"}")
         }
     }
 
@@ -379,6 +417,166 @@ class AgentTestRunner(
         }
     }
 
+    suspend fun inspectGroupSnapshot(): String = operationMutex.withLock {
+        ensureResetNotRequested()
+        val route = checkNotNull(manualMessageSession) { "群组尚未就绪" }
+        val snapshot = checkNotNull(sdk.getGroupSnapshot(route.groupId)) { "SDK 中没有群组快照" }
+        val summary = "group_id=${snapshot.groupId}，version=${snapshot.version}，" +
+            "generation=${snapshot.generation}，members=" +
+            snapshot.membersByAgentId.values.joinToString(prefix = "[", postfix = "]") { member ->
+                "${member.agentName}:${member.agentIp}:${member.tcpPort}" +
+                    member.capabilities.takeIf { it.isNotEmpty() }?.joinToString(
+                        prefix = " skills=",
+                        separator = ",",
+                    ).orEmpty()
+            }
+        onLog(LabLogLevel.SUCCESS, "GROUP SNAPSHOT", summary)
+        summary
+    }
+
+    suspend fun updatePublishedCapability(
+        skillName: String,
+        add: Boolean,
+        credential: JsonObject? = null,
+    ): OperationResult = operationMutex.withLock {
+        ensureResetNotRequested()
+        val normalizedSkill = skillName.trim().takeIf(String::isNotEmpty)
+            ?: error("能力名称不能为空")
+        val credentials = if (add) {
+            val value = requireNotNull(credential) { "新增能力必须提供对应的 VC JSON" }
+            listOf(value)
+        } else {
+            emptyList()
+        }
+        val referenceId = credentials.firstOrNull()
+            ?.get("id")?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank)
+        if (add && referenceId == null) error("能力 VC 必须包含非空 id")
+        val profile = checkNotNull(sdk.localProfile) { "Agent Profile 尚未就绪" }
+        credentials.firstOrNull()?.let { value ->
+            val claims = value["claims"] as? JsonObject ?: error("能力 VC 必须包含 claims")
+            check(claims["skill_name"]?.jsonPrimitive?.contentOrNull == normalizedSkill) {
+                "能力 VC 的 claims.skill_name 与输入的技能名称不一致"
+            }
+            check(claims["agent_id"]?.jsonPrimitive?.contentOrNull == profile.agentId) {
+                "能力 VC 的 claims.agent_id 与当前 Agent 不一致"
+            }
+        }
+        val update = buildJsonObject {
+            put("update_type", if (add) "add_skill" else "remove_skill")
+            put("skill_name", normalizedSkill)
+            referenceId?.let { put("reference_vc_id", it) }
+        }
+        onLog(
+            LabLogLevel.INFO,
+            "CAPABILITY UPDATE",
+            "${if (add) "新增" else "删除"} skill=$normalizedSkill",
+        )
+        sdk.updateCapabilities(profile.agentId, listOf(update), credentials).also { result ->
+            check(result.success) { result.message.ifBlank { "Agent Card 更新被 Runtime 拒绝" } }
+            onLog(
+                LabLogLevel.SUCCESS,
+                "CAPABILITY UPDATE",
+                "skill=$normalizedSkill 更新成功；agent_id 保持 ${profile.agentId}",
+            )
+            emitFeatureState()
+        }
+    }
+
+    suspend fun queryActiveComputingSession(): String = operationMutex.withLock {
+        ensureResetNotRequested()
+        val request = computeTargetRequest(ComputeRequestType.QUERY)
+        val status = sdk.queryComputingSession(request, timeoutSeconds = 30.0)
+        lastComputeStatus = status.status
+        val summary = computeStatusSummary(status.status, status.cause, status.computeServiceSessionId)
+        onLog(LabLogLevel.SUCCESS, "COMPUTE QUERY", summary)
+        emitFeatureState()
+        summary
+    }
+
+    suspend fun cancelActiveComputingSession(): String = operationMutex.withLock {
+        ensureResetNotRequested()
+        terminateComputingSession(ComputeRequestType.CANCEL)
+    }
+
+    suspend fun releaseActiveComputingSession(): String = operationMutex.withLock {
+        ensureResetNotRequested()
+        terminateComputingSession(ComputeRequestType.RELEASE)
+    }
+
+    suspend fun toggleVideoUpload(): String = operationMutex.withLock {
+        ensureResetNotRequested()
+        val upload = checkNotNull(videoUploadHandle) { "B 端视频上传尚未启动" }
+        if (upload.state == "PAUSED") upload.resume() else upload.pause()
+        val state = upload.state
+        onLog(
+            LabLogLevel.SUCCESS,
+            "VIDEO UPLOAD",
+            if (state == "PAUSED") "摄像头上传已暂停" else "摄像头上传已恢复",
+        )
+        emitFeatureState()
+        state
+    }
+
+    suspend fun updateRecognitionTarget(text: String): String = operationMutex.withLock {
+        ensureResetNotRequested()
+        val sessionId = requireConsumerSessionId()
+        val normalized = text.trim().takeIf(String::isNotEmpty) ?: error("识别目标不能为空")
+        val target = sdk.updateRecognitionTarget(
+            computeServiceSessionId = sessionId,
+            requestId = UUID.randomUUID().toString(),
+            text = normalized,
+            language = "zh",
+        )
+        recognitionTargetRevision = target.targetRevision
+        val summary = "status=${target.status}，revision=${target.targetRevision}，" +
+            "label=${target.target.label}，prompt=${target.target.prompt}"
+        onLog(LabLogLevel.SUCCESS, "RECOGNITION PUT", summary)
+        emitFeatureState()
+        summary
+    }
+
+    suspend fun getRecognitionTarget(): String = operationMutex.withLock {
+        ensureResetNotRequested()
+        val target = sdk.getRecognitionTarget(requireConsumerSessionId())
+        recognitionTargetRevision = target.targetRevision
+        val summary = "status=${target.status}，revision=${target.targetRevision}，" +
+            "label=${target.target.label}，prompt=${target.target.prompt}"
+        onLog(LabLogLevel.SUCCESS, "RECOGNITION GET", summary)
+        emitFeatureState()
+        summary
+    }
+
+    suspend fun createControlAction(text: String): String = operationMutex.withLock {
+        ensureResetNotRequested()
+        val normalized = text.trim().takeIf(String::isNotEmpty) ?: error("控制指令不能为空")
+        val action = sdk.createControlAction(
+            requireConsumerSessionId(),
+            ControlActionRequest(
+                requestId = UUID.randomUUID().toString(),
+                inputType = ControlInputType.TEXT,
+                text = normalized,
+                language = "zh",
+            ),
+        )
+        lastControlActionId = action.actionId
+        val summary = "action_id=${action.actionId}，status=${action.status}，" +
+            "normalized_action=${action.normalizedAction ?: "<none>"}"
+        onLog(LabLogLevel.SUCCESS, "CONTROL CREATE", summary)
+        emitFeatureState()
+        summary
+    }
+
+    suspend fun getControlAction(): String = operationMutex.withLock {
+        ensureResetNotRequested()
+        val actionId = checkNotNull(lastControlActionId) { "尚未创建控制动作" }
+        val action = sdk.getControlAction(requireConsumerSessionId(), actionId)
+        val summary = "action_id=${action.actionId}，status=${action.status}，" +
+            "cause=${action.cause.ifBlank { "<none>" }}，result=${action.result ?: "<none>"}"
+        onLog(LabLogLevel.SUCCESS, "CONTROL GET", summary)
+        emitFeatureState()
+        summary
+    }
+
     suspend fun startVideoOffload() = operationMutex.withLock {
         ensureResetNotRequested()
         onComputeActionAvailability(false)
@@ -419,6 +617,8 @@ class AgentTestRunner(
         val sessionId = status.computeServiceSessionId?.takeIf(String::isNotBlank)
             ?: error("CREATE 响应缺少 compute_service_session_id（status=${status.status}, cause=${status.cause}）")
         activeComputeSessionId = sessionId
+        lastComputeStatus = status.status
+        emitFeatureState()
         onLog(
             LabLogLevel.SUCCESS,
             "COMPUTE CREATE",
@@ -465,6 +665,7 @@ class AgentTestRunner(
                 "producer media connection 已建立；session_id=$sessionId，track=${handle.trackId}",
             )
             onStatus(RunnerStatus("视频上传已启动", "B → Sandbox；等待 A 接收处理流"))
+            emitFeatureState()
         }
     }
 
@@ -536,6 +737,7 @@ class AgentTestRunner(
         }
         if (activeComputeSessionId == sessionId && videoUploadHandle != null) return
         activeComputeSessionId = sessionId
+        emitFeatureState()
         onLog(
             LabLogLevel.SUCCESS,
             "COMPUTE NOTIFY",
@@ -610,6 +812,7 @@ class AgentTestRunner(
         if (manualMessageSession == session) return
         manualMessageSession = session
         onManualMessageSession(session)
+        emitFeatureState()
         onComputeActionAvailability(config.role == TestRole.A && processedVideoStream == null)
         pendingComputeNotification?.let { pending ->
             pendingComputeNotification = null
@@ -636,6 +839,7 @@ class AgentTestRunner(
         try {
             val stream = sdk.getProcessedVideoStream(sessionId, timeoutSeconds = 120.0)
             processedVideoStream = stream
+            emitFeatureState()
             val track = stream.track
             var frames = 0L
             val diagnosticSink = VideoSink { frame ->
@@ -698,7 +902,90 @@ class AgentTestRunner(
         stream?.let { runCatching { it.close() } }
         onComputeActionAvailability(false)
         onProcessedVideoStatus("视频已停止", "等待下一次处理流会话")
+        emitFeatureState()
     }
+
+    private fun requireConsumerSessionId(): String {
+        check(config.role == TestRole.A) { "该接口只适用于 consumer（角色 A）" }
+        check(processedVideoStream != null) { "处理流尚未建立，无法访问 Sandbox 运行期接口" }
+        return checkNotNull(activeComputeSessionId) { "当前没有活动算力会话" }
+    }
+
+    private fun computeTargetRequest(requestType: ComputeRequestType): ComputeSessionRequest {
+        val sessionId = activeComputeSessionId
+        val targetRequestId = createComputeRequest?.requestId
+        check(sessionId != null || targetRequestId != null) { "当前没有可查询或取消的算力请求" }
+        return computeRequest(
+            requestType = requestType,
+            computeServiceSessionId = sessionId,
+            targetRequestId = if (sessionId == null) targetRequestId else null,
+        )
+    }
+
+    private fun computeRequest(
+        requestType: ComputeRequestType,
+        computeServiceSessionId: String? = null,
+        targetRequestId: String? = null,
+    ) = ComputeSessionRequest(
+        messageType = COMPUTE_REQUEST_MESSAGE_TYPE,
+        requestType = requestType,
+        inputFormat = ComputeInputFormat.STRUCTURED,
+        requestId = UUID.randomUUID().toString(),
+        computeServiceSessionId = computeServiceSessionId,
+        targetRequestId = targetRequestId,
+    )
+
+    private suspend fun terminateComputingSession(requestType: ComputeRequestType): String {
+        check(requestType == ComputeRequestType.CANCEL || requestType == ComputeRequestType.RELEASE)
+        val sessionId = activeComputeSessionId
+        val request = when (requestType) {
+            ComputeRequestType.CANCEL -> computeTargetRequest(requestType)
+            ComputeRequestType.RELEASE -> computeRequest(
+                requestType = requestType,
+                computeServiceSessionId = checkNotNull(sessionId) { "当前没有可释放的算力会话" },
+            )
+            else -> error("Unsupported termination request: $requestType")
+        }
+        val stage = "COMPUTE ${requestType.name}"
+        onLog(
+            LabLogLevel.INFO,
+            stage,
+            sessionId?.let { "session_id=$it" }
+                ?: "target_request_id=${request.targetRequestId}",
+        )
+        val status = when (requestType) {
+            ComputeRequestType.CANCEL -> sdk.cancelComputingSession(request, timeoutSeconds = 30.0)
+            ComputeRequestType.RELEASE -> sdk.releaseComputingSession(request, timeoutSeconds = 30.0)
+            else -> error("Unsupported termination request: $requestType")
+        }
+        lastComputeStatus = status.status
+        onLog(
+            LabLogLevel.SUCCESS,
+            stage,
+            computeStatusSummary(status.status, status.cause, status.computeServiceSessionId),
+        )
+        if (sessionId != null) {
+            sdk.awaitComputingSessionClosed(sessionId, timeoutSeconds = 30.0)
+            onLog(
+                LabLogLevel.SUCCESS,
+                stage,
+                "已收到 C-05 并清理本地算力配置；现在允许清除 Agent Profile",
+            )
+        }
+        withContext(NonCancellable) { closeLocalMedia() }
+        activeComputeSessionId = null
+        createComputeRequest = null
+        lastComputeStatus = "CLOSED"
+        recognitionTargetRevision = null
+        lastControlActionId = null
+        onComputeActionAvailability(config.role == TestRole.A && manualMessageSession != null)
+        emitFeatureState()
+        return "${requestType.name} 已完成，C-05 已确认，本地状态=CLOSED"
+    }
+
+    private fun computeStatusSummary(status: String, cause: String, sessionId: String?): String =
+        "status=$status，session_id=${sessionId ?: activeComputeSessionId ?: "<none>"}，" +
+            "cause=${cause.ifBlank { "<none>" }}"
 
     private fun detachReceivedVideoSinks() {
         synchronized(receivedVideoSinks) {

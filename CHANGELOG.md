@@ -2,6 +2,31 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-15 — 补齐 Android 联调 App 的 SDK 功能入口
+
+### 修改原因
+
+- Generic A/B App 已覆盖身份、发现、建组、消息和视频主链路，但没有操作入口验证能力增删、
+  算力 QUERY/CANCEL、上传暂停/恢复、持续识别目标及 Sandbox 控制动作。
+- CREATE 尚未返回 session ID 时停止 App，只按 session ID 释放会漏掉进行中的申请，随后身份
+  注销会被 SDK 生命周期保护拒绝。
+
+### 修改方式
+
+- 运行页新增按角色和会话状态启用的“SDK FEATURE LAB”面板，覆盖群组快照、Agent Card
+  能力增删、算力查询/取消/释放、B 端摄像头暂停/恢复、A 端识别目标写入/读取及控制动作
+  创建/查询；每次调用的结构化结果写入现有日志和状态区。
+- 能力新增接收外部签发的完整 VC JSON，删除无需 VC；App 不生成生产凭证。
+- 停止流程在 CREATE 尚无 session ID 时改用原 CREATE request ID 执行 CANCEL；已有 session
+  继续执行 RELEASE 并等待 C-05，成功后可在同一群组重新申请算力会话。
+- Android测试App升级为`0.2.38`、`versionCode=40`。
+
+### 验证内容
+
+- 新增源码接线测试，检查所有补充接口都有 Runner 调用和 Generic UI 入口，并验证未完成
+  CREATE 的取消接线；执行 SDK/Generic/RayNeo 单元测试、两个 App Flavor 的 Lint 以及两种
+  Debug APK 构建。
+
 ## 2026-09-14 — 收紧算力下行时序并显示视频流畅度
 
 ### 修改原因

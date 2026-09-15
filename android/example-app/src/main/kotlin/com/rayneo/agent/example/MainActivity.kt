@@ -48,6 +48,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import org.webrtc.RendererCommon
 import org.webrtc.EglBase
 import org.webrtc.VideoSink
@@ -92,6 +94,25 @@ class MainActivity : Activity() {
     private var computeVideoAvailable = false
     private var computeVideoStarting = false
     private var pendingVideoStart = false
+    private var sdkFeaturePanel: View? = null
+    private var sdkFeatureStatus: TextView? = null
+    private var groupSnapshotButton: TextView? = null
+    private var capabilityAddButton: TextView? = null
+    private var capabilityRemoveButton: TextView? = null
+    private var computeQueryButton: TextView? = null
+    private var computeCancelButton: TextView? = null
+    private var computeReleaseButton: TextView? = null
+    private var videoUploadToggleButton: TextView? = null
+    private var recognitionUpdateButton: TextView? = null
+    private var recognitionGetButton: TextView? = null
+    private var controlCreateButton: TextView? = null
+    private var controlGetButton: TextView? = null
+    private var capabilitySkillInput: EditText? = null
+    private var capabilityVcInput: EditText? = null
+    private var recognitionTargetInput: EditText? = null
+    private var controlActionInput: EditText? = null
+    private var sdkFeatureState: SdkFeatureState? = null
+    private var sdkFeatureActionRunning = false
     private var videoPreviewRenderer: VideoSink? = null
     private var videoPreviewEglBase: EglBase? = null
     private var videoPreviewStatus: TextView? = null
@@ -139,6 +160,25 @@ class MainActivity : Activity() {
         computeVideoAvailable = false
         computeVideoStarting = false
         pendingVideoStart = false
+        sdkFeaturePanel = null
+        sdkFeatureStatus = null
+        groupSnapshotButton = null
+        capabilityAddButton = null
+        capabilityRemoveButton = null
+        computeQueryButton = null
+        computeCancelButton = null
+        computeReleaseButton = null
+        videoUploadToggleButton = null
+        recognitionUpdateButton = null
+        recognitionGetButton = null
+        controlCreateButton = null
+        controlGetButton = null
+        capabilitySkillInput = null
+        capabilityVcInput = null
+        recognitionTargetInput = null
+        controlActionInput = null
+        sdkFeatureState = null
+        sdkFeatureActionRunning = false
         controlScroll = null
         logScroll = null
         resetButton = null
@@ -350,6 +390,7 @@ class MainActivity : Activity() {
             ::requestProducerVideoStart,
             processedVideoRenderSinks = ::processedVideoRenderSinks,
             onProcessedVideoStatus = ::setProcessedVideoStatus,
+            onFeatureStateChanged = ::setSdkFeatureState,
         )
         sdk = value
         runner = flow
@@ -447,6 +488,11 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(12) })
 
         controls.addView(computeVideoControls(), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(12) })
+
+        controls.addView(sdkFeatureControls(config), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { topMargin = dp(12) })
@@ -603,6 +649,236 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 dp(48),
             ).apply { topMargin = dp(10) })
+        }
+    }
+
+    private fun sdkFeatureControls(config: TestConfig): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(16), dp(14), dp(16), dp(16))
+        background = rounded(Palette.INK_SURFACE, 14f, Palette.INK_LINE)
+        sdkFeaturePanel = this
+
+        addView(TextView(this@MainActivity).apply {
+            text = "SDK FEATURE LAB  /  COMPLETE COVERAGE"
+            setTextColor(Palette.LINK)
+            textSize = 11f
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = .08f
+        })
+        sdkFeatureStatus = TextView(this@MainActivity).apply {
+            text = "等待 Agent Card 与群组配置"
+            setTextColor(Palette.INK_MUTED)
+            textSize = 12f
+            setPadding(0, dp(6), 0, dp(10))
+        }.also(::addView)
+
+        groupSnapshotButton = actionButton("读取群组快照", filled = false) {
+            runSdkFeatureAction("群组快照") { inspectGroupSnapshot() }
+        }
+        addView(featureButtonRow(checkNotNull(groupSnapshotButton)))
+
+        addView(featureCaption("Agent Card 能力更新"))
+        capabilitySkillInput = featureInput(
+            value = config.capability,
+            hintText = "技能名称",
+        ).also(::addView)
+        capabilityVcInput = featureInput(
+            value = "",
+            hintText = "新增时粘贴对应 VC JSON；删除时可留空",
+            multiline = true,
+        ).also {
+            addView(it, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(7) })
+        }
+        capabilityAddButton = actionButton("新增能力", filled = false) {
+            val skill = capabilitySkillInput?.text?.toString().orEmpty()
+            val rawCredential = capabilityVcInput?.text?.toString()?.trim().orEmpty()
+            runSdkFeatureAction("能力新增") {
+                val credential = rawCredential.takeIf(String::isNotEmpty)
+                    ?.let { Json.parseToJsonElement(it).jsonObject }
+                val result = updatePublishedCapability(skill, add = true, credential = credential)
+                "success=${result.success}，${result.message.ifBlank { "Agent Card 已更新" }}"
+            }
+        }
+        capabilityRemoveButton = actionButton("删除能力", filled = false) {
+            val skill = capabilitySkillInput?.text?.toString().orEmpty()
+            runSdkFeatureAction("能力删除") {
+                val result = updatePublishedCapability(skill, add = false)
+                "success=${result.success}，${result.message.ifBlank { "Agent Card 已更新" }}"
+            }
+        }
+        addView(featureButtonRow(
+            checkNotNull(capabilityAddButton),
+            checkNotNull(capabilityRemoveButton),
+        ))
+
+        addView(featureCaption("算力会话生命周期"))
+        computeQueryButton = actionButton("查询 QUERY", filled = false) {
+            runSdkFeatureAction("算力查询") { queryActiveComputingSession() }
+        }
+        computeCancelButton = actionButton("取消 CANCEL", filled = false) {
+            runSdkFeatureAction("算力取消") { cancelActiveComputingSession() }
+        }
+        computeReleaseButton = actionButton("释放 RELEASE", filled = false) {
+            runSdkFeatureAction("算力释放") { releaseActiveComputingSession() }
+        }
+        addView(featureButtonRow(
+            checkNotNull(computeQueryButton),
+            checkNotNull(computeCancelButton),
+            checkNotNull(computeReleaseButton),
+        ))
+
+        if (config.role == TestRole.B) {
+            addView(featureCaption("Producer 视频控制"))
+            videoUploadToggleButton = actionButton("暂停摄像头上传", filled = false) {
+                runSdkFeatureAction("视频上传控制") { toggleVideoUpload() }
+            }
+            addView(featureButtonRow(checkNotNull(videoUploadToggleButton)))
+        } else {
+            addView(featureCaption("持续识别目标"))
+            recognitionTargetInput = featureInput(
+                value = "寻找画面中的红色物体",
+                hintText = "识别目标",
+            ).also(::addView)
+            recognitionUpdateButton = actionButton("写入目标", filled = false) {
+                val target = recognitionTargetInput?.text?.toString().orEmpty()
+                runSdkFeatureAction("识别目标写入") { updateRecognitionTarget(target) }
+            }
+            recognitionGetButton = actionButton("读取目标", filled = false) {
+                runSdkFeatureAction("识别目标读取") { getRecognitionTarget() }
+            }
+            addView(featureButtonRow(
+                checkNotNull(recognitionUpdateButton),
+                checkNotNull(recognitionGetButton),
+            ))
+
+            addView(featureCaption("Sandbox 控制动作"))
+            controlActionInput = featureInput(
+                value = "寻找画面中的杯子",
+                hintText = "自然语言控制指令",
+            ).also(::addView)
+            controlCreateButton = actionButton("创建动作", filled = false) {
+                val command = controlActionInput?.text?.toString().orEmpty()
+                runSdkFeatureAction("控制动作创建") { createControlAction(command) }
+            }
+            controlGetButton = actionButton("查询动作", filled = false) {
+                runSdkFeatureAction("控制动作查询") { getControlAction() }
+            }
+            addView(featureButtonRow(
+                checkNotNull(controlCreateButton),
+                checkNotNull(controlGetButton),
+            ))
+        }
+        refreshSdkFeatureControls()
+    }
+
+    private fun featureCaption(value: String) = TextView(this).apply {
+        text = value
+        setTextColor(Color.WHITE)
+        textSize = 13f
+        typeface = Typeface.DEFAULT_BOLD
+        setPadding(0, dp(13), 0, dp(7))
+    }
+
+    private fun featureInput(value: String, hintText: String, multiline: Boolean = false) =
+        EditText(this).apply {
+            setText(value)
+            hint = hintText
+            setHintTextColor(Palette.INK_HINT)
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            minLines = if (multiline) 2 else 1
+            maxLines = if (multiline) 5 else 2
+            setPadding(dp(11), dp(9), dp(11), dp(9))
+            background = rounded(Palette.INK_INPUT, 9f, Palette.INK_LINE)
+            inputType = InputType.TYPE_CLASS_TEXT or
+                (if (multiline) InputType.TYPE_TEXT_FLAG_MULTI_LINE else 0)
+        }
+
+    private fun featureButtonRow(vararg buttons: TextView) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        buttons.forEachIndexed { index, button ->
+            if (index > 0) addView(Space(this@MainActivity), LinearLayout.LayoutParams(dp(7), 1))
+            addView(button, LinearLayout.LayoutParams(0, dp(44), 1f))
+        }
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(7) }
+    }
+
+    private fun setSdkFeatureState(state: SdkFeatureState) {
+        runOnUiThread {
+            sdkFeatureState = state
+            refreshSdkFeatureControls()
+        }
+    }
+
+    private fun refreshSdkFeatureControls() {
+        val state = sdkFeatureState
+        fun TextView?.available(value: Boolean) {
+            this ?: return
+            isEnabled = value && !sdkFeatureActionRunning
+            alpha = if (isEnabled) 1f else .42f
+        }
+        val cardReady = state?.cardPublished == true
+        val groupReady = state?.groupReady == true
+        val sessionReady = state?.computeSessionReady == true
+        val consumerRuntimeReady = activeConfig?.role == TestRole.A &&
+            state?.processedVideoState != null
+        groupSnapshotButton.available(groupReady)
+        capabilityAddButton.available(cardReady)
+        capabilityRemoveButton.available(cardReady)
+        computeQueryButton.available(sessionReady && activeConfig?.role == TestRole.A)
+        computeCancelButton.available(sessionReady && activeConfig?.role == TestRole.A)
+        computeReleaseButton.available(sessionReady && activeConfig?.role == TestRole.A)
+        videoUploadToggleButton.available(state?.producerVideoReady == true)
+        recognitionUpdateButton.available(consumerRuntimeReady)
+        recognitionGetButton.available(consumerRuntimeReady)
+        controlCreateButton.available(consumerRuntimeReady)
+        controlGetButton.available(consumerRuntimeReady && state?.controlActionId != null)
+        videoUploadToggleButton?.text = if (state?.videoUploadState == "PAUSED") {
+            "恢复摄像头上传"
+        } else {
+            "暂停摄像头上传"
+        }
+        sdkFeatureStatus?.text = when {
+            sdkFeatureActionRunning -> "接口调用中，其他功能按钮暂时锁定"
+            state == null -> "等待 SDK 初始化"
+            else -> "Card=${if (cardReady) "READY" else "WAIT"} · " +
+                "Group=${if (groupReady) "READY" else "WAIT"} · " +
+                "Compute=${state.computeStatus ?: if (sessionReady) "READY" else "WAIT"} · " +
+                "Media=${state.videoUploadState ?: state.processedVideoState ?: "WAIT"}"
+        }
+    }
+
+    private fun runSdkFeatureAction(
+        title: String,
+        action: suspend AgentTestRunner.() -> String,
+    ) {
+        val activeRunner = runner ?: run {
+            Toast.makeText(this, "SDK 流程尚未启动", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (sdkFeatureActionRunning) return
+        sdkFeatureActionRunning = true
+        refreshSdkFeatureControls()
+        scope.launch {
+            try {
+                val detail = activeRunner.action()
+                setRunnerStatus(RunnerStatus("$title 成功", detail.take(240)))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                val detail = error.message ?: error::class.java.simpleName
+                appendLog(LabLogLevel.ERROR, "FEATURE LAB", "$title 失败：$detail")
+                setRunnerStatus(RunnerStatus("$title 失败", detail))
+            } finally {
+                sdkFeatureActionRunning = false
+                setSdkFeatureState(activeRunner.featureState())
+            }
         }
     }
 
