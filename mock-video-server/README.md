@@ -39,6 +39,37 @@ Mock 自测；新版 SDK 和 Android App 均不会调用这些路由。
 
 ## 部署
 
+### 离线整包启动
+
+交付文件 `sandbox.tar.gz` 已包含启动脚本、Compose 配置、ARM64 镜像归档与校验文件、
+完整源码及烟测程序。复制到 N6 ARM64 主机后执行：
+
+```bash
+sha256sum -c sandbox.tar.gz.sha256
+tar -xzf sandbox.tar.gz
+cd sandbox
+./start_sandbox.sh
+```
+
+若原来的 `agent-sdk-mock-video-server` 容器仍在运行或已经停止，脚本会删除旧容器并通过
+Compose 强制重建。不存在 `compose_n6` 时，脚本会创建
+`172.30.0.0/24` Bridge 网络。需要在启动后执行完整 HTTP/WebRTC 接口烟测时使用：
+
+```bash
+./start_sandbox.sh --smoke
+```
+
+在仓库中重新生成完整交付包：
+
+```bash
+cd /root/lpx/sdk/mock-video-server
+./package-sandbox.sh
+```
+
+输出为 `dist/sandbox.tar.gz` 和 `dist/sandbox.tar.gz.sha256`。
+
+### 构建镜像
+
 构建 ARM64 镜像、执行完整 HTTP/WebRTC 烟测并导出镜像。在 x86_64 构建机上需要先启用
 Docker/QEMU 的 ARM64 binfmt 支持：
 
