@@ -57,11 +57,11 @@ def test_agent_b_defaults_to_the_bundled_local_video():
     assert Path(args.video_file).resolve().is_file()
 
 
-def test_linux_ab_defaults_use_the_android_dog_vision_capability():
+def test_linux_ab_separates_discovery_skill_from_compute_capability():
     agent_a = _base_arguments(_load_example("agent_a_test"))
     agent_b = _base_arguments(_load_example("agent_b_test"))
 
-    assert agent_a.target_capability == "dog-vision"
+    assert agent_a.target_capability == "robot dog"
     assert agent_a.compute_capability_id == "dog-vision"
     assert agent_a.media_timeout == 120.0
     assert agent_b.capability == "dog-vision"
@@ -95,7 +95,7 @@ async def test_agent_a_runs_acn_and_computing_consumer_flow():
     target = SimpleNamespace(
         agent_id="did:example:b",
         service_endpoints="http://agent-b:4001/A2A/message",
-        skills=("dog-vision",),
+        skills=("robot dog", "dog-vision"),
         priority=1,
     )
     member = SimpleNamespace(
@@ -185,7 +185,7 @@ async def test_agent_a_runs_acn_and_computing_consumer_flow():
     ]
     assert "task_id" not in sdk.discover_agents.await_args.kwargs
     assert sdk.discover_agents.await_args.kwargs["required_skills"] == [
-        "dog-vision"
+        "robot dog"
     ]
     assert sdk.create_group.await_args.args[1] == ["did:example:b"]
     assert sdk.create_group.await_args.kwargs["dnn"] == "internet"
@@ -553,6 +553,8 @@ async def test_agent_b_callbacks_accept_group_and_record_a2a_message(capsys):
 async def test_agent_b_queues_session_then_starts_video_outside_callback():
     module = _load_example("agent_b_test")
     args = _base_arguments(module)
+    args.full_interface_suite = True
+    args.upload_control_delay = 0
     profile = SimpleNamespace(
         agent_id="did:example:b",
         agent_name="Agent-B",
@@ -567,6 +569,8 @@ async def test_agent_b_queues_session_then_starts_video_outside_callback():
     upload = SimpleNamespace(
         track_id="camera-track-1",
         state="STOPPED",
+        pause=AsyncMock(),
+        resume=AsyncMock(),
         stop=AsyncMock(),
     )
     registered = {}
@@ -590,6 +594,9 @@ async def test_agent_b_queues_session_then_starts_video_outside_callback():
         apply_identity=AsyncMock(),
         get_network_ability=AsyncMock(),
         register_capabilities=AsyncMock(),
+        update_capabilities=AsyncMock(
+            return_value=SimpleNamespace(success=True, message="")
+        ),
         get_group_snapshot=AsyncMock(return_value=snapshot),
         start_video_upload=AsyncMock(return_value=upload),
         close=AsyncMock(),
@@ -620,7 +627,19 @@ async def test_agent_b_queues_session_then_starts_video_outside_callback():
         bitrate_kbps=2500,
         timeout_seconds=120.0,
     )
-    upload.stop.assert_not_awaited()
+    upload.stop.assert_awaited_once_with()
+    upload.pause.assert_awaited_once_with()
+    upload.resume.assert_awaited_once_with()
+    sdk.update_capabilities.assert_awaited_once_with(
+        profile.agent_id,
+        [
+            {
+                "update_type": "remove_skill",
+                "skill_name": "full-interface-probe",
+            }
+        ],
+        credentials=[],
+    )
     sdk.close.assert_awaited_once()
 
 

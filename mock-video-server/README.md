@@ -1,7 +1,19 @@
-# N6 / DN Mock Video Server
+# N6 / DN Compute Sandbox Mock
 
-这个服务模拟正式算力会话中的 Sandbox 媒体服务，部署在 free6GC 的 N6 数据网 `compose_n6` 中。
-固定地址为 `172.30.0.10:28500`，UPF 的 N6 地址为 `172.30.0.2`。
+这个服务模拟正式算力会话中的 Sandbox，部署在 free6GC 的 N6 数据网 `compose_n6` 中。
+固定地址为 `172.30.0.10:28500`，UPF 的 N6 地址为 `172.30.0.2`。同一镜像同时实现
+U-MEDIA、持续视觉识别目标、文本/结构化控制动作和 multipart 语音控制动作。
+
+正式接口包括：
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `POST` | `/v1/media-connections` | producer/consumer WebRTC Offer/Answer |
+| `DELETE` | `/v1/media-connections/{id}` | 幂等关闭媒体连接 |
+| `PUT/GET` | `/v1/recognition-targets/{session_id}` | 写入和读取持续识别目标 |
+| `POST` | `/v1/control-actions` | 提交文本或结构化控制动作 |
+| `GET` | `/v1/control-actions/{action_id}` | 查询控制动作结果 |
+| `POST` | `/v1/audio-control-actions` | 上传音频并返回 mock 转写和标准化动作 |
 
 ## 数据流
 
@@ -27,9 +39,31 @@ Mock 自测；新版 SDK 和 Android App 均不会调用这些路由。
 
 ## 部署
 
+在 x86_64 主机构建、执行完整 HTTP/WebRTC 烟测并导出镜像：
+
 ```bash
 cd /root/lpx/sdk/mock-video-server
-docker compose -f docker-compose.n6.yml up -d --build
+./build-image.sh
+```
+
+生成：
+
+```text
+镜像：agent-compute-sandbox-mock:0.2.0-amd64
+归档：dist/compute-mock/agent-compute-sandbox-mock-0.2.0-linux-amd64.tar.gz
+校验：dist/compute-mock/agent-compute-sandbox-mock-0.2.0-linux-amd64.tar.gz.sha256
+```
+
+N6 主机离线导入后再部署：
+
+```bash
+sha256sum -c agent-compute-sandbox-mock-0.2.0-linux-amd64.tar.gz.sha256
+gzip -dc agent-compute-sandbox-mock-0.2.0-linux-amd64.tar.gz | docker load
+```
+
+```bash
+cd /root/lpx/sdk/mock-video-server
+docker compose -f docker-compose.n6.yml up -d
 docker compose -f docker-compose.n6.yml ps
 docker exec agent-sdk-mock-video-server ip route
 curl http://172.30.0.10:28500/healthz
@@ -50,8 +84,9 @@ curl http://172.30.0.10:28500/debug/v1/sessions
 docker logs -f agent-sdk-mock-video-server
 ```
 
-WebRTC HTTP 信令不使用业务层 token、ticket、Bearer 或 proof；Agent 和绑定关系由
-网侧建立，Mock 根据完整 `computing_context` 关联两条媒体腿。`/debug/v1/sessions` 的 `consumers.consumer-N` 会返回该连接的
+Sandbox HTTP 不使用业务层 token、ticket、Bearer 或 proof；Agent 和绑定关系由
+网侧建立，Mock 根据完整 `computing_context` 关联媒体、识别和控制请求。
+`/debug/v1/sessions` 的 `consumers.consumer-N` 会返回该连接的
 `frames_processed`、`placeholder_frames_sent`、`packets_sent`、`bytes_sent`、
 `codec`、`first_frame_sent` 和 `first_source_frame_sent`。`keyframes_requested`
 记录 Answer 就绪、consumer 建连以及占位流切换 source 后主动补发的关键帧请求次数。

@@ -2,6 +2,30 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-16 — 增加全接口端侧镜像与算力 Sandbox Mock 镜像
+
+### 修改原因
+
+- 原 ARM64 A/B 镜像只跑身份、发现、建组和视频主链路，没有持续验证新增的生命周期、
+  能力更新、算力控制、识别目标、控制动作及媒体句柄接口。
+- 原 `mock-video-server` 只模拟 Sandbox 媒体协商，不能为端侧全接口测试提供识别和控制响应，
+  也没有可离线交付的独立镜像构建流程。
+
+### 修改方式
+
+- Python SDK 升级为 `0.17.8`；ARM64 A/B 流程默认启用完整接口套件，覆盖所有公开属性和
+  函数，以及视频上传 pause/resume/stop、处理流 recv/close。生命周期探针恢复临时 Profile
+  后执行网侧注销，两个算力会话分别走 CANCEL 和 RELEASE，再注销正式身份。
+- Discovery 默认按意图 `executor=robot dog` 匹配 Agent skill，算力 capability 继续使用
+  `dog-vision`；增加 AST 回归测试，后续新增公开接口但未接入镜像时会直接失败。
+- Sandbox Mock 新增识别目标 PUT/GET、文本和结构化控制 POST/GET、multipart 语音控制接口，
+  并增加 `linux/amd64` Docker 构建、真实 WebRTC 烟测、归档和 SHA-256 导出脚本。
+
+### 验证内容
+
+- Mock 单元测试、Python A/B 示例测试、公开接口覆盖测试和 Python 全量测试通过；ARM64
+  端侧镜像与 amd64 Sandbox Mock 镜像均完成构建、自检、烟测及压缩归档导出。
+
 ## 2026-09-15 — 使用 executor 作为 Discovery Skill
 
 ### 修改原因

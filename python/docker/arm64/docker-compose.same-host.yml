@@ -2,7 +2,7 @@ name: agent-sdk-ab
 
 services:
   agent-a:
-    image: "${AGENT_IMAGE:-agent-connect-sdk:0.17.7-arm64}"
+    image: "${AGENT_IMAGE:-agent-connect-sdk:0.17.8-arm64}"
     container_name: agent-sdk-a
     command: ["start-agent-a.sh"]
     cap_add:
@@ -17,11 +17,16 @@ services:
       AGENT_TUN_NAME: "${AGENT_A_TUN_NAME:-agent_tun0}"
       AGENT_TUN_MTU: "${AGENT_TUN_MTU:-1280}"
       AGENT_LOG_FILE: /var/log/agent-sdk/agent-a.log
-      AGENT_TARGET_CAPABILITY: "${AGENT_TARGET_CAPABILITY:-dog-vision}"
+      AGENT_FULL_INTERFACE_SUITE: "${AGENT_FULL_INTERFACE_SUITE:-true}"
+      AGENT_TARGET_CAPABILITY: "${AGENT_TARGET_CAPABILITY:-robot dog}"
       AGENT_COMPUTE_CAPABILITY_ID: "${AGENT_COMPUTE_CAPABILITY_ID:-dog-vision}"
       AGENT_COMPUTE_CPU_MILLICORES: "${AGENT_COMPUTE_CPU_MILLICORES:-2000}"
       AGENT_COMPUTE_MEMORY_MIB: "${AGENT_COMPUTE_MEMORY_MIB:-4096}"
       AGENT_COMPUTE_TIMEOUT: "${AGENT_COMPUTE_TIMEOUT:-30}"
+      AGENT_SANDBOX_TIMEOUT: "${AGENT_SANDBOX_TIMEOUT:-15}"
+      AGENT_RECOGNITION_TARGET: "${AGENT_RECOGNITION_TARGET:-寻找穿红色衣服的人}"
+      AGENT_CONTROL_TEXT: "${AGENT_CONTROL_TEXT:-向左移动一米}"
+      AGENT_CONTROL_LANGUAGE: "${AGENT_CONTROL_LANGUAGE:-zh-CN}"
       AGENT_COMPUTE_TERMINAL_ACTION: "${AGENT_COMPUTE_TERMINAL_ACTION:-release}"
       AGENT_MEDIA_TIMEOUT: "${AGENT_MEDIA_TIMEOUT:-120}"
       AGENT_PROCESSED_FRAME_COUNT: "${AGENT_PROCESSED_FRAME_COUNT:-1}"
@@ -38,7 +43,7 @@ services:
     stop_grace_period: 15s
 
   agent-b:
-    image: "${AGENT_IMAGE:-agent-connect-sdk:0.17.7-arm64}"
+    image: "${AGENT_IMAGE:-agent-connect-sdk:0.17.8-arm64}"
     container_name: agent-sdk-b
     command: ["start-agent-b.sh"]
     cap_add:
@@ -53,7 +58,11 @@ services:
       AGENT_TUN_NAME: "${AGENT_B_TUN_NAME:-agent_tun0}"
       AGENT_TUN_MTU: "${AGENT_TUN_MTU:-1280}"
       AGENT_LOG_FILE: /var/log/agent-sdk/agent-b.log
+      AGENT_FULL_INTERFACE_SUITE: "${AGENT_FULL_INTERFACE_SUITE:-true}"
+      AGENT_SKILL: "${AGENT_SKILL:-robot dog}"
       AGENT_CAPABILITY: "${AGENT_CAPABILITY:-dog-vision}"
+      AGENT_CAPABILITY_UPDATE_PROBE: "${AGENT_CAPABILITY_UPDATE_PROBE:-full-interface-probe}"
+      AGENT_UPLOAD_CONTROL_DELAY: "${AGENT_UPLOAD_CONTROL_DELAY:-0.25}"
       AGENT_VIDEO_SOURCE: "${AGENT_VIDEO_SOURCE:-file}"
       AGENT_VIDEO_FILE: "${AGENT_VIDEO_FILE:-/opt/agent-sdk/examples/assets/video-offload-test.mp4}"
       AGENT_LOOP_VIDEO: "${AGENT_LOOP_VIDEO:-true}"

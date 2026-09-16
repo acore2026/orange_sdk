@@ -14,17 +14,17 @@ cd /root/lpx/sdk/python
 默认生成：
 
 ```text
-镜像：agent-connect-sdk:0.17.7-arm64
-归档：dist/arm64/agent-connect-sdk-0.17.7-linux-arm64.tar.gz
-校验：dist/arm64/agent-connect-sdk-0.17.7-linux-arm64.tar.gz.sha256
+镜像：agent-connect-sdk:0.17.8-arm64
+归档：dist/arm64/agent-connect-sdk-0.17.8-linux-arm64.tar.gz
+校验：dist/arm64/agent-connect-sdk-0.17.8-linux-arm64.tar.gz.sha256
 ```
 
 ARM64 目标机导入：
 
 ```bash
-sha256sum -c agent-connect-sdk-0.17.7-linux-arm64.tar.gz.sha256
-gzip -dc agent-connect-sdk-0.17.7-linux-arm64.tar.gz | docker load
-docker image inspect --format '{{.Os}}/{{.Architecture}}' agent-connect-sdk:0.17.7-arm64
+sha256sum -c agent-connect-sdk-0.17.8-linux-arm64.tar.gz.sha256
+gzip -dc agent-connect-sdk-0.17.8-linux-arm64.tar.gz | docker load
+docker image inspect --format '{{.Os}}/{{.Architecture}}' agent-connect-sdk:0.17.8-arm64
 ```
 
 ## 同一宿主机运行 A 和 B
@@ -61,7 +61,7 @@ docker network inspect agent-sdk-access \
 
 # 从同一个 Docker 网络验证 Runtime；返回 /v1/ue/info JSON 才算可达。
 docker run --rm --network agent-sdk-access \
-  agent-connect-sdk:0.17.7-arm64 \
+  agent-connect-sdk:0.17.8-arm64 \
   curl -fsS http://172.29.100.1:8088/v1/ue/info
 
 # 先启动 B。logs --tail 读取已有日志后立即返回，不会占住当前终端。
@@ -103,22 +103,33 @@ docker exec agent-sdk-b ip route get 10.60.0.2
 `AGENT_TUN_MTU`、`AGENT_NAME`、`AGENT_OWNER`、`AGENT_REGION`、
 `AGENT_PRIORITY`、`AGENT_LOG_FILE`、`AGENT_LOG_LEVEL` 和
 `AGENT_FORCE_REGISTRATION`、`AGENT_FRESH_REGISTRATION`、
-`AGENT_DEREGISTER_ON_EXIT`。A 还支持
+`AGENT_DEREGISTER_ON_EXIT`、`AGENT_FULL_INTERFACE_SUITE`。A 还支持
 `AGENT_TARGET_ID`、`AGENT_MESSAGE_JSON`、`AGENT_GROUP_NAME`、
 `AGENT_COMPUTE_CAPABILITY_ID`、CPU/内存/GPU/镜像等正式算力约束、
-`AGENT_COMPUTE_TERMINAL_ACTION` 和 `AGENT_PROCESSED_FRAME_COUNT`。B 还支持
+`AGENT_COMPUTE_TERMINAL_ACTION`、`AGENT_SANDBOX_TIMEOUT`、
+`AGENT_RECOGNITION_TARGET`、`AGENT_CONTROL_TEXT` 和
+`AGENT_PROCESSED_FRAME_COUNT`。B 还支持
 `AGENT_WAIT_TIMEOUT`、`AGENT_VIDEO_SOURCE`、`AGENT_VIDEO_FILE`、
 `AGENT_LOOP_VIDEO`、`AGENT_VIDEO_WIDTH`、
 `AGENT_VIDEO_HEIGHT`、`AGENT_VIDEO_FPS`、`AGENT_VIDEO_BITRATE_KBPS`、
-`AGENT_MAX_SESSIONS` 和 `AGENT_THIRD_PARTY_PRIVATE_KEY`。
+`AGENT_MAX_SESSIONS`、`AGENT_UPLOAD_CONTROL_DELAY` 和
+`AGENT_THIRD_PARTY_PRIVATE_KEY`。
 
-默认验收流程中，A 创建并查询算力会话，只把 `compute_service_session_id` 发给 B；
-B 收到后循环读取镜像内的测试 MP4 并调用 `start_video_upload()`；A 收到一个处理帧后
-发送 RELEASE；
-双方内部处理 C-05，B 观察上传句柄进入 `STOPPED` 后退出。日志成功事件依次包含 A 的
-`COMPUTING_SESSION_CREATED`、`PROCESSED_VIDEO_FRAME`、
-`COMPUTING_SESSION_TERMINATED`，以及 B 的 `VIDEO_UPLOAD_STARTED`、
-`COMPUTING_SESSION_CLOSED`。
+默认 `AGENT_FULL_INTERFACE_SUITE=true`。镜像通过 A/B 两个真实端侧进程覆盖当前
+Python SDK 的全部公开接口：
+
+- 初始化、三个状态属性、两个下行 listener、身份申请、Profile 恢复、本地 Reset、注销；
+- 网络能力、Agent Card 注册与增量更新、Discovery、建组、群组快照和 A2A 消息；
+- 独立 CREATE+CANCEL 探针，以及主会话 CREATE、QUERY、RELEASE 和 C-05 关闭等待；
+- Sandbox 识别目标 PUT/GET、文本/结构化控制动作 POST/GET；
+- 处理流 `recv/close` 和上传流 `pause/resume/stop`。
+
+A 的身份 Reset 探针会先恢复临时 Profile 再执行网侧注销，不会遗留临时身份；所有算力
+会话都在正式身份注销之前完成 CANCEL 或 RELEASE。主会话只把
+`compute_service_session_id` 通过 A2A 发给 B。B 默认循环读取镜像内测试 MP4，A 收到
+处理帧后发送 RELEASE。成功日志还包含 `IDENTITY_LIFECYCLE_PROBE_VERIFIED`、
+`COMPUTING_CANCEL_PROBE_VERIFIED`、`RECOGNITION_TARGET_VERIFIED`、
+`CONTROL_ACTIONS_VERIFIED`、`VIDEO_UPLOAD_PAUSED/RESUMED/STOP_VERIFIED`。
 
 如需改用真实摄像头，将 `AGENT_VIDEO_SOURCE=camera`，并在 compose 的 Agent B
 `devices` 中增加 `/dev/video0:/dev/video0`；`AGENT_CAMERA_ID`、分辨率和帧率仅在该模式
@@ -136,8 +147,9 @@ ARM 测试镜像默认设置 `AGENT_FRESH_REGISTRATION=true` 和
 `AGENT_FORCE_REGISTRATION=true`。该变量优先于默认的
 `AGENT_FRESH_REGISTRATION=true`，因此无需同时修改后者；启动脚本会传入
 `--force-registration` 并调用 SDK 的本地 `reset_agent()`。
-容器和命令行脚本的默认发现、发布及算力能力均为 `dog-vision`，与 Android 测试
-App 一致。
+默认 Discovery skill 是意图服务 `executor` 对应的 `robot dog`；正式算力 capability
+保持为 `dog-vision`。两者分别配置，不能互相替代。只需回归旧视频主链路时可设置
+`AGENT_FULL_INTERFACE_SUITE=false`。
 
 身份、Agent 状态和自动生成的 TLS 私钥保存在 `/var/lib/agent-sdk`，A、B 使用独立
 持久卷；日志保存在各自 `/var/log/agent-sdk` 卷中。停止部署使用：
@@ -146,7 +158,7 @@ App 一致。
 docker compose --env-file .env -f docker-compose.same-host.yml down
 ```
 
-## 从 0.17.6 卸载并重装 0.17.7
+## 从 0.17.7 卸载并重装 0.17.8
 
 升级前保留 `agent-a-state` 和 `agent-b-state` 卷，让新版容器第一次启动时可以读取旧
 Agent ID 并注销网侧遗留身份。不要使用 `docker compose down -v`。
@@ -154,21 +166,21 @@ Agent ID 并注销网侧遗留身份。不要使用 `docker compose down -v`。
 ```bash
 docker compose --env-file .env -f docker-compose.same-host.yml \
   down --remove-orphans
-docker image rm agent-connect-sdk:0.17.5-arm64
+docker image rm agent-connect-sdk:0.17.7-arm64
 
-sha256sum -c agent-connect-sdk-0.17.7-linux-arm64.tar.gz.sha256
-gzip -dc agent-connect-sdk-0.17.7-linux-arm64.tar.gz | docker load
+sha256sum -c agent-connect-sdk-0.17.8-linux-arm64.tar.gz.sha256
+gzip -dc agent-connect-sdk-0.17.8-linux-arm64.tar.gz | docker load
 docker image inspect --format '{{.Os}}/{{.Architecture}}' \
-  agent-connect-sdk:0.17.7-arm64
+  agent-connect-sdk:0.17.8-arm64
 ```
 
-将 `.env` 中的 `AGENT_IMAGE` 更新为 `agent-connect-sdk:0.17.7-arm64`，并使用本版本
+将 `.env` 中的 `AGENT_IMAGE` 更新为 `agent-connect-sdk:0.17.8-arm64`，并使用本版本
 随附的 `docker-compose.same-host.yml`。展开配置后应看到 A/B 的 fresh 和退出注销开关
 都为 `true`：
 
 ```bash
 docker compose --env-file .env -f docker-compose.same-host.yml config | \
-  grep -E 'image:|AGENT_FRESH_REGISTRATION|AGENT_DEREGISTER_ON_EXIT'
+  grep -E 'image:|AGENT_FULL_INTERFACE_SUITE|AGENT_FRESH_REGISTRATION|AGENT_DEREGISTER_ON_EXIT'
 
 docker compose --env-file .env -f docker-compose.same-host.yml up -d agent-b
 docker compose --env-file .env -f docker-compose.same-host.yml logs -f agent-b

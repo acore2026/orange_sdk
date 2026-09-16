@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import unittest
 from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
-from aiohttp import ClientSession, web
+from aiohttp import ClientSession, FormData, web
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
 from aiortc.mediastreams import MediaStreamTrack
 from av import CodecContext, VideoFrame
@@ -142,6 +143,96 @@ class MockVideoServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 400)
         error = await response.json()
         self.assertEqual(error["error"], "INVALID_ARGUMENT")
+
+    async def test_formal_recognition_and_control_resources(self) -> None:
+        context = {
+            "compute_service_session_id": "css-control-1",
+            "compute_instance_id": "ci-control-1",
+            "binding_ref": "binding-control-1",
+            "role": "consumer",
+            "agent_id": "agent-a",
+        }
+        recognition = await self.http.put(
+            f"{self.base}/v1/recognition-targets/css-control-1",
+            json={
+                "request_id": "recognition-1",
+                "computing_context": context,
+                "input": {"type": "TEXT", "text": "寻找红色玩偶", "language": "zh"},
+            },
+        )
+        self.assertEqual(recognition.status, 200, await recognition.text())
+        recognized = await recognition.json()
+        self.assertEqual(recognized["target_revision"], "1")
+        self.assertEqual(recognized["target"]["label"], "红色玩偶")
+        fetched = await self.http.get(
+            f"{self.base}/v1/recognition-targets/css-control-1"
+        )
+        self.assertEqual(await fetched.json(), recognized)
+
+        text_action = await self.http.post(
+            f"{self.base}/v1/control-actions",
+            json={
+                "request_id": "control-text-1",
+                "computing_context": context,
+                "input": {"type": "TEXT", "text": "寻找杯子", "language": "zh"},
+            },
+        )
+        self.assertEqual(text_action.status, 202, await text_action.text())
+        accepted = await text_action.json()
+        self.assertEqual(accepted["normalized_action"], "search_object")
+        self.assertEqual(accepted["normalized_parameters"], {"query": "杯子"})
+        completed = await self.http.get(
+            f"{self.base}/v1/control-actions/{accepted['action_id']}"
+        )
+        self.assertEqual(completed.status, 200)
+        self.assertEqual((await completed.json())["status"], "COMPLETED")
+
+        structured = await self.http.post(
+            f"{self.base}/v1/control-actions",
+            json={
+                "request_id": "control-structured-1",
+                "computing_context": context,
+                "input": {"type": "STRUCTURED"},
+                "action": "movement",
+                "parameters": {"direction": "right"},
+            },
+        )
+        self.assertEqual(structured.status, 202, await structured.text())
+        structured_body = await structured.json()
+        self.assertEqual(structured_body["normalized_action"], "movement")
+        self.assertEqual(
+            structured_body["normalized_parameters"],
+            {"direction": "right"},
+        )
+
+    async def test_formal_audio_control_resource(self) -> None:
+        context = {
+            "compute_service_session_id": "css-audio-1",
+            "compute_instance_id": "ci-audio-1",
+            "binding_ref": "binding-audio-1",
+            "role": "consumer",
+            "agent_id": "agent-a",
+        }
+        form = FormData()
+        form.add_field("request_id", "control-audio-1")
+        form.add_field("computing_context", json.dumps(context))
+        form.add_field("language", "zh")
+        form.add_field(
+            "file",
+            b"RIFFmock-wave-bytes",
+            filename="command.wav",
+            content_type="audio/wav",
+        )
+        response = await self.http.post(
+            f"{self.base}/v1/audio-control-actions",
+            data=form,
+        )
+        self.assertEqual(response.status, 202, await response.text())
+        result = await response.json()
+        self.assertEqual(result["normalized_action"], "movement")
+        self.assertEqual(result["normalized_parameters"], {"direction": "left"})
+        self.assertEqual(result["transcription"]["text"], "向左移动")
+        self.assertEqual(result["transcription"]["language"], "zh")
 
     async def test_formal_media_connections_are_role_scoped_and_idempotent(self) -> None:
         consumer_pc = RTCPeerConnection()

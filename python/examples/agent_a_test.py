@@ -25,8 +25,14 @@ from agent_sdk import (
     ComputeRequestType,
     ComputeResources,
     ComputeSessionRequest,
+    ControlAction,
+    ControlActionRequest,
+    ControlActionTarget,
+    ControlInputType,
+    ControlTargetRole,
     NetworkMessageAction,
     NetworkMessageType,
+    __version__,
 )
 from interactive_linux_agent import EnterStepGate, InteractiveDemoAborted
 
@@ -70,6 +76,7 @@ def _create_compute_request(
     group_id: str,
     requester_agent_id: str,
     target_agent_id: str,
+    request_id: str | None = None,
 ) -> ComputeSessionRequest:
     resources = ComputeResources(
         cpu_millicores=args.compute_cpu_millicores,
@@ -81,7 +88,7 @@ def _create_compute_request(
         message_type=COMPUTE_REQUEST_MESSAGE_TYPE,
         request_type=ComputeRequestType.CREATE,
         input_format=ComputeInputFormat.STRUCTURED,
-        request_id=args.compute_request_id or str(uuid.uuid4()),
+        request_id=request_id or args.compute_request_id or str(uuid.uuid4()),
         acn_context=AcnContext(
             group_id=group_id,
             requester_agent_id=requester_agent_id,
@@ -117,6 +124,13 @@ def _compute_control_request(
 
 def _compute_session_message(compute_service_session_id: str) -> Mapping[str, str]:
     return {COMPUTE_SESSION_ID_FIELD: compute_service_session_id}
+
+
+def _control_target(target_agent_id: str) -> ControlActionTarget:
+    return ControlActionTarget(
+        role=ControlTargetRole.PRODUCER,
+        agent_id=target_agent_id,
+    )
 
 
 def _frame_details(frame: Any) -> Mapping[str, Any]:
@@ -218,8 +232,9 @@ async def run_agent_a(
     profile = None
     completed = False
     compute_session_id: str | None = None
+    cancel_probe_session_id: str | None = None
     processed_stream = None
-    terminal_request_sent = False
+    terminal_session_closed = False
 
     try:
         await _before_step(
@@ -260,6 +275,7 @@ async def run_agent_a(
         )
         _emit(
             "SDK_INITIALIZED",
+            sdk_state=client.state if hasattr(client, "state") else "READY",
             agent_tun_cidr=initialized.agent_tun_cidr,
             agent_tcp_endpoint=initialized.agent_tcp_endpoint,
             masque_endpoint=initialized.masque_proxy_endpoint,
@@ -318,6 +334,56 @@ async def run_agent_a(
             lifecycle_state = AgentLifecycleState.NO_IDENTITY
             profile = None
 
+        if (
+            args.full_interface_suite
+            and lifecycle_state is AgentLifecycleState.NO_IDENTITY
+        ):
+            await _before_step(
+                gate,
+                "sdk.apply_identity/reset_agent/set_local_profile_for_restore/"
+                "deregister_identity",
+                "执行一次可回滚的身份生命周期探针：申请临时身份、清除本地状态、"
+                "恢复 Profile 后再向网侧注销。",
+            )
+            lifecycle_probe = await client.apply_identity(
+                owner=args.owner,
+                name=f"{args.agent_name}-Lifecycle-Probe",
+                description="Agent SDK full-interface lifecycle probe",
+                metadata={
+                    "region": args.region,
+                    "os": "Linux",
+                    "version": __version__,
+                },
+            )
+            profile = lifecycle_probe
+            reset = await client.reset_agent()
+            if not reset.success:
+                raise RuntimeError(
+                    f"Agent A lifecycle probe reset failed: {reset.message}"
+                )
+            client.set_local_profile_for_restore(lifecycle_probe)
+            restored = client.local_profile
+            if restored is None or restored.agent_id != lifecycle_probe.agent_id:
+                raise RuntimeError("Agent A lifecycle probe Profile restore failed")
+            deregistered = await client.deregister_identity(
+                lifecycle_probe.agent_id,
+                reason="replaced",
+            )
+            if not deregistered.success:
+                raise RuntimeError(
+                    "Agent A lifecycle probe deregistration failed: "
+                    f"{deregistered.message}"
+                )
+            _emit(
+                "IDENTITY_LIFECYCLE_PROBE_VERIFIED",
+                agent_id=lifecycle_probe.agent_id,
+                reset_success=reset.success,
+                restored_agent_id=restored.agent_id,
+                deregistered=deregistered.success,
+            )
+            lifecycle_state = AgentLifecycleState.NO_IDENTITY
+            profile = None
+
         if lifecycle_state is AgentLifecycleState.NO_IDENTITY:
             await _before_step(
                 gate,
@@ -331,7 +397,7 @@ async def run_agent_a(
                 metadata={
                     "region": args.region,
                     "os": "Linux",
-                    "version": "0.17.7",
+                    "version": __version__,
                 },
             )
             lifecycle_state = AgentLifecycleState.IDENTITY_READY
@@ -490,6 +556,52 @@ async def run_agent_a(
             target_agent_id=target.agent_id,
         )
 
+        if args.full_interface_suite:
+            cancel_create_request = _create_compute_request(
+                args,
+                group_id=group.group_id,
+                requester_agent_id=profile.agent_id,
+                target_agent_id=target.agent_id,
+                request_id=str(uuid.uuid4()),
+            )
+            await _before_step(
+                gate,
+                "sdk.create_computing_session/cancel_computing_session/"
+                "await_computing_session_closed",
+                "创建独立算力会话并立即取消，用于覆盖 CANCEL 和关闭等待接口。",
+            )
+            cancel_create_status = await client.create_computing_session(
+                cancel_create_request,
+                timeout_seconds=args.compute_timeout,
+            )
+            cancel_session_id = cancel_create_status.compute_service_session_id
+            if not cancel_session_id:
+                raise RuntimeError(
+                    "full-interface CANCEL probe CREATE response has no session ID"
+                )
+            cancel_probe_session_id = cancel_session_id
+            cancel_request = _compute_control_request(
+                ComputeRequestType.CANCEL,
+                cancel_session_id,
+            )
+            cancel_status = await client.cancel_computing_session(
+                cancel_request,
+                timeout_seconds=args.compute_timeout,
+            )
+            await client.await_computing_session_closed(
+                cancel_session_id,
+                timeout_seconds=args.compute_timeout,
+            )
+            cancel_probe_session_id = None
+            _emit(
+                "COMPUTING_CANCEL_PROBE_VERIFIED",
+                create_request_id=cancel_create_request.request_id,
+                cancel_request_id=cancel_request.request_id,
+                compute_service_session_id=cancel_session_id,
+                status=cancel_status.status,
+                status_revision=cancel_status.status_revision,
+            )
+
         create_request = _create_compute_request(
             args,
             group_id=group.group_id,
@@ -569,6 +681,91 @@ async def run_agent_a(
                 cause=query_status.cause,
             )
 
+        if args.full_interface_suite:
+            recognition_request_id = str(uuid.uuid4())
+            await _before_step(
+                gate,
+                "sdk.update_recognition_target/get_recognition_target",
+                "通过 C-02 Sandbox 地址写入并读取持续视觉识别目标。",
+            )
+            applied_target = await client.update_recognition_target(
+                compute_session_id,
+                recognition_request_id,
+                args.recognition_target,
+                language=args.control_language,
+                timeout_seconds=args.sandbox_timeout,
+            )
+            current_target = await client.get_recognition_target(
+                compute_session_id,
+                timeout_seconds=args.sandbox_timeout,
+            )
+            if current_target.target_revision != applied_target.target_revision:
+                raise RuntimeError(
+                    "recognition target revision changed between PUT and GET"
+                )
+            _emit(
+                "RECOGNITION_TARGET_VERIFIED",
+                request_id=applied_target.request_id,
+                target_revision=current_target.target_revision,
+                label=current_target.target.label,
+                prompt=current_target.target.prompt,
+            )
+
+            await _before_step(
+                gate,
+                "sdk.create_control_action/get_control_action",
+                "分别提交自然语言和结构化 Sandbox 控制动作并查询最终状态。",
+            )
+            text_action = await client.create_control_action(
+                compute_session_id,
+                ControlActionRequest(
+                    request_id=str(uuid.uuid4()),
+                    input_type=ControlInputType.TEXT,
+                    text=args.control_text,
+                    language=args.control_language,
+                    target=_control_target(target.agent_id),
+                ),
+                timeout_seconds=args.sandbox_timeout,
+            )
+            text_action_result = await client.get_control_action(
+                compute_session_id,
+                text_action.action_id,
+                timeout_seconds=args.sandbox_timeout,
+            )
+            structured_action = await client.create_control_action(
+                compute_session_id,
+                ControlActionRequest(
+                    request_id=str(uuid.uuid4()),
+                    input_type=ControlInputType.STRUCTURED,
+                    action=ControlAction.MOVEMENT,
+                    parameters={"direction": "forward", "distance_m": 1},
+                    target=_control_target(target.agent_id),
+                ),
+                timeout_seconds=args.sandbox_timeout,
+            )
+            structured_action_result = await client.get_control_action(
+                compute_session_id,
+                structured_action.action_id,
+                timeout_seconds=args.sandbox_timeout,
+            )
+            _emit(
+                "CONTROL_ACTIONS_VERIFIED",
+                text_action_id=text_action.action_id,
+                text_action_status=text_action_result.status,
+                text_normalized_action=(
+                    text_action.normalized_action.value
+                    if text_action.normalized_action is not None
+                    else None
+                ),
+                structured_action_id=structured_action.action_id,
+                structured_action_status=structured_action_result.status,
+                structured_normalized_action=(
+                    structured_action.normalized_action.value
+                    if structured_action.normalized_action is not None
+                    else None
+                ),
+            )
+
         await _before_step(
             gate,
             "sdk.get_processed_video_stream",
@@ -624,7 +821,6 @@ async def run_agent_a(
                     terminal_request,
                     timeout_seconds=args.compute_timeout,
                 )
-            terminal_request_sent = True
             _emit(
                 "COMPUTING_SESSION_TERMINATED",
                 action=args.terminal_action,
@@ -638,6 +834,7 @@ async def run_agent_a(
                 compute_session_id,
                 timeout_seconds=args.compute_timeout,
             )
+            terminal_session_closed = True
             _emit(
                 "COMPUTING_SESSION_CLOSED",
                 compute_service_session_id=compute_session_id,
@@ -658,10 +855,34 @@ async def run_agent_a(
         unregister_group()
         unregister_network()
         try:
+            if cancel_probe_session_id is not None:
+                try:
+                    cleanup_request = _compute_control_request(
+                        ComputeRequestType.RELEASE,
+                        cancel_probe_session_id,
+                    )
+                    await client.release_computing_session(
+                        cleanup_request,
+                        timeout_seconds=args.compute_timeout,
+                    )
+                    await client.await_computing_session_closed(
+                        cancel_probe_session_id,
+                        timeout_seconds=args.compute_timeout,
+                    )
+                    _emit(
+                        "COMPUTING_CANCEL_PROBE_RELEASED_DURING_CLEANUP",
+                        compute_service_session_id=cancel_probe_session_id,
+                    )
+                except Exception as exc:
+                    _emit(
+                        "COMPUTING_CANCEL_PROBE_CLEANUP_FAILED",
+                        compute_service_session_id=cancel_probe_session_id,
+                        error=str(exc) or repr(exc),
+                    )
             if (
                 compute_session_id is not None
                 and args.terminal_action != "none"
-                and not terminal_request_sent
+                and not terminal_session_closed
             ):
                 try:
                     cleanup_request = _compute_control_request(
@@ -734,7 +955,11 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--owner", default="ab-test-owner-a")
     value.add_argument("--description", default="Agent A video offload consumer test")
     value.add_argument("--region", default="CN")
-    value.add_argument("--target-capability", default="dog-vision")
+    value.add_argument(
+        "--target-capability",
+        default="robot dog",
+        help="Agent Card skill used for discovery; compute capability is separate",
+    )
     value.add_argument("--target-agent-id")
     value.add_argument("--priority", type=int, default=1)
     value.add_argument("--task-id", default="agent-a-to-b-test")
@@ -768,6 +993,19 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--compute-ui-locale")
     value.add_argument("--compute-request-id")
     value.add_argument("--compute-timeout", type=float, default=30.0)
+    value.add_argument(
+        "--full-interface-suite",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "exercise the reversible identity lifecycle, capability/session cancel, "
+            "recognition-target and Sandbox control APIs in addition to video"
+        ),
+    )
+    value.add_argument("--sandbox-timeout", type=float, default=15.0)
+    value.add_argument("--recognition-target", default="寻找穿红色衣服的人")
+    value.add_argument("--control-text", default="向左移动一米")
+    value.add_argument("--control-language", default="zh-CN")
     value.add_argument(
         "--allow-base-qos",
         action=argparse.BooleanOptionalAction,
@@ -834,6 +1072,7 @@ async def main(args: argparse.Namespace) -> None:
     _emit(
         "TEST_STARTING",
         interactive=args.prompt,
+        full_interface_suite=args.full_interface_suite,
         fresh_registration=args.fresh_registration,
         force_registration=args.force_registration,
         deregister_on_exit=args.deregister_on_exit,

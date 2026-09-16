@@ -8,7 +8,7 @@ import asyncio
 import json
 
 import numpy as np
-from aiohttp import ClientSession
+from aiohttp import ClientSession, FormData
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
 from av import VideoFrame
 
@@ -83,6 +83,65 @@ async def run(base_url: str) -> dict[str, object]:
     }
     async with ClientSession() as http:
         try:
+            consumer_context = {
+                **base_context,
+                "role": "consumer",
+                "agent_id": "agent-a",
+            }
+            recognition_response = await http.put(
+                f"{base_url}/v1/recognition-targets/{base_context['compute_service_session_id']}",
+                json={
+                    "request_id": "recognition-smoke",
+                    "computing_context": consumer_context,
+                    "input": {"type": "TEXT", "text": "寻找红色玩偶", "language": "zh"},
+                },
+            )
+            recognition_response.raise_for_status()
+            recognition = await recognition_response.json()
+            fetched_recognition_response = await http.get(
+                f"{base_url}/v1/recognition-targets/{base_context['compute_service_session_id']}"
+            )
+            fetched_recognition_response.raise_for_status()
+            if await fetched_recognition_response.json() != recognition:
+                raise RuntimeError("recognition target GET did not return the applied target")
+
+            control_response = await http.post(
+                f"{base_url}/v1/control-actions",
+                json={
+                    "request_id": "control-smoke",
+                    "computing_context": consumer_context,
+                    "input": {"type": "TEXT", "text": "寻找杯子", "language": "zh"},
+                },
+            )
+            control_response.raise_for_status()
+            control = await control_response.json()
+            action_response = await http.get(
+                f"{base_url}/v1/control-actions/{control['action_id']}"
+            )
+            action_response.raise_for_status()
+            completed_action = await action_response.json()
+            if completed_action.get("status") != "COMPLETED":
+                raise RuntimeError("control action did not complete")
+
+            audio_form = FormData()
+            audio_form.add_field("request_id", "audio-control-smoke")
+            audio_form.add_field("computing_context", json.dumps(consumer_context))
+            audio_form.add_field("language", "zh")
+            audio_form.add_field(
+                "file",
+                b"RIFFmock-wave-bytes",
+                filename="command.wav",
+                content_type="audio/wav",
+            )
+            audio_response = await http.post(
+                f"{base_url}/v1/audio-control-actions",
+                data=audio_form,
+            )
+            audio_response.raise_for_status()
+            audio_control = await audio_response.json()
+            if not audio_control.get("transcription", {}).get("text"):
+                raise RuntimeError("audio control response has no transcription")
+
             consumer_pc = RTCPeerConnection()
             peers.append(consumer_pc)
             track_ready = asyncio.get_running_loop().create_future()
@@ -98,7 +157,7 @@ async def run(base_url: str) -> dict[str, object]:
                 base_url,
                 consumer_pc,
                 request_id="media-consumer-smoke",
-                context={**base_context, "role": "consumer", "agent_id": "agent-a"},
+                context=consumer_context,
             )
             connection_ids.append(str(consumer_result["media_connection_id"]))
             remote_track = await asyncio.wait_for(track_ready, 8)
@@ -141,6 +200,9 @@ async def run(base_url: str) -> dict[str, object]:
                 "processed_frame": f"{frame.width}x{frame.height}",
                 "processed_marker_bgr": marker,
                 "consumer_track_reused": True,
+                "recognition_target_revision": recognition["target_revision"],
+                "text_control_action": control["normalized_action"],
+                "audio_transcription": audio_control["transcription"]["text"],
             }
         finally:
             try:

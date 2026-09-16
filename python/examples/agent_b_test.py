@@ -21,6 +21,7 @@ from agent_sdk import (
     AgentSdk,
     NetworkMessageAction,
     NetworkMessageType,
+    __version__,
 )
 from interactive_linux_agent import EnterStepGate, InteractiveDemoAborted
 
@@ -315,7 +316,7 @@ async def run_agent_b(
                 metadata={
                     "region": args.region,
                     "os": "Linux",
-                    "version": "0.17.7",
+                    "version": __version__,
                 },
             )
             lifecycle_state = AgentLifecycleState.IDENTITY_READY
@@ -349,7 +350,19 @@ async def run_agent_b(
                 profile.agent_id,
                 priority=args.priority,
                 credentials=[ability.ability_vc],
-                capabilities=list(dict.fromkeys((args.agent_skill, args.capability))),
+                capabilities=list(
+                    dict.fromkeys(
+                        (
+                            args.agent_skill,
+                            args.capability,
+                            *(
+                                (args.capability_update_probe,)
+                                if args.full_interface_suite
+                                else ()
+                            ),
+                        )
+                    )
+                ),
                 test_vc_private_key_path=args.third_party_private_key,
             )
             if not registration.success:
@@ -363,6 +376,30 @@ async def run_agent_b(
                 "PROFILE_REUSED",
                 agent_id=profile.agent_id,
                 reason="Agent Card is already published; skip register_capabilities",
+            )
+        if args.full_interface_suite:
+            await _before_step(
+                gate,
+                "sdk.update_capabilities",
+                "删除仅用于本次测试的临时 skill，验证 Agent Card 增量更新接口。",
+            )
+            updated = await client.update_capabilities(
+                profile.agent_id,
+                [
+                    {
+                        "update_type": "remove_skill",
+                        "skill_name": args.capability_update_probe,
+                    }
+                ],
+                credentials=[],
+            )
+            if not updated.success:
+                raise RuntimeError(
+                    f"Agent B capability update failed: {updated.message}"
+                )
+            _emit(
+                "CAPABILITY_UPDATE_VERIFIED",
+                removed_skill=args.capability_update_probe,
             )
         _emit(
             "B_READY",
@@ -440,6 +477,20 @@ async def run_agent_b(
                 fps=args.video_fps,
                 bitrate_kbps=args.video_bitrate_kbps,
             )
+            if args.full_interface_suite:
+                await active_upload.pause()
+                _emit(
+                    "VIDEO_UPLOAD_PAUSED",
+                    compute_service_session_id=session_id,
+                    state=active_upload.state,
+                )
+                await asyncio.sleep(args.upload_control_delay)
+                await active_upload.resume()
+                _emit(
+                    "VIDEO_UPLOAD_RESUMED",
+                    compute_service_session_id=session_id,
+                    state=active_upload.state,
+                )
 
             remotely_closed = await _wait_for_upload_close(
                 active_upload,
@@ -452,6 +503,12 @@ async def run_agent_b(
                     compute_service_session_id=session_id,
                 )
                 break
+            await active_upload.stop()
+            _emit(
+                "VIDEO_UPLOAD_STOP_VERIFIED",
+                compute_service_session_id=session_id,
+                state=active_upload.state,
+            )
             completed_sessions.append(session_id)
             _emit(
                 "COMPUTING_SESSION_CLOSED",
@@ -523,6 +580,23 @@ def parser() -> argparse.ArgumentParser:
         help="Agent Card skill matched against the intent response executor",
     )
     value.add_argument("--capability", default="dog-vision")
+    value.add_argument(
+        "--full-interface-suite",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="exercise Agent Card update plus video upload pause/resume/stop",
+    )
+    value.add_argument(
+        "--capability-update-probe",
+        default="full-interface-probe",
+        help="temporary skill published and removed while testing update_capabilities",
+    )
+    value.add_argument(
+        "--upload-control-delay",
+        type=float,
+        default=0.25,
+        help="seconds between pausing and resuming the producer track",
+    )
     value.add_argument("--priority", type=int, default=1)
     value.add_argument(
         "--third-party-private-key",
@@ -614,6 +688,7 @@ async def main(args: argparse.Namespace) -> None:
     _emit(
         "TEST_STARTING",
         interactive=args.prompt,
+        full_interface_suite=args.full_interface_suite,
         fresh_registration=args.fresh_registration,
         force_registration=args.force_registration,
         deregister_on_exit=args.deregister_on_exit,

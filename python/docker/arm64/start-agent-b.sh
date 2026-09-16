@@ -71,6 +71,9 @@ set -- \
     --description "${AGENT_DESCRIPTION:-Agent B video offload producer test}" \
     --region "${AGENT_REGION:-CN}" \
     --capability "${AGENT_CAPABILITY:-dog-vision}" \
+    --agent-skill "${AGENT_SKILL:-robot dog}" \
+    --capability-update-probe "${AGENT_CAPABILITY_UPDATE_PROBE:-full-interface-probe}" \
+    --upload-control-delay "${AGENT_UPLOAD_CONTROL_DELAY:-0.25}" \
     --priority "${AGENT_PRIORITY:-1}" \
     --wait-timeout "${AGENT_WAIT_TIMEOUT:-0}" \
     --video-source "${AGENT_VIDEO_SOURCE}" \
@@ -94,6 +97,11 @@ if [ -n "${AGENT_THIRD_PARTY_PRIVATE_KEY:-}" ]; then
 fi
 if ! is_true "${AGENT_LOOP_VIDEO:-true}"; then
     set -- "$@" --no-loop-video
+fi
+if is_true "${AGENT_FULL_INTERFACE_SUITE:-true}"; then
+    set -- "$@" --full-interface-suite
+else
+    set -- "$@" --no-full-interface-suite
 fi
 if is_true "${AGENT_FORCE_REGISTRATION:-false}"; then
     set -- "$@" --force-registration

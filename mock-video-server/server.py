@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import fractions
+import json
 import logging
 import os
 import time
@@ -150,6 +151,52 @@ class MediaConnectionRecord:
     pc: RTCPeerConnection
     consumer: ConsumerConnection | None = None
     deleted: bool = False
+
+
+@dataclass
+class RecognitionTargetRecord:
+    request_id: str
+    computing_context: dict[str, str]
+    target_revision: str
+    label: str
+    prompt: str
+
+    def response(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "computing_context": self.computing_context,
+            "status": "APPLIED",
+            "target_revision": self.target_revision,
+            "target": {"label": self.label, "prompt": self.prompt},
+        }
+
+
+@dataclass
+class ControlActionRecord:
+    request_id: str
+    action_id: str
+    computing_context: dict[str, str]
+    normalized_action: str
+    normalized_parameters: dict[str, Any]
+    transcription: dict[str, Any] | None = None
+
+    def response(self, *, completed: bool) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "request_id": self.request_id,
+            "action_id": self.action_id,
+            "computing_context": self.computing_context,
+            "normalized_action": self.normalized_action,
+            "normalized_parameters": self.normalized_parameters,
+            "status": "COMPLETED" if completed else "RUNNING",
+            "result": {
+                "phase": "completed" if completed else "started",
+                "mock": True,
+            },
+            "cause": "",
+        }
+        if self.transcription is not None:
+            result["transcription"] = self.transcription
+        return result
 
 
 async def refresh_consumer_stats(connection: ConsumerConnection) -> None:
@@ -522,11 +569,14 @@ class MockVideoServer:
         self.media_connections: dict[str, MediaConnectionRecord] = {}
         self.media_requests: dict[tuple[str, str, str], MediaConnectionRecord] = {}
         self.active_media: dict[tuple[str, str], str] = {}
+        self.recognition_targets: dict[str, RecognitionTargetRecord] = {}
+        self.control_actions: dict[str, ControlActionRecord] = {}
+        self.control_requests: dict[tuple[str, str], ControlActionRecord] = {}
 
     def create_app(self) -> web.Application:
         app = web.Application(
             middlewares=[api_error_middleware],
-            client_max_size=2 * 1024 * 1024,
+            client_max_size=52 * 1024 * 1024,
         )
         app.router.add_get("/healthz", self.health)
         app.router.add_get("/debug/v1/sessions", self.list_sessions)
@@ -535,6 +585,23 @@ class MockVideoServer:
         app.router.add_delete(
             "/v1/media-connections/{media_connection_id}",
             self.delete_media_connection,
+        )
+        app.router.add_put(
+            "/v1/recognition-targets/{compute_service_session_id}",
+            self.update_recognition_target,
+        )
+        app.router.add_get(
+            "/v1/recognition-targets/{compute_service_session_id}",
+            self.get_recognition_target,
+        )
+        app.router.add_post("/v1/control-actions", self.create_control_action)
+        app.router.add_get(
+            "/v1/control-actions/{action_id}",
+            self.get_control_action,
+        )
+        app.router.add_post(
+            "/v1/audio-control-actions",
+            self.create_audio_control_action,
         )
         app.router.add_post("/video/v1/sessions/{session_id}/source", self.source)
         app.router.add_post("/video/v1/sessions/{session_id}/source/stop", self.stop_source)
@@ -551,6 +618,8 @@ class MockVideoServer:
                 "output_fps": self.output_fps,
                 "h264_rtp_payload_bytes": H264_RTP_PAYLOAD_BYTES,
                 "sessions": len(self.sessions),
+                "recognition_targets": len(self.recognition_targets),
+                "control_actions": len(self.control_actions),
             }
         )
 
@@ -753,6 +822,135 @@ class MockVideoServer:
         LOG.info("U-MEDIA connection deleted id=%s role=%s", connection_id, record.role)
         return web.Response(status=204)
 
+    async def update_recognition_target(self, request: web.Request) -> web.Response:
+        session_id = request.match_info["compute_service_session_id"]
+        body = await self._json(request)
+        request_id = self._required_string(body, "request_id")
+        context = self._computing_context(body)
+        self._require_consumer_session_path(context, session_id)
+        raw_input = body.get("input")
+        if not isinstance(raw_input, dict) or raw_input.get("type") != "TEXT":
+            raise ApiError(400, "INVALID_ARGUMENT", "input.type must be TEXT")
+        text = self._required_string(raw_input, "text", "input")
+        revision = str(
+            int(self.recognition_targets.get(session_id).target_revision) + 1
+            if session_id in self.recognition_targets
+            else 1
+        )
+        label = self._recognition_label(text)
+        record = RecognitionTargetRecord(
+            request_id=request_id,
+            computing_context=context,
+            target_revision=revision,
+            label=label,
+            prompt=text,
+        )
+        self.recognition_targets[session_id] = record
+        LOG.info(
+            "recognition target applied session=%s revision=%s label=%s",
+            session_id,
+            revision,
+            label,
+        )
+        return web.json_response(record.response())
+
+    async def get_recognition_target(self, request: web.Request) -> web.Response:
+        session_id = request.match_info["compute_service_session_id"]
+        record = self.recognition_targets.get(session_id)
+        if record is None:
+            raise ApiError(404, "recognition-target-not-set", "recognition target is not set")
+        return web.json_response(record.response())
+
+    async def create_control_action(self, request: web.Request) -> web.Response:
+        body = await self._json(request)
+        request_id = self._required_string(body, "request_id")
+        context = self._computing_context(body)
+        self._require_consumer_context(context)
+        request_key = (context["binding_ref"], request_id)
+        previous = self.control_requests.get(request_key)
+        if previous is not None:
+            return web.json_response(previous.response(completed=False), status=202)
+        action, parameters = self._normalize_control_action(body)
+        record = ControlActionRecord(
+            request_id=request_id,
+            action_id=f"action-{uuid.uuid4()}",
+            computing_context=context,
+            normalized_action=action,
+            normalized_parameters=parameters,
+        )
+        self.control_actions[record.action_id] = record
+        self.control_requests[request_key] = record
+        LOG.info(
+            "control action accepted id=%s session=%s action=%s",
+            record.action_id,
+            context["compute_service_session_id"],
+            action,
+        )
+        return web.json_response(record.response(completed=False), status=202)
+
+    async def get_control_action(self, request: web.Request) -> web.Response:
+        action_id = request.match_info["action_id"]
+        record = self.control_actions.get(action_id)
+        if record is None:
+            raise ApiError(404, "action-not-found", "control action was not found")
+        return web.json_response(record.response(completed=True))
+
+    async def create_audio_control_action(self, request: web.Request) -> web.Response:
+        if not request.content_type.startswith("multipart/"):
+            raise ApiError(415, "UNSUPPORTED_MEDIA_TYPE", "multipart/form-data is required")
+        reader = await request.multipart()
+        fields: dict[str, str] = {}
+        audio = b""
+        audio_filename = ""
+        async for field in reader:
+            if field.name == "file" and field.filename:
+                audio_filename = field.filename
+                audio = await field.read(decode=False)
+            else:
+                fields[str(field.name)] = await field.text()
+        if not audio or not audio_filename:
+            raise ApiError(400, "INVALID_ARGUMENT", "file must contain audio bytes")
+        request_id = fields.get("request_id", "").strip()
+        if not request_id:
+            raise ApiError(400, "INVALID_ARGUMENT", "request_id is required")
+        try:
+            raw_context = json.loads(fields.get("computing_context", ""))
+        except (TypeError, ValueError) as error:
+            raise ApiError(
+                400,
+                "INVALID_ARGUMENT",
+                "computing_context must be a JSON object",
+            ) from error
+        context = self._computing_context({"computing_context": raw_context})
+        self._require_consumer_context(context)
+        request_key = (context["binding_ref"], request_id)
+        previous = self.control_requests.get(request_key)
+        if previous is not None:
+            return web.json_response(previous.response(completed=False), status=202)
+        transcript = os.getenv("MOCK_AUDIO_TRANSCRIPTION_TEXT", "向左移动")
+        record = ControlActionRecord(
+            request_id=request_id,
+            action_id=f"audio-action-{uuid.uuid4()}",
+            computing_context=context,
+            normalized_action="movement",
+            normalized_parameters={"direction": "left"},
+            transcription={
+                "text": transcript,
+                "language": fields.get("language", "zh") or "zh",
+                "transcript_id": f"transcript-{uuid.uuid4()}",
+            },
+        )
+        self.control_actions[record.action_id] = record
+        self.control_requests[request_key] = record
+        LOG.info(
+            "audio control action accepted id=%s session=%s file=%s bytes=%s",
+            record.action_id,
+            context["compute_service_session_id"],
+            audio_filename,
+            len(audio),
+        )
+        return web.json_response(record.response(completed=False), status=202)
+
     async def _answer_producer_offer(
         self,
         session: VideoSession,
@@ -888,6 +1086,71 @@ class MockVideoServer:
         if known_agent != context["agent_id"]:
             raise ApiError(409, "BINDING_CONTEXT_MISMATCH", "binding role Agent changed")
         return context
+
+    @staticmethod
+    def _require_consumer_context(context: dict[str, str]) -> None:
+        if context["role"] != "consumer":
+            raise ApiError(
+                409,
+                "CONSUMER_BINDING_REQUIRED",
+                "this resource requires a consumer computing context",
+            )
+
+    def _require_consumer_session_path(
+        self,
+        context: dict[str, str],
+        session_id: str,
+    ) -> None:
+        self._require_consumer_context(context)
+        if context["compute_service_session_id"] != session_id:
+            raise ApiError(
+                409,
+                "BINDING_CONTEXT_MISMATCH",
+                "path session does not match computing_context",
+            )
+
+    @staticmethod
+    def _recognition_label(text: str) -> str:
+        for prefix in ("寻找", "查找", "识别", "检测", "find", "detect"):
+            if text.lower().startswith(prefix.lower()):
+                label = text[len(prefix):].strip(" ：:")
+                if label:
+                    return label
+        return text
+
+    def _normalize_control_action(
+        self,
+        body: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        raw_input = body.get("input")
+        if not isinstance(raw_input, dict):
+            raise ApiError(400, "INVALID_ARGUMENT", "input must be an object")
+        input_type = raw_input.get("type")
+        if input_type == "STRUCTURED":
+            action = self._required_string(body, "action")
+            if action not in {"movement", "grab", "search_object"}:
+                raise ApiError(400, "INVALID_ARGUMENT", "action is not supported")
+            parameters = body.get("parameters")
+            if not isinstance(parameters, dict):
+                raise ApiError(400, "INVALID_ARGUMENT", "parameters must be an object")
+            return action, dict(parameters)
+        if input_type != "TEXT":
+            raise ApiError(400, "INVALID_ARGUMENT", "input.type must be TEXT or STRUCTURED")
+        text = self._required_string(raw_input, "text", "input")
+        lowered = text.lower()
+        if any(token in lowered for token in ("寻找", "查找", "搜索", "find", "search")):
+            query = text
+            for token in ("寻找", "查找", "搜索", "find", "search"):
+                query = query.replace(token, "")
+            return "search_object", {"query": query.strip(" ：:") or "object"}
+        if any(token in lowered for token in ("抓", "拿", "grab", "pick")):
+            return "grab", {"object": text}
+        direction = "left" if "左" in text or "left" in lowered else (
+            "right" if "右" in text or "right" in lowered else (
+                "backward" if "后" in text or "back" in lowered else "forward"
+            )
+        )
+        return "movement", {"direction": direction}
 
     def _binding_session(self, context: dict[str, str]) -> VideoSession:
         binding_ref = context["binding_ref"]

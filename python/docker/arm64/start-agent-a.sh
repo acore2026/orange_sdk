@@ -53,7 +53,7 @@ set -- \
     --owner "${AGENT_OWNER:-ab-test-owner-a}" \
     --description "${AGENT_DESCRIPTION:-Agent A video offload consumer test}" \
     --region "${AGENT_REGION:-CN}" \
-    --target-capability "${AGENT_TARGET_CAPABILITY:-${AGENT_COMPUTE_CAPABILITY_ID}}" \
+    --target-capability "${AGENT_TARGET_CAPABILITY:-robot dog}" \
     --priority "${AGENT_PRIORITY:-1}" \
     --task-id "${AGENT_TASK_ID:-agent-a-to-b-test}" \
     --task-description "${AGENT_TASK_DESCRIPTION:-discover a video offload Agent B}" \
@@ -70,6 +70,10 @@ set -- \
     --compute-cpu-millicores "${AGENT_COMPUTE_CPU_MILLICORES:-2000}" \
     --compute-memory-mib "${AGENT_COMPUTE_MEMORY_MIB:-4096}" \
     --compute-timeout "${AGENT_COMPUTE_TIMEOUT:-30}" \
+    --sandbox-timeout "${AGENT_SANDBOX_TIMEOUT:-15}" \
+    --recognition-target "${AGENT_RECOGNITION_TARGET:-寻找穿红色衣服的人}" \
+    --control-text "${AGENT_CONTROL_TEXT:-向左移动一米}" \
+    --control-language "${AGENT_CONTROL_LANGUAGE:-zh-CN}" \
     --terminal-action "${AGENT_COMPUTE_TERMINAL_ACTION:-release}" \
     --media-timeout "${AGENT_MEDIA_TIMEOUT:-120}" \
     --frame-count "${AGENT_PROCESSED_FRAME_COUNT:-1}" \
@@ -118,6 +122,11 @@ if ! is_true "${AGENT_COMPUTE_ALLOW_BASE_QOS:-true}"; then
 fi
 if ! is_true "${AGENT_COMPUTE_QUERY_SESSION:-true}"; then
     set -- "$@" --no-query-session
+fi
+if is_true "${AGENT_FULL_INTERFACE_SUITE:-true}"; then
+    set -- "$@" --full-interface-suite
+else
+    set -- "$@" --no-full-interface-suite
 fi
 if is_true "${AGENT_FORCE_REGISTRATION:-false}"; then
     set -- "$@" --force-registration

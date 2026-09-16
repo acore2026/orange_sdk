@@ -1,7 +1,10 @@
 services:
   mock-video-server:
+    image: "${COMPUTE_MOCK_IMAGE:-agent-compute-sandbox-mock:0.2.0-amd64}"
     build:
       context: .
+      args:
+        MOCK_VERSION: "0.2.0"
     container_name: agent-sdk-mock-video-server
     restart: unless-stopped
     cap_add:
@@ -15,6 +18,7 @@ services:
       LOG_LEVEL: "INFO"
       MOCK_VIDEO_OUTPUT_FPS: "30"
       MOCK_VIDEO_H264_RTP_PAYLOAD_BYTES: "1150"
+      MOCK_AUDIO_TRANSCRIPTION_TEXT: "向左移动"
     networks:
       n6:
         ipv4_address: 172.30.0.10
