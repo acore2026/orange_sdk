@@ -14,17 +14,17 @@ cd /root/lpx/sdk/python
 默认生成：
 
 ```text
-镜像：agent-connect-sdk:0.17.8-arm64
-归档：dist/arm64/agent-connect-sdk-0.17.8-linux-arm64.tar.gz
-校验：dist/arm64/agent-connect-sdk-0.17.8-linux-arm64.tar.gz.sha256
+镜像：agent-connect-sdk:0.17.9-arm64
+归档：dist/arm64/agent-connect-sdk-0.17.9-linux-arm64.tar.gz
+校验：dist/arm64/agent-connect-sdk-0.17.9-linux-arm64.tar.gz.sha256
 ```
 
 ARM64 目标机导入：
 
 ```bash
-sha256sum -c agent-connect-sdk-0.17.8-linux-arm64.tar.gz.sha256
-gzip -dc agent-connect-sdk-0.17.8-linux-arm64.tar.gz | docker load
-docker image inspect --format '{{.Os}}/{{.Architecture}}' agent-connect-sdk:0.17.8-arm64
+sha256sum -c agent-connect-sdk-0.17.9-linux-arm64.tar.gz.sha256
+gzip -dc agent-connect-sdk-0.17.9-linux-arm64.tar.gz | docker load
+docker image inspect --format '{{.Os}}/{{.Architecture}}' agent-connect-sdk:0.17.9-arm64
 ```
 
 ## 同一宿主机运行 A 和 B
@@ -50,31 +50,22 @@ Runtime 必须监听宿主机可达地址（例如 `0.0.0.0:8088`、`0.0.0.0:808
 Agent B 默认循环读取镜像内
 `/opt/agent-sdk/examples/assets/video-offload-test.mp4`，不要求宿主机提供摄像头设备。
 
+目标 ARM 主机只需执行两个宿主机脚本。建议先启动 B，再启动 A：
+
 ```bash
-cp same-host.env.example .env
-# 如果 172.29.100.0/24 与现网冲突，先整体修改 .env 中的网段和地址。
-
-# 创建容器和专用网络但暂不启动，然后读取目标 ARM 主机上的实际网关。
-docker compose --env-file .env -f docker-compose.same-host.yml create
-docker network inspect agent-sdk-access \
-  --format '{{range .IPAM.Config}}subnet={{.Subnet}} gateway={{.Gateway}}{{end}}'
-
-# 从同一个 Docker 网络验证 Runtime；返回 /v1/ue/info JSON 才算可达。
-docker run --rm --network agent-sdk-access \
-  agent-connect-sdk:0.17.8-arm64 \
-  curl -fsS http://172.29.100.1:8088/v1/ue/info
-
-# 先启动 B。logs --tail 读取已有日志后立即返回，不会占住当前终端。
-docker compose --env-file .env -f docker-compose.same-host.yml up -d agent-b
-docker compose --env-file .env -f docker-compose.same-host.yml logs --tail=100 agent-b
-
-# 看到 B_READY 后启动 A，然后持续跟随算力会话和视频日志。
-docker compose --env-file .env -f docker-compose.same-host.yml up -d agent-a
-docker compose --env-file .env -f docker-compose.same-host.yml logs -f agent-a agent-b
+./start-agent-b.sh fresh-register
+./start-agent-a.sh fresh-register
 ```
 
-`logs -f` 只是前台跟随日志；按 `Ctrl+C` 只会停止跟随，不会停止已用
-`up -d` 启动的容器。需要再次查看日志时，重新执行最后一条命令即可。
+脚本会在缺少 `.env` 时从 `same-host.env.example` 自动创建，校验 Compose 配置，按需校验并
+导入同目录或 `../../dist/arm64` 中的 ARM64 镜像归档，然后创建网络、重建并启动对应容器。
+如果原容器仍在运行或已经停止，都会重建并重新启动。脚本分别等待 `B_READY` 和
+`GROUP_CREATED`，失败时直接打印容器日志并返回非零状态。因此正常启动不再需要手工执行
+`docker compose create/up/logs`、`docker network inspect` 或 `docker run curl`。
+
+首次运行前如需修改地址或网段，可以先执行 `cp same-host.env.example .env` 并编辑 `.env`；
+如果默认配置适用，直接运行启动脚本即可。`AGENT_IMAGE_ARCHIVE` 可显式指定镜像归档，
+`AGENT_START_TIMEOUT` 可修改就绪等待秒数。
 
 AgentRuntime 地址就是在 `.env` 中指定：A 默认使用
 `AGENT_A_RUNTIME_IP=172.29.100.1`、端口 `8088`；B 使用相同宿主机 bridge 网关、
@@ -95,21 +86,20 @@ docker exec agent-sdk-b ip route get 10.60.0.2
 前两个命令应显示不同的 bridge 地址和各自 TUN；后两个命令必须指向各自容器内的
 `agent_tun0`，宿主机上不应出现 `10.60.0.2/32` 或 `10.60.0.3/32` 的本地接口。
 
-单容器直接运行时，`start-agent-a.sh` 和 `start-agent-b.sh` 通过环境变量接收业务配置，
-并接受一个可选的身份注册模式参数：
+`start-agent-a.sh` 和 `start-agent-b.sh` 是宿主机 Compose 启动器，注册模式是必填参数：
 
 ```bash
-start-agent-a.sh fresh-register
-start-agent-b.sh fresh-register
+./start-agent-a.sh fresh-register
+./start-agent-b.sh fresh-register
 # 或跳过网侧注销，直接把本地生命周期硬重置到状态1：
-start-agent-a.sh force-register
-start-agent-b.sh force-register
+./start-agent-a.sh force-register
+./start-agent-b.sh force-register
 ```
 
-`fresh-register` 会先注销状态卷中恢复出的网侧身份，注销成功后再注册；`force-register`
-只调用本地 `reset_agent()` 清除 Profile/Card 状态，再从状态1重新注册，不发送旧身份注销请求。
-命令行参数优先于兼容保留的 `AGENT_FORCE_REGISTRATION` 和
-`AGENT_FRESH_REGISTRATION` 环境变量。
+`fresh-register` 会正常停止原容器，使其先注销当前身份；新容器再注销状态卷中恢复出的
+遗留身份并重新注册。`force-register` 会强制停止并删除原容器，避免退出钩子发送注销，
+新容器只调用本地 `reset_agent()` 清除 Profile/Card 状态，再从状态1注册。容器镜像内部的
+`run-agent-a.sh` 和 `run-agent-b.sh` 负责把模式及环境变量转换为 Python 示例参数。
 `AGENT_RUNTIME_IP` 必须是容器可达的 Runtime IPv4 地址。CONNECT-IP 外层源地址由
 容器内的系统路由自动选择，不再配置 `LOCAL_VLAN_IP`。
 
@@ -149,7 +139,7 @@ A 的身份 Reset 探针会先恢复临时 Profile 再执行网侧注销，不�
 `devices` 中增加 `/dev/video0:/dev/video0`；`AGENT_CAMERA_ID`、分辨率和帧率仅在该模式
 生效。自定义本地视频应挂载进容器，并将 `AGENT_VIDEO_FILE` 指向容器内路径。
 
-Compose 默认以 `AGENT_REGISTRATION_MODE=fresh-register` 参数启动 A/B，同时保留
+主机启动器将命令行模式写入 `AGENT_REGISTRATION_MODE` 后启动 A/B，同时保留
 `AGENT_FRESH_REGISTRATION=true` 和
 `AGENT_DEREGISTER_ON_EXIT=true`。每次启动时，如果状态卷中存在上次测试的身份，脚本
 先向网侧注销该身份；只有注销成功才重新执行身份申请、网络能力获取和 Agent Card
@@ -158,10 +148,10 @@ Compose 默认以 `AGENT_REGISTRATION_MODE=fresh-register` 参数启动 A/B，�
 的 Agent ID。需要临时恢复旧的复用行为时，必须显式设置
 `AGENT_FRESH_REGISTRATION=false`；测试验收不应这样设置。
 
-需要直接丢弃本地 Profile/Card 状态并重新申请身份、且不向网侧注销旧身份时，设置
-`AGENT_FORCE_REGISTRATION=true`。该变量优先于默认的
-`AGENT_FRESH_REGISTRATION=true`，因此无需同时修改后者；启动脚本会传入
-`--force-registration` 并调用 SDK 的本地 `reset_agent()`。
+需要直接丢弃本地 Profile/Card 状态并重新申请身份、且不向网侧注销旧身份时，执行
+`./start-agent-a.sh force-register` 或 `./start-agent-b.sh force-register`。启动器会绕过旧
+容器的注销钩子，容器内脚本再传入 `--force-registration` 并调用 SDK 的本地
+`reset_agent()`。
 默认 Discovery skill 是意图服务 `executor` 对应的 `robot dog`；正式算力 capability
 保持为 `dog-vision`。两者分别配置，不能互相替代。只需回归旧视频主链路时可设置
 `AGENT_FULL_INTERFACE_SUITE=false`。
@@ -173,7 +163,7 @@ Compose 默认以 `AGENT_REGISTRATION_MODE=fresh-register` 参数启动 A/B，�
 docker compose --env-file .env -f docker-compose.same-host.yml down
 ```
 
-## 从 0.17.7 卸载并重装 0.17.8
+## 升级到 0.17.9
 
 升级前保留 `agent-a-state` 和 `agent-b-state` 卷，让新版容器第一次启动时可以读取旧
 Agent ID 并注销网侧遗留身份。不要使用 `docker compose down -v`。
@@ -181,26 +171,20 @@ Agent ID 并注销网侧遗留身份。不要使用 `docker compose down -v`。
 ```bash
 docker compose --env-file .env -f docker-compose.same-host.yml \
   down --remove-orphans
-docker image rm agent-connect-sdk:0.17.7-arm64
+docker image rm agent-connect-sdk:0.17.8-arm64
 
-sha256sum -c agent-connect-sdk-0.17.8-linux-arm64.tar.gz.sha256
-gzip -dc agent-connect-sdk-0.17.8-linux-arm64.tar.gz | docker load
+sha256sum -c agent-connect-sdk-0.17.9-linux-arm64.tar.gz.sha256
+gzip -dc agent-connect-sdk-0.17.9-linux-arm64.tar.gz | docker load
 docker image inspect --format '{{.Os}}/{{.Architecture}}' \
-  agent-connect-sdk:0.17.8-arm64
+  agent-connect-sdk:0.17.9-arm64
 ```
 
-将 `.env` 中的 `AGENT_IMAGE` 更新为 `agent-connect-sdk:0.17.8-arm64`，并使用本版本
-随附的 `docker-compose.same-host.yml`。展开配置后应看到 A/B 的 fresh 和退出注销开关
-都为 `true`：
+将 `.env` 中的 `AGENT_IMAGE` 更新为 `agent-connect-sdk:0.17.9-arm64`，并使用本版本
+随附的 Compose 文件和宿主机启动脚本。随后直接重启两个服务：
 
 ```bash
-docker compose --env-file .env -f docker-compose.same-host.yml config | \
-  grep -E 'image:|fresh-register|force-register|AGENT_FULL_INTERFACE_SUITE|AGENT_DEREGISTER_ON_EXIT'
-
-docker compose --env-file .env -f docker-compose.same-host.yml up -d agent-b
-docker compose --env-file .env -f docker-compose.same-host.yml logs -f agent-b
-# B_READY 后，在另一个终端启动 A：
-docker compose --env-file .env -f docker-compose.same-host.yml up -d agent-a
+./start-agent-b.sh fresh-register
+./start-agent-a.sh fresh-register
 ```
 
 只有在日志确认旧身份和本轮身份均已成功注销、且明确不再需要故障恢复状态时，才可以

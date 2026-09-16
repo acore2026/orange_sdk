@@ -2,9 +2,9 @@ name: agent-sdk-ab
 
 services:
   agent-a:
-    image: "${AGENT_IMAGE:-agent-connect-sdk:0.17.8-arm64}"
+    image: "${AGENT_IMAGE:-agent-connect-sdk:0.17.9-arm64}"
     container_name: agent-sdk-a
-    command: ["start-agent-a.sh", "${AGENT_REGISTRATION_MODE:-fresh-register}"]
+    command: ["run-agent-a.sh", "${AGENT_REGISTRATION_MODE:-fresh-register}"]
     cap_add:
       - NET_ADMIN
     devices:
@@ -43,9 +43,9 @@ services:
     stop_grace_period: 15s
 
   agent-b:
-    image: "${AGENT_IMAGE:-agent-connect-sdk:0.17.8-arm64}"
+    image: "${AGENT_IMAGE:-agent-connect-sdk:0.17.9-arm64}"
     container_name: agent-sdk-b
-    command: ["start-agent-b.sh", "${AGENT_REGISTRATION_MODE:-fresh-register}"]
+    command: ["run-agent-b.sh", "${AGENT_REGISTRATION_MODE:-fresh-register}"]
     cap_add:
       - NET_ADMIN
     devices:

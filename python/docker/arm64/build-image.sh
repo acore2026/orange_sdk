@@ -50,6 +50,13 @@ for command_name in docker awk gzip sha256sum; do
     }
 done
 
+sh -n \
+    "${SCRIPT_DIR}/start-agent-a.sh" \
+    "${SCRIPT_DIR}/start-agent-b.sh" \
+    "${SCRIPT_DIR}/compose-launch-agent.sh" \
+    "${SCRIPT_DIR}/run-agent-a.sh" \
+    "${SCRIPT_DIR}/run-agent-b.sh"
+
 docker info >/dev/null
 docker buildx version >/dev/null
 if ! docker buildx inspect --bootstrap 2>/dev/null \
@@ -86,16 +93,16 @@ docker run --rm --platform linux/arm64 --entrypoint python "${IMAGE_TAG}" \
 docker run --rm --platform linux/arm64 --entrypoint agent-sdk-self-check \
     "${IMAGE_TAG}"
 docker run --rm --platform linux/arm64 --entrypoint sh "${IMAGE_TAG}" -c \
-    'grep -F "AGENT_FULL_INTERFACE_SUITE:-true" /usr/local/bin/start-agent-a.sh >/dev/null &&
-     grep -F "AGENT_FORCE_REGISTRATION:-false" /usr/local/bin/start-agent-a.sh >/dev/null &&
-     grep -F "AGENT_FRESH_REGISTRATION:-true" /usr/local/bin/start-agent-a.sh >/dev/null &&
-     grep -F "fresh-register|force-register" /usr/local/bin/start-agent-a.sh >/dev/null &&
-     grep -F "AGENT_DEREGISTER_ON_EXIT:-true" /usr/local/bin/start-agent-a.sh >/dev/null &&
-     grep -F "AGENT_FULL_INTERFACE_SUITE:-true" /usr/local/bin/start-agent-b.sh >/dev/null &&
-     grep -F "AGENT_FORCE_REGISTRATION:-false" /usr/local/bin/start-agent-b.sh >/dev/null &&
-     grep -F "AGENT_FRESH_REGISTRATION:-true" /usr/local/bin/start-agent-b.sh >/dev/null &&
-     grep -F "fresh-register|force-register" /usr/local/bin/start-agent-b.sh >/dev/null &&
-     grep -F "AGENT_DEREGISTER_ON_EXIT:-true" /usr/local/bin/start-agent-b.sh >/dev/null'
+    'grep -F "AGENT_FULL_INTERFACE_SUITE:-true" /usr/local/bin/run-agent-a.sh >/dev/null &&
+     grep -F "AGENT_FORCE_REGISTRATION:-false" /usr/local/bin/run-agent-a.sh >/dev/null &&
+     grep -F "AGENT_FRESH_REGISTRATION:-true" /usr/local/bin/run-agent-a.sh >/dev/null &&
+     grep -F "fresh-register|force-register" /usr/local/bin/run-agent-a.sh >/dev/null &&
+     grep -F "AGENT_DEREGISTER_ON_EXIT:-true" /usr/local/bin/run-agent-a.sh >/dev/null &&
+     grep -F "AGENT_FULL_INTERFACE_SUITE:-true" /usr/local/bin/run-agent-b.sh >/dev/null &&
+     grep -F "AGENT_FORCE_REGISTRATION:-false" /usr/local/bin/run-agent-b.sh >/dev/null &&
+     grep -F "AGENT_FRESH_REGISTRATION:-true" /usr/local/bin/run-agent-b.sh >/dev/null &&
+     grep -F "fresh-register|force-register" /usr/local/bin/run-agent-b.sh >/dev/null &&
+     grep -F "AGENT_DEREGISTER_ON_EXIT:-true" /usr/local/bin/run-agent-b.sh >/dev/null'
 docker run --rm --platform linux/arm64 "${IMAGE_TAG}"
 
 if [[ "${EXPORT_IMAGE}" -eq 1 ]]; then

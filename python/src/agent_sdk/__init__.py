@@ -47,7 +47,7 @@ from .sdk import AgentSdk
 try:
     __version__ = version("agent-connect-sdk")
 except PackageNotFoundError:  # Source checkout without an installed distribution.
-    __version__ = "0.17.8"
+    __version__ = "0.17.9"
 
 __all__ = [
     "AgentSdk",
