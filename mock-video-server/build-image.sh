@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPOSITORY_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 MOCK_VERSION="${MOCK_VERSION:-0.2.0}"
-IMAGE_TAG="agent-compute-sandbox-mock:${MOCK_VERSION}-amd64"
-OUTPUT_PATH="${REPOSITORY_ROOT}/dist/compute-mock/agent-compute-sandbox-mock-${MOCK_VERSION}-linux-amd64.tar.gz"
+IMAGE_TAG="agent-compute-sandbox-mock:${MOCK_VERSION}-arm64"
+OUTPUT_PATH="${REPOSITORY_ROOT}/dist/compute-mock/agent-compute-sandbox-mock-${MOCK_VERSION}-linux-arm64.tar.gz"
 SMOKE_PORT="${MOCK_SMOKE_PORT:-38500}"
 EXPORT_IMAGE=1
 
@@ -13,7 +13,7 @@ usage() {
     printf '%s\n' \
         "Usage: $(basename "$0") [--tag IMAGE] [--output FILE] [--smoke-port PORT] [--no-export]" \
         '' \
-        'Build, run the complete Sandbox smoke test and export the linux/amd64 image.'
+        'Build, run the complete Sandbox smoke test and export the linux/arm64 image.'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -36,7 +36,7 @@ done
 
 docker info >/dev/null
 docker buildx build \
-    --platform linux/amd64 \
+    --platform linux/arm64 \
     --provenance=false \
     --load \
     --build-arg "MOCK_VERSION=${MOCK_VERSION}" \
@@ -45,8 +45,8 @@ docker buildx build \
     "${SCRIPT_DIR}"
 
 actual_platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${IMAGE_TAG}")"
-if [[ "${actual_platform}" != "linux/amd64" ]]; then
-    printf 'built image has platform %s; expected linux/amd64\n' "${actual_platform}" >&2
+if [[ "${actual_platform}" != "linux/arm64" ]]; then
+    printf 'built image has platform %s; expected linux/arm64\n' "${actual_platform}" >&2
     exit 1
 fi
 
@@ -57,6 +57,7 @@ cleanup() {
 trap cleanup EXIT
 
 docker run --detach --rm \
+    --platform linux/arm64 \
     --name "${container_name}" \
     --network host \
     --entrypoint python \
@@ -67,12 +68,12 @@ docker run --detach --rm \
     --public-ip 127.0.0.1 >/dev/null
 
 healthy=0
-for _ in $(seq 1 40); do
+for _ in $(seq 1 120); do
     if curl --fail --silent "http://127.0.0.1:${SMOKE_PORT}/healthz" >/dev/null; then
         healthy=1
         break
     fi
-    sleep 0.25
+    sleep 0.5
 done
 if [[ "${healthy}" -ne 1 ]]; then
     docker logs "${container_name}" >&2
@@ -81,11 +82,13 @@ if [[ "${healthy}" -ne 1 ]]; then
 fi
 
 docker run --rm \
+    --platform linux/arm64 \
     --network host \
     --entrypoint python \
     "${IMAGE_TAG}" \
     /opt/mock-video-server/smoke_client.py \
-    --base-url "http://127.0.0.1:${SMOKE_PORT}"
+    --base-url "http://127.0.0.1:${SMOKE_PORT}" \
+    --media-timeout 60
 
 cleanup
 trap - EXIT

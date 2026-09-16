@@ -4,7 +4,7 @@ services:
   agent-a:
     image: "${AGENT_IMAGE:-agent-connect-sdk:0.17.8-arm64}"
     container_name: agent-sdk-a
-    command: ["start-agent-a.sh"]
+    command: ["start-agent-a.sh", "${AGENT_REGISTRATION_MODE:-fresh-register}"]
     cap_add:
       - NET_ADMIN
     devices:
@@ -45,7 +45,7 @@ services:
   agent-b:
     image: "${AGENT_IMAGE:-agent-connect-sdk:0.17.8-arm64}"
     container_name: agent-sdk-b
-    command: ["start-agent-b.sh"]
+    command: ["start-agent-b.sh", "${AGENT_REGISTRATION_MODE:-fresh-register}"]
     cap_add:
       - NET_ADMIN
     devices:

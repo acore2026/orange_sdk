@@ -24,7 +24,7 @@ class SyntheticVideoTrack(VideoStreamTrack):
         return frame
 
 
-async def wait_ice(pc: RTCPeerConnection) -> None:
+async def wait_ice(pc: RTCPeerConnection, timeout_seconds: float) -> None:
     if pc.iceGatheringState == "complete":
         return
     ready = asyncio.Event()
@@ -34,7 +34,7 @@ async def wait_ice(pc: RTCPeerConnection) -> None:
         if pc.iceGatheringState == "complete":
             ready.set()
 
-    await asyncio.wait_for(ready.wait(), 8)
+    await asyncio.wait_for(ready.wait(), timeout_seconds)
 
 
 async def create_media_connection(
@@ -44,10 +44,11 @@ async def create_media_connection(
     *,
     request_id: str,
     context: dict[str, str],
+    timeout_seconds: float,
 ) -> dict[str, object]:
     offer = await pc.createOffer()
     await pc.setLocalDescription(offer)
-    await wait_ice(pc)
+    await wait_ice(pc, timeout_seconds)
     response = await http.post(
         f"{base_url}/v1/media-connections",
         json={
@@ -72,7 +73,7 @@ async def create_media_connection(
     return result
 
 
-async def run(base_url: str) -> dict[str, object]:
+async def run(base_url: str, media_timeout: float = 30.0) -> dict[str, object]:
     base_url = base_url.rstrip("/")
     peers: list[RTCPeerConnection] = []
     connection_ids: list[str] = []
@@ -158,11 +159,12 @@ async def run(base_url: str) -> dict[str, object]:
                 consumer_pc,
                 request_id="media-consumer-smoke",
                 context=consumer_context,
+                timeout_seconds=media_timeout,
             )
             connection_ids.append(str(consumer_result["media_connection_id"]))
-            remote_track = await asyncio.wait_for(track_ready, 8)
+            remote_track = await asyncio.wait_for(track_ready, media_timeout)
             original_track_id = remote_track.id
-            placeholder = await asyncio.wait_for(remote_track.recv(), 8)
+            placeholder = await asyncio.wait_for(remote_track.recv(), media_timeout)
             placeholder_image = placeholder.to_ndarray(format="bgr24")
             if int(placeholder_image[2, 2, 0]) >= 100:
                 raise RuntimeError("consumer did not receive a placeholder before producer startup")
@@ -185,10 +187,11 @@ async def run(base_url: str) -> dict[str, object]:
                 producer_pc,
                 request_id="media-producer-smoke",
                 context={**base_context, "role": "producer", "agent_id": "agent-b"},
+                timeout_seconds=media_timeout,
             )
             connection_ids.append(str(producer_result["media_connection_id"]))
 
-            frame, marker = await asyncio.wait_for(processed_frame_task, 8)
+            frame, marker = await asyncio.wait_for(processed_frame_task, media_timeout)
             if remote_track.id != original_track_id:
                 raise RuntimeError("processed source switch replaced the consumer track")
             return {
@@ -221,8 +224,15 @@ async def run(base_url: str) -> dict[str, object]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://172.30.0.10:28500")
+    parser.add_argument("--media-timeout", type=float, default=30.0)
     args = parser.parse_args()
-    print(json.dumps(asyncio.run(run(args.base_url)), ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            asyncio.run(run(args.base_url, args.media_timeout)),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

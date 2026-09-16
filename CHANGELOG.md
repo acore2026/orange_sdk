@@ -2,6 +2,27 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-16 — Sandbox Mock 镜像改为 ARM64 交付
+
+### 修改原因
+
+- 算力 Sandbox Mock 与端侧测试环境部署在 ARM64 设备，上一版误交付为 `linux/amd64`。
+
+### 修改方式
+
+- Mock 默认镜像标签、Buildx 目标平台、Compose 平台约束和离线归档名统一改为
+  `linux/arm64`，基础镜像固定为 `python:3.12-slim-bookworm`；构建脚本在 ARM64 镜像内
+  执行完整 HTTP/WebRTC 烟测后再导出归档，并为 QEMU 冷启动和媒体协商使用 ARM64
+  适配的等待时间。
+- A/B 入口脚本增加 `fresh-register` 和 `force-register` 参数。前者先注销持久化身份再注册，
+  后者不发送网侧注销、直接将本地生命周期硬重置到状态1再注册；Compose 默认显式使用
+  `fresh-register`。
+
+### 验证内容
+
+- Sandbox ARM64 镜像完成构建、QEMU 全接口烟测和 SHA-256 归档校验；端侧 ARM64 镜像
+  完成重建、自检，并在 A/B 两个入口分别验证两个注册模式到 Python 参数的映射。
+
 ## 2026-09-16 — 增加全接口端侧镜像与算力 Sandbox Mock 镜像
 
 ### 修改原因

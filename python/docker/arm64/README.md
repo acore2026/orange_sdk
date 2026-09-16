@@ -95,14 +95,28 @@ docker exec agent-sdk-b ip route get 10.60.0.2
 前两个命令应显示不同的 bridge 地址和各自 TUN；后两个命令必须指向各自容器内的
 `agent_tun0`，宿主机上不应出现 `10.60.0.2/32` 或 `10.60.0.3/32` 的本地接口。
 
-单容器直接运行时，`start-agent-a.sh` 和 `start-agent-b.sh` 仍通过环境变量接收配置。
+单容器直接运行时，`start-agent-a.sh` 和 `start-agent-b.sh` 通过环境变量接收业务配置，
+并接受一个可选的身份注册模式参数：
+
+```bash
+start-agent-a.sh fresh-register
+start-agent-b.sh fresh-register
+# 或跳过网侧注销，直接把本地生命周期硬重置到状态1：
+start-agent-a.sh force-register
+start-agent-b.sh force-register
+```
+
+`fresh-register` 会先注销状态卷中恢复出的网侧身份，注销成功后再注册；`force-register`
+只调用本地 `reset_agent()` 清除 Profile/Card 状态，再从状态1重新注册，不发送旧身份注销请求。
+命令行参数优先于兼容保留的 `AGENT_FORCE_REGISTRATION` 和
+`AGENT_FRESH_REGISTRATION` 环境变量。
 `AGENT_RUNTIME_IP` 必须是容器可达的 Runtime IPv4 地址。CONNECT-IP 外层源地址由
 容器内的系统路由自动选择，不再配置 `LOCAL_VLAN_IP`。
 
 通用可选变量包括 `AGENT_TCP_PORT`、`AGENT_UDP_PORT`、`AGENT_TUN_NAME`、
 `AGENT_TUN_MTU`、`AGENT_NAME`、`AGENT_OWNER`、`AGENT_REGION`、
 `AGENT_PRIORITY`、`AGENT_LOG_FILE`、`AGENT_LOG_LEVEL` 和
-`AGENT_FORCE_REGISTRATION`、`AGENT_FRESH_REGISTRATION`、
+`AGENT_REGISTRATION_MODE`、`AGENT_FORCE_REGISTRATION`、`AGENT_FRESH_REGISTRATION`、
 `AGENT_DEREGISTER_ON_EXIT`、`AGENT_FULL_INTERFACE_SUITE`。A 还支持
 `AGENT_TARGET_ID`、`AGENT_MESSAGE_JSON`、`AGENT_GROUP_NAME`、
 `AGENT_COMPUTE_CAPABILITY_ID`、CPU/内存/GPU/镜像等正式算力约束、
@@ -135,7 +149,8 @@ A 的身份 Reset 探针会先恢复临时 Profile 再执行网侧注销，不�
 `devices` 中增加 `/dev/video0:/dev/video0`；`AGENT_CAMERA_ID`、分辨率和帧率仅在该模式
 生效。自定义本地视频应挂载进容器，并将 `AGENT_VIDEO_FILE` 指向容器内路径。
 
-ARM 测试镜像默认设置 `AGENT_FRESH_REGISTRATION=true` 和
+Compose 默认以 `AGENT_REGISTRATION_MODE=fresh-register` 参数启动 A/B，同时保留
+`AGENT_FRESH_REGISTRATION=true` 和
 `AGENT_DEREGISTER_ON_EXIT=true`。每次启动时，如果状态卷中存在上次测试的身份，脚本
 先向网侧注销该身份；只有注销成功才重新执行身份申请、网络能力获取和 Agent Card
 发布。正常退出或收到 Docker 的 `SIGTERM` 时也会注销本次身份。旧状态卷必须保留到
@@ -180,7 +195,7 @@ docker image inspect --format '{{.Os}}/{{.Architecture}}' \
 
 ```bash
 docker compose --env-file .env -f docker-compose.same-host.yml config | \
-  grep -E 'image:|AGENT_FULL_INTERFACE_SUITE|AGENT_FRESH_REGISTRATION|AGENT_DEREGISTER_ON_EXIT'
+  grep -E 'image:|fresh-register|force-register|AGENT_FULL_INTERFACE_SUITE|AGENT_DEREGISTER_ON_EXIT'
 
 docker compose --env-file .env -f docker-compose.same-host.yml up -d agent-b
 docker compose --env-file .env -f docker-compose.same-host.yml logs -f agent-b

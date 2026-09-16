@@ -39,7 +39,8 @@ Mock 自测；新版 SDK 和 Android App 均不会调用这些路由。
 
 ## 部署
 
-在 x86_64 主机构建、执行完整 HTTP/WebRTC 烟测并导出镜像：
+构建 ARM64 镜像、执行完整 HTTP/WebRTC 烟测并导出镜像。在 x86_64 构建机上需要先启用
+Docker/QEMU 的 ARM64 binfmt 支持：
 
 ```bash
 cd /root/lpx/sdk/mock-video-server
@@ -49,16 +50,17 @@ cd /root/lpx/sdk/mock-video-server
 生成：
 
 ```text
-镜像：agent-compute-sandbox-mock:0.2.0-amd64
-归档：dist/compute-mock/agent-compute-sandbox-mock-0.2.0-linux-amd64.tar.gz
-校验：dist/compute-mock/agent-compute-sandbox-mock-0.2.0-linux-amd64.tar.gz.sha256
+镜像：agent-compute-sandbox-mock:0.2.0-arm64
+平台：linux/arm64
+归档：dist/compute-mock/agent-compute-sandbox-mock-0.2.0-linux-arm64.tar.gz
+校验：dist/compute-mock/agent-compute-sandbox-mock-0.2.0-linux-arm64.tar.gz.sha256
 ```
 
 N6 主机离线导入后再部署：
 
 ```bash
-sha256sum -c agent-compute-sandbox-mock-0.2.0-linux-amd64.tar.gz.sha256
-gzip -dc agent-compute-sandbox-mock-0.2.0-linux-amd64.tar.gz | docker load
+sha256sum -c agent-compute-sandbox-mock-0.2.0-linux-arm64.tar.gz.sha256
+gzip -dc agent-compute-sandbox-mock-0.2.0-linux-arm64.tar.gz | docker load
 ```
 
 ```bash

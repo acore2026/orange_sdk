@@ -1,6 +1,7 @@
 services:
   mock-video-server:
-    image: "${COMPUTE_MOCK_IMAGE:-agent-compute-sandbox-mock:0.2.0-amd64}"
+    image: "${COMPUTE_MOCK_IMAGE:-agent-compute-sandbox-mock:0.2.0-arm64}"
+    platform: linux/arm64
     build:
       context: .
       args:

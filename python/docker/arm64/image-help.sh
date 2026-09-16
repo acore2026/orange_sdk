@@ -5,13 +5,14 @@ printf '%s\n' \
     'Agent Connect SDK ARM64 runtime image' \
     '' \
     'Run one role per container:' \
-    '  start-agent-a.sh' \
-    '  start-agent-b.sh' \
+    '  start-agent-a.sh [fresh-register|force-register]' \
+    '  start-agent-b.sh [fresh-register|force-register]' \
     '' \
     'Required environment variables:' \
     '  AGENT_RUNTIME_IP, MASQUE_URL' \
     '' \
     'Test lifecycle defaults:' \
+    '  command argument: fresh-register' \
     '  AGENT_FORCE_REGISTRATION=false' \
     '  AGENT_FRESH_REGISTRATION=true' \
     '  AGENT_DEREGISTER_ON_EXIT=true' \

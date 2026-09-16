@@ -1,13 +1,34 @@
 #!/bin/sh
 set -eu
 
-if [ "${1:-}" = "--help" ]; then
+usage() {
+    printf '%s\n' \
+        'Usage: start-agent-a.sh [fresh-register|force-register]' \
+        '' \
+        '  fresh-register  deregister a persisted network identity, then register again' \
+        '  force-register  reset local state to lifecycle state 1 without deregistration, then register again' \
+        '' \
+        'With no argument, AGENT_FORCE_REGISTRATION/AGENT_FRESH_REGISTRATION remain supported.'
+}
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    usage
+    printf '\nUnderlying Agent A options:\n'
     exec python /opt/agent-sdk/examples/agent_a_test.py --help
 fi
-if [ "$#" -ne 0 ]; then
-    printf '%s\n' 'start-agent-a.sh accepts configuration through environment variables only' >&2
+if [ "$#" -gt 1 ]; then
+    usage >&2
     exit 2
 fi
+REGISTRATION_MODE="${1:-}"
+case "${REGISTRATION_MODE}" in
+    ''|fresh-register|force-register) ;;
+    *)
+        printf 'unknown registration mode: %s\n' "${REGISTRATION_MODE}" >&2
+        usage >&2
+        exit 2
+        ;;
+esac
 
 require_value() {
     value_name="$1"
@@ -128,11 +149,17 @@ if is_true "${AGENT_FULL_INTERFACE_SUITE:-true}"; then
 else
     set -- "$@" --no-full-interface-suite
 fi
-if is_true "${AGENT_FORCE_REGISTRATION:-false}"; then
-    set -- "$@" --force-registration
-elif is_true "${AGENT_FRESH_REGISTRATION:-true}"; then
-    set -- "$@" --fresh-registration
+if [ -z "${REGISTRATION_MODE}" ]; then
+    if is_true "${AGENT_FORCE_REGISTRATION:-false}"; then
+        REGISTRATION_MODE=force-register
+    elif is_true "${AGENT_FRESH_REGISTRATION:-true}"; then
+        REGISTRATION_MODE=fresh-register
+    fi
 fi
+case "${REGISTRATION_MODE}" in
+    force-register) set -- "$@" --force-registration ;;
+    fresh-register) set -- "$@" --fresh-registration ;;
+esac
 if is_true "${AGENT_DEREGISTER_ON_EXIT:-true}"; then
     set -- "$@" --deregister-on-exit
 fi
