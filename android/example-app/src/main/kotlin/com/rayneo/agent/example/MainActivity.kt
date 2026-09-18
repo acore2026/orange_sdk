@@ -105,15 +105,12 @@ class MainActivity : Activity() {
     private var videoUploadToggleButton: TextView? = null
     private var recognitionUpdateButton: TextView? = null
     private var recognitionGetButton: TextView? = null
-    private var controlCreateButton: TextView? = null
-    private var controlGetButton: TextView? = null
     private var asrTranscribeButton: TextView? = null
     private var voiceControlButton: TextView? = null
     private var voiceTranscriptionResult: TextView? = null
     private var capabilitySkillInput: EditText? = null
     private var capabilityVcInput: EditText? = null
     private var recognitionTargetInput: EditText? = null
-    private var controlActionInput: EditText? = null
     private var sdkFeatureState: SdkFeatureState? = null
     private var sdkFeatureActionRunning = false
     private val voiceRecorder by lazy { VoiceAudioRecorder(this) }
@@ -180,15 +177,12 @@ class MainActivity : Activity() {
         videoUploadToggleButton = null
         recognitionUpdateButton = null
         recognitionGetButton = null
-        controlCreateButton = null
-        controlGetButton = null
         asrTranscribeButton = null
         voiceControlButton = null
         voiceTranscriptionResult = null
         capabilitySkillInput = null
         capabilityVcInput = null
         recognitionTargetInput = null
-        controlActionInput = null
         sdkFeatureState = null
         sdkFeatureActionRunning = false
         controlScroll = null
@@ -242,9 +236,9 @@ class MainActivity : Activity() {
                 aOnlyContainer = LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.VERTICAL
                     addView(field(
-                        "intent_url",
-                        "意图识别 URL",
-                        "http://server:8011/api/v1/intent",
+                        "discovery_asr_url",
+                        "Discovery ASR URL",
+                        "http://server:9004/api/v1/transcribe",
                     ))
                     addView(field("dnn", "DNN", "internet"))
                     addView(field("group_name", "群组名称", "android-ab-test-group"))
@@ -693,8 +687,8 @@ class MainActivity : Activity() {
         asrTranscribeButton = actionButton("开始录音 · 仅转文字", filled = false) {
             toggleVoiceRecording(VoiceMode.TRANSCRIBE)
         }
-        voiceControlButton = actionButton("开始录音 · 转写并执行", filled = false) {
-            toggleVoiceRecording(VoiceMode.CONTROL_ACTION)
+        voiceControlButton = actionButton("开始录音 · 运行期意图", filled = false) {
+            toggleVoiceRecording(VoiceMode.RUNTIME_INTENT)
         }
         addView(featureButtonRow(
             checkNotNull(asrTranscribeButton),
@@ -797,22 +791,6 @@ class MainActivity : Activity() {
                 checkNotNull(recognitionGetButton),
             ))
 
-            addView(featureCaption("Sandbox 控制动作"))
-            controlActionInput = featureInput(
-                value = "寻找画面中的杯子",
-                hintText = "自然语言控制指令",
-            ).also(::addView)
-            controlCreateButton = actionButton("创建动作", filled = false) {
-                val command = controlActionInput?.text?.toString().orEmpty()
-                runSdkFeatureAction("控制动作创建") { createControlAction(command) }
-            }
-            controlGetButton = actionButton("查询动作", filled = false) {
-                runSdkFeatureAction("控制动作查询") { getControlAction() }
-            }
-            addView(featureButtonRow(
-                checkNotNull(controlCreateButton),
-                checkNotNull(controlGetButton),
-            ))
         }
         refreshSdkFeatureControls()
     }
@@ -881,8 +859,6 @@ class MainActivity : Activity() {
         videoUploadToggleButton.available(state?.producerVideoReady == true)
         recognitionUpdateButton.available(consumerRuntimeReady)
         recognitionGetButton.available(consumerRuntimeReady)
-        controlCreateButton.available(consumerRuntimeReady)
-        controlGetButton.available(consumerRuntimeReady && state?.controlActionId != null)
         asrTranscribeButton.available(cardReady)
         voiceControlButton.available(consumerRuntimeReady)
         when (voiceRecordingMode) {
@@ -891,14 +867,14 @@ class MainActivity : Activity() {
                 alpha = 1f
                 text = "停止并提交 · 仅转文字"
             }
-            VoiceMode.CONTROL_ACTION -> voiceControlButton?.apply {
+            VoiceMode.RUNTIME_INTENT -> voiceControlButton?.apply {
                 isEnabled = true
                 alpha = 1f
-                text = "停止并提交 · 转写并执行"
+                text = "停止并提交 · 运行期意图"
             }
             null -> {
                 asrTranscribeButton?.text = "开始录音 · 仅转文字"
-                voiceControlButton?.text = "开始录音 · 转写并执行"
+                voiceControlButton?.text = "开始录音 · 运行期意图"
             }
         }
         videoUploadToggleButton?.text = if (state?.videoUploadState == "PAUSED") {
@@ -956,7 +932,7 @@ class MainActivity : Activity() {
                 LabLogLevel.INFO,
                 "VOICE RECORD",
                 if (mode == VoiceMode.TRANSCRIBE) "开始录音，停止后上传 ASR 9004"
-                else "开始录音，停止后创建运行期语音动作",
+            else "开始录音，停止后识别运行期动作意图（不会直接控制设备）",
             )
             refreshSdkFeatureControls()
         } catch (error: Exception) {
@@ -990,7 +966,7 @@ class MainActivity : Activity() {
                         recording.fileName,
                         recording.contentType,
                     )
-                    VoiceMode.CONTROL_ACTION -> activeRunner.createAudioControlAction(
+                    VoiceMode.RUNTIME_INTENT -> activeRunner.recognizeRuntimeAudioIntent(
                         audio,
                         recording.fileName,
                         recording.contentType,
@@ -998,7 +974,7 @@ class MainActivity : Activity() {
                 }
                 setRunnerStatus(
                     RunnerStatus(
-                        if (mode == VoiceMode.TRANSCRIBE) "语音转文字成功" else "语音动作已创建",
+                        if (mode == VoiceMode.TRANSCRIBE) "任务语音识别成功" else "运行期意图识别成功",
                         detail.take(300),
                     ),
                 )
@@ -1671,9 +1647,9 @@ class MainActivity : Activity() {
 
     private fun readConfig(): TestConfig {
         val serverIp = value("server_ip")
-        val intentUrl = value("intent_url").takeUnless {
-            it.isBlank() || it == "http://:8011/api/v1/intent"
-        } ?: "http://$serverIp:8011/api/v1/intent"
+        val discoveryAsrUrl = value("discovery_asr_url").takeUnless {
+            it.isBlank() || it == "http://:9004/api/v1/transcribe"
+        } ?: "http://$serverIp:9004/api/v1/transcribe"
         return TestConfig(
             role = selectedRole,
             serverIp = serverIp,
@@ -1683,7 +1659,7 @@ class MainActivity : Activity() {
             localTcpPort = intValue("tcp_port"),
             localUdpPort = intValue("udp_port"),
             masqueToken = value("masque_token").ifBlank { null },
-            intentServiceUrl = intentUrl,
+            discoveryAsrUrl = discoveryAsrUrl,
             owner = value("owner"),
             agentName = value("agent_name"),
             capability = value("capability"),
@@ -1722,11 +1698,11 @@ class MainActivity : Activity() {
         setValue("dnn", intent.getStringExtra("dnn") ?: preferences.getString("dnn", "internet"))
         val configuredServer = fields["server_ip"]?.text?.toString().orEmpty()
         setValue(
-            "intent_url",
-            intent.getStringExtra("intent_url")
-                ?: preferences.getString("intent_url", null)
+            "discovery_asr_url",
+            intent.getStringExtra("discovery_asr_url")
+                ?: preferences.getString("discovery_asr_url", null)
                 ?: configuredServer.takeIf(String::isNotBlank)
-                    ?.let { "http://$it:8011/api/v1/intent" }
+                    ?.let { "http://$it:9004/api/v1/transcribe" }
                 ?: "",
         )
         setValue("group_name", intent.getStringExtra("group_name")
@@ -1748,7 +1724,7 @@ class MainActivity : Activity() {
             .putString("owner", config.owner)
             .putString("agent_name", config.agentName)
             .putString("capability", config.capability)
-            .putString("intent_url", config.intentServiceUrl)
+            .putString("discovery_asr_url", config.discoveryAsrUrl)
             .putString("dnn", config.dnn)
             .putString("group_name", config.groupName)
             .putString("message", config.message)
@@ -1917,5 +1893,5 @@ class MainActivity : Activity() {
         const val APP_LOG_TAG = "AgentLinkLab"
     }
 
-    private enum class VoiceMode { TRANSCRIBE, CONTROL_ACTION }
+    private enum class VoiceMode { TRANSCRIBE, RUNTIME_INTENT }
 }

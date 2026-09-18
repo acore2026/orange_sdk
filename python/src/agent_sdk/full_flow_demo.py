@@ -21,7 +21,6 @@ from agent_sdk import (
     ComputeConstraints,
     ComputeInputFormat,
     ComputeRequestType,
-    ComputeResources,
     ComputeSessionRequest,
     NetworkMessageAction,
     NetworkMessageType,
@@ -486,7 +485,7 @@ async def run_demo(
             owner="demo-owner",
             name="Agent A",
             description="wheel installation self-check",
-            metadata={"region": "CN", "os": "Linux", "version": "0.17.9"},
+            metadata={"region": "CN", "os": "Linux", "version": "0.17.10"},
         )
         show("2 apply_identity", profile.agent_id)
 
@@ -561,10 +560,6 @@ async def run_demo(
                 ),
                 constraints=ComputeConstraints(
                     capability_id="video_rendering",
-                    resources=ComputeResources(
-                        cpu_millicores=2000,
-                        memory_mib=4096,
-                    ),
                     dnn="internet",
                     allow_base_qos=True,
                 ),

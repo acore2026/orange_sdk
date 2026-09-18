@@ -1,0 +1,83 @@
+from __future__ import annotations
+
+import os
+from unittest import IsolatedAsyncioTestCase, TestCase
+from unittest.mock import patch
+
+from services.intent.classifier import IntentService, RuleIntentClassifier
+from services.intent.config import IntentSettings
+
+
+class RuleIntentClassifierTest(TestCase):
+    def setUp(self) -> None:
+        self.classifier = RuleIntentClassifier()
+
+    def test_classifies_chinese_find_object_and_normalizes_target(self) -> None:
+        result = self.classifier.classify("帮我找黄色的狗").to_dict()
+
+        self.assertEqual("find_object", result["intent"])
+        self.assertEqual("yellow dog", result["normalized_argument"])
+        self.assertEqual({"zh": "黄色的狗", "en": "yellow dog"}, result["normalized_argument_i18n"])
+
+    def test_classifies_movement(self) -> None:
+        result = self.classifier.classify("please turn left")
+
+        self.assertEqual("movement", result.intent)
+        self.assertEqual("left", result.argument)
+
+    def test_classifies_campus_patrol_direction_variants(self) -> None:
+        expected = {
+            "向前": "forward",
+            "退后": "backward",
+            "向左": "left",
+            "向右": "right",
+        }
+        for command, direction in expected.items():
+            with self.subTest(command=command):
+                result = self.classifier.classify(command)
+                self.assertEqual("movement", result.intent)
+                self.assertEqual(direction, result.argument)
+
+    def test_classifies_patrol_and_extracts_area(self) -> None:
+        result = self.classifier.classify("派机器狗巡逻园区内A区域").to_dict()
+
+        self.assertEqual("patrol", result["intent"])
+        self.assertEqual("A区域", result["argument"])
+        self.assertEqual("robot dog", result["executor"])
+
+    def test_other_has_no_executor_skill(self) -> None:
+        result = self.classifier.classify("今天天气怎么样").to_dict()
+
+        self.assertIsNone(result["executor"])
+
+    def test_classifies_grab_without_target(self) -> None:
+        result = self.classifier.classify("请抓取")
+
+        self.assertEqual("grab", result.intent)
+        self.assertEqual("", result.argument)
+
+    def test_unrelated_text_is_other(self) -> None:
+        result = self.classifier.classify("今天天气怎么样")
+
+        self.assertEqual("other", result.intent)
+        self.assertEqual("", result.argument)
+
+
+class RulesOnlyIntentServiceTest(IsolatedAsyncioTestCase):
+    async def test_service_always_uses_rules(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            service = IntentService(IntentSettings.from_env())
+
+        result = await service.classify("派机器狗巡逻园区内A区域")
+
+        self.assertEqual("patrol", result["scene"])
+        self.assertEqual("A区域", result["normalized_argument"])
+        self.assertEqual("rules", result["backend"])
+        self.assertEqual("rules", service.health()["lastBackend"])
+        self.assertIsNone(service.health()["model"])
+
+    async def test_intent_backend_configuration_is_forced_to_rules(self) -> None:
+        with patch.dict(os.environ, {"INTENT_BACKEND": "hybrid"}, clear=True):
+            settings = IntentSettings.from_env()
+
+        self.assertEqual("rules", settings.backend)

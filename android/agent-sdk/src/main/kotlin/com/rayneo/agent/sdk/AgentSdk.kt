@@ -8,7 +8,7 @@ import com.rayneo.agent.sdk.model.AgentProfile
 import com.rayneo.agent.sdk.model.AudioControlActionRequest
 import com.rayneo.agent.sdk.model.AudioTranscriptionRequest
 import com.rayneo.agent.sdk.model.AudioTranscriptionResult
-import com.rayneo.agent.sdk.model.AudioTranscriptionSegment
+import com.rayneo.agent.sdk.model.DiscoveryIntent
 import com.rayneo.agent.sdk.model.IntentRecognitionResult
 import com.rayneo.agent.sdk.model.AcnContext
 import com.rayneo.agent.sdk.model.AgentLifecycleState
@@ -39,6 +39,8 @@ import com.rayneo.agent.sdk.model.OperationResult
 import com.rayneo.agent.sdk.model.RecognitionTarget
 import com.rayneo.agent.sdk.model.RecognitionTargetStatus
 import com.rayneo.agent.sdk.model.RuntimeDataPlane
+import com.rayneo.agent.sdk.model.RuntimeAudioIntent
+import com.rayneo.agent.sdk.model.RuntimeAudioRecognitionResult
 import com.rayneo.agent.sdk.model.SdkInitResult
 import com.rayneo.agent.sdk.model.Snssai
 import com.rayneo.agent.sdk.model.VoiceTranscription
@@ -538,13 +540,13 @@ class AgentSdk internal constructor(
         jsonMessage: JsonObject,
         messageType: String,
         taskId: String,
-        timeoutSeconds: Double = 5.0,
+        timeoutSeconds: Double = MIN_API_TIMEOUT_SECONDS,
     ): MessageReceipt {
         requireReady()
-        if (timeoutSeconds <= 0.0) {
+        if (timeoutSeconds < MIN_API_TIMEOUT_SECONDS) {
             throw AgentSdkException(
                 ErrorCode.INVALID_ARGUMENT,
-                "timeoutSeconds must be greater than zero",
+                "timeoutSeconds must be at least 20 seconds",
                 "timeoutSeconds",
             )
         }
@@ -1070,8 +1072,8 @@ class AgentSdk internal constructor(
     ) {
         requireReady()
         requireComputeString(computeServiceSessionId, "compute_service_session_id")
-        if (timeoutSeconds <= 0.0) {
-            invalidCompute("timeoutSeconds must be greater than zero", "timeoutSeconds")
+        if (timeoutSeconds < MIN_API_TIMEOUT_SECONDS) {
+            invalidCompute("timeoutSeconds must be at least 20 seconds", "timeoutSeconds")
         }
         val waiter = computingMutex.withLock {
             if (computeServiceSessionId !in activeComputingSessionIds()) return
@@ -1107,10 +1109,10 @@ class AgentSdk internal constructor(
         bitrateKbps: Int = 4000,
         timeoutSeconds: Double = 120.0,
     ): VideoUploadHandle {
-        if (timeoutSeconds <= 0.0) {
+        if (timeoutSeconds < MIN_API_TIMEOUT_SECONDS) {
             throw AgentSdkException(
                 ErrorCode.INVALID_ARGUMENT,
-                "timeoutSeconds must be greater than zero",
+                "timeoutSeconds must be at least 20 seconds",
                 "timeoutSeconds",
             )
         }
@@ -1232,10 +1234,10 @@ class AgentSdk internal constructor(
         computeServiceSessionId: String,
         timeoutSeconds: Double = 120.0,
     ): ProcessedVideoStream {
-        if (timeoutSeconds <= 0.0) {
+        if (timeoutSeconds < MIN_API_TIMEOUT_SECONDS) {
             throw AgentSdkException(
                 ErrorCode.INVALID_ARGUMENT,
-                "timeoutSeconds must be greater than zero",
+                "timeoutSeconds must be at least 20 seconds",
                 "timeoutSeconds",
             )
         }
@@ -1344,7 +1346,7 @@ class AgentSdk internal constructor(
         requestId: String,
         text: String,
         language: String? = null,
-        timeoutSeconds: Double = 15.0,
+        timeoutSeconds: Double = MIN_API_TIMEOUT_SECONDS,
     ): RecognitionTargetStatus {
         validateSandboxTimeout(timeoutSeconds)
         validateComputeRequestId(requestId, "request_id")
@@ -1374,7 +1376,7 @@ class AgentSdk internal constructor(
 
     suspend fun getRecognitionTarget(
         computeServiceSessionId: String,
-        timeoutSeconds: Double = 15.0,
+        timeoutSeconds: Double = MIN_API_TIMEOUT_SECONDS,
     ): RecognitionTargetStatus {
         validateSandboxTimeout(timeoutSeconds)
         val session = waitForComputingSession(computeServiceSessionId, timeoutSeconds)
@@ -1392,7 +1394,7 @@ class AgentSdk internal constructor(
     suspend fun createControlAction(
         computeServiceSessionId: String,
         request: ControlActionRequest,
-        timeoutSeconds: Double = 15.0,
+        timeoutSeconds: Double = MIN_API_TIMEOUT_SECONDS,
     ): ControlActionStatus {
         validateSandboxTimeout(timeoutSeconds)
         validateControlActionRequest(request)
@@ -1438,19 +1440,17 @@ class AgentSdk internal constructor(
         computeServiceSessionId: String,
         request: AudioControlActionRequest,
         timeoutSeconds: Double = 120.0,
-    ): ControlActionStatus {
+    ): RuntimeAudioRecognitionResult {
         validateSandboxTimeout(timeoutSeconds)
         validateComputeRequestId(request.requestId, "request_id")
         val fileName = validateAudioUpload(request.audio, request.fileName, request.contentType)
         requireComputeString(request.language, "language")
-        request.stopReason?.let { requireComputeString(it, "stopReason") }
         val session = waitForComputingSession(computeServiceSessionId, timeoutSeconds)
         requireConsumerSession(session, "createAudioControlAction")
         val fields = buildMap {
             put("request_id", request.requestId)
             put("computing_context", mediaContext(session).toString())
             put("language", request.language)
-            request.stopReason?.let { put("stop_reason", it) }
         }
         val response = sandboxTransport.uploadWithStatus(
             url = audioControlActionsUrl(session),
@@ -1462,14 +1462,9 @@ class AgentSdk internal constructor(
             timeoutSeconds = timeoutSeconds,
             sourceIpv4 = session.networkBinding.ueIpv4,
         )
-        return parseControlActionResponse(
+        return parseRuntimeAudioRecognitionResponse(
             response = response,
-            session = session,
-            expectedHttpStatus = 202,
             expectedRequestId = request.requestId,
-            requireContext = true,
-            requireNormalized = true,
-            requireTranscription = true,
         )
     }
 
@@ -1498,17 +1493,11 @@ class AgentSdk internal constructor(
             fileName = request.fileName,
             contentType = request.contentType,
         )
-        val sessionId = requireComputeString(request.sessionId, "sessionId")
-        val taskId = requireComputeString(request.taskId, "taskId")
-        val source = requireComputeString(request.source, "source")
+        val requestId = requireComputeString(request.requestId, "requestId")
         request.language?.let { requireComputeString(it, "language") }
-        request.stopReason?.let { requireComputeString(it, "stopReason") }
         val fields = buildMap {
-            put("session_id", sessionId)
-            put("task_id", taskId)
-            put("source", source)
+            put("request_id", requestId)
             request.language?.let { put("language", it) }
-            request.stopReason?.let { put("stop_reason", it) }
         }
         val response = sandboxTransport.uploadWithStatus(
             url = endpoint.toASCIIString(),
@@ -1520,7 +1509,7 @@ class AgentSdk internal constructor(
             timeoutSeconds = timeoutSeconds,
             sourceIpv4 = null,
         )
-        return parseAudioTranscriptionResponse(response)
+        return parseAudioTranscriptionResponse(response, requestId)
     }
 
     /**
@@ -1534,7 +1523,7 @@ class AgentSdk internal constructor(
     suspend fun recognizeIntent(
         intentUrl: String,
         text: String,
-        timeoutSeconds: Double = 15.0,
+        timeoutSeconds: Double = MIN_API_TIMEOUT_SECONDS,
     ): IntentRecognitionResult {
         validateSandboxTimeout(timeoutSeconds)
         val endpoint = requireStandaloneHttpUrl(intentUrl, "intentUrl")
@@ -1552,7 +1541,7 @@ class AgentSdk internal constructor(
     suspend fun getControlAction(
         computeServiceSessionId: String,
         actionId: String,
-        timeoutSeconds: Double = 15.0,
+        timeoutSeconds: Double = MIN_API_TIMEOUT_SECONDS,
     ): ControlActionStatus {
         validateSandboxTimeout(timeoutSeconds)
         val normalizedActionId = requireComputeString(actionId, "action_id")
@@ -1613,6 +1602,7 @@ class AgentSdk internal constructor(
 
     private fun parseAudioTranscriptionResponse(
         response: RuntimeHttpResponse,
+        expectedRequestId: String,
     ): AudioTranscriptionResult {
         if (response.statusCode != 200) {
             val detail = response.body.stringOrNull("message")
@@ -1632,65 +1622,80 @@ class AgentSdk internal constructor(
             }
             return value
         }
-        fun requiredLong(field: String): Long {
-            val value = response.body[field]?.jsonPrimitive?.longOrNull
-                ?: invalidControlResponse("$field must be an integer", field)
-            if (value < 0) invalidControlResponse("$field must not be negative", field)
-            return value
+        val requestId = requiredString("request_id")
+        if (requestId != expectedRequestId) {
+            invalidControlResponse("request_id does not match the request", "request_id")
         }
-        fun nullableString(field: String): String? {
-            val raw = response.body[field] ?: return null
-            if (raw is JsonNull) return null
-            return response.body.stringOrNull(field)
-                ?: invalidControlResponse("$field must be null or a string", field)
-        }
-        val segments = (response.body["segments"] as? JsonArray)
-            ?.mapIndexed { index, raw ->
-                val value = raw as? JsonObject ?: invalidControlResponse(
-                    "segments[$index] must be an object",
-                    "segments",
-                )
-                val start = value["startSec"]?.jsonPrimitive?.doubleOrNull
-                    ?: invalidControlResponse(
-                        "segments[$index].startSec must be a number",
-                        "segments",
-                    )
-                val end = value["endSec"]?.jsonPrimitive?.doubleOrNull
-                    ?: invalidControlResponse(
-                        "segments[$index].endSec must be a number",
-                        "segments",
-                    )
-                val text = value.stringOrNull("text")
-                    ?: invalidControlResponse(
-                        "segments[$index].text must be a string",
-                        "segments",
-                    )
-                AudioTranscriptionSegment(start, end, text)
-            }
-            ?: invalidControlResponse("segments must be an array", "segments")
-        val probabilityRaw = response.body["languageProbability"]
-        val probability = when (probabilityRaw) {
-            null, JsonNull -> null
-            else -> probabilityRaw.jsonPrimitive.doubleOrNull
+        val rawIntent = response.body["intent"] as? JsonObject
+            ?: invalidControlResponse("intent must be an object", "intent")
+        val intentType = rawIntent.stringOrNull("type")
+            ?.trim()?.uppercase()?.takeIf(String::isNotBlank)
+            ?: invalidControlResponse("intent.type must be a non-empty string", "intent.type")
+        val parametersObject = rawIntent["parameters"] as? JsonObject
+            ?: invalidControlResponse("intent.parameters must be an object", "intent.parameters")
+        val parameters = parametersObject.mapValues { (name, raw) ->
+            raw.jsonPrimitive.contentOrNull
                 ?: invalidControlResponse(
-                    "languageProbability must be null or a number",
-                    "languageProbability",
+                    "intent.parameters.$name must be a string",
+                    "intent.parameters.$name",
                 )
         }
+        val requiredSkills = (response.body["required_skills"] as? JsonArray)
+            ?.mapIndexed { index, raw ->
+                raw.jsonPrimitive.contentOrNull?.trim()?.takeIf(String::isNotBlank)
+                    ?: invalidControlResponse(
+                        "required_skills[$index] must be a non-empty string",
+                        "required_skills",
+                    )
+            }
+            ?: invalidControlResponse("required_skills must be an array", "required_skills")
         return AudioTranscriptionResult(
-            transcriptId = requiredString("transcriptId"),
-            sessionId = requiredString("sessionId"),
-            taskId = requiredString("taskId"),
-            source = requiredString("source"),
+            requestId = requestId,
             text = requiredString("text", allowEmpty = true),
-            language = nullableString("language"),
-            languageProbability = probability,
-            durationMs = requiredLong("durationMs"),
-            processingMs = requiredLong("processingMs"),
-            createdAtMs = requiredLong("createdAtMs"),
-            stopReason = nullableString("stopReason"),
-            segments = segments,
-            audioFilename = requiredString("audioFilename"),
+            intent = DiscoveryIntent(intentType, parameters),
+            requiredSkills = requiredSkills,
+        )
+    }
+
+    private fun parseRuntimeAudioRecognitionResponse(
+        response: RuntimeHttpResponse,
+        expectedRequestId: String,
+    ): RuntimeAudioRecognitionResult {
+        if (response.statusCode != 200) {
+            val detail = response.body.stringOrNull("message")
+                ?: (response.body["error"] as? JsonObject)?.stringOrNull("message")
+            throw AgentSdkException(
+                ErrorCode.SANDBOX_REJECTED,
+                detail?.takeIf(String::isNotBlank)
+                    ?: "Sandbox audio recognition returned HTTP ${response.statusCode}",
+                retryable = response.statusCode >= 500,
+            )
+        }
+        val requestId = response.body.stringOrNull("request_id")
+            ?.takeIf(String::isNotBlank)
+            ?: invalidControlResponse("request_id must be a non-empty string", "request_id")
+        if (requestId != expectedRequestId) {
+            invalidControlResponse("request_id does not match the request", "request_id")
+        }
+        val text = response.body.stringOrNull("text")
+            ?: invalidControlResponse("text must be a string", "text")
+        val payload = response.body["intent"] as? JsonObject
+            ?: invalidControlResponse("intent must be an object", "intent")
+        val intent = payload.stringOrNull("intent")
+            ?.trim()?.lowercase()?.takeIf(String::isNotBlank)
+            ?: invalidControlResponse("intent.intent must be a non-empty string", "intent.intent")
+        val matched = payload["matched"]?.jsonPrimitive?.booleanOrNull
+            ?: invalidControlResponse("intent.matched must be a boolean", "intent.matched")
+        return RuntimeAudioRecognitionResult(
+            requestId = requestId,
+            text = text,
+            intent = RuntimeAudioIntent(
+                executor = payload.stringOrNull("executor"),
+                intent = intent,
+                direction = payload.stringOrNull("direction"),
+                matched = matched,
+                backend = payload.stringOrNull("backend"),
+            ),
         )
     }
 
@@ -1940,10 +1945,10 @@ class AgentSdk internal constructor(
         throw AgentSdkException(ErrorCode.SANDBOX_REJECTED, message, field)
 
     private fun validateSandboxTimeout(timeoutSeconds: Double) {
-        if (timeoutSeconds <= 0.0) {
+        if (timeoutSeconds < MIN_API_TIMEOUT_SECONDS) {
             throw AgentSdkException(
                 ErrorCode.INVALID_ARGUMENT,
-                "timeoutSeconds must be greater than zero",
+                "timeoutSeconds must be at least 20 seconds",
                 "timeoutSeconds",
             )
         }
@@ -2355,19 +2360,8 @@ class AgentSdk internal constructor(
                 "No active IPv4 PDU Session is available (pdu-session-required)",
             )
         }
-        val accesses = snapshot["data_plane_accesses"] as? JsonArray
-        if (accesses == null || accesses.none { element ->
-                val item = element as? JsonObject
-                item?.stringOrNull("access_type") == "HTTP3_CONNECT_IP" &&
-                    item.stringOrNull("session_selection") == "EXACT_PDU_SESSION_ID"
-            }
-        ) {
-            throw AgentSdkException(
-                ErrorCode.RUNTIME_REJECTED,
-                "Runtime provides no exact HTTP3 CONNECT-IP data-plane access " +
-                    "(data-plane-access-unsupported)",
-            )
-        }
+        // 不再要求 Runtime 上报 data_plane_accesses/advertisedEndpoint；数据面
+        // 可达性由既有 CONNECT-IP 隧道状态保证（见 C-02 绑定校验）。
         ueInfo = snapshot
     }
 
@@ -2375,8 +2369,8 @@ class AgentSdk internal constructor(
         request: ComputeSessionRequest,
         timeoutSeconds: Double,
     ): ComputeSessionStatus {
-        if (timeoutSeconds <= 0.0) {
-            invalidCompute("timeoutSeconds must be greater than zero", "timeoutSeconds")
+        if (timeoutSeconds < MIN_API_TIMEOUT_SECONDS) {
+            invalidCompute("timeoutSeconds must be at least 20 seconds", "timeoutSeconds")
         }
         val body = computeJson.encodeToJsonElement(request).jsonObject
         computingControlMutex.withLock {
@@ -2843,12 +2837,6 @@ class AgentSdk internal constructor(
             throw ComputeBindingException("binding-mismatch")
         }
         val binding = session.networkBinding
-        if (
-            binding.runtimeDataPlane.accessType != "HTTP3_CONNECT_IP" ||
-            binding.runtimeDataPlane.sessionSelection != "EXACT_PDU_SESSION_ID"
-        ) {
-            throw ComputeBindingException("data-plane-access-unsupported")
-        }
         val snapshot = ueInfo ?: checkNotNull(runtime).getUeInfo().also { ueInfo = it }
         val sessions = snapshot["pdu_sessions"] as? JsonArray
         val matching = sessions.orEmpty().mapNotNull { it as? JsonObject }.filter {
@@ -2872,26 +2860,9 @@ class AgentSdk internal constructor(
         ) {
             throw ComputeBindingException("network-binding-mismatch")
         }
-        val accesses = snapshot["data_plane_accesses"] as? JsonArray
-        val matchingAccesses = accesses.orEmpty().mapNotNull { it as? JsonObject }.filter {
-            it.stringOrNull("access_type") == binding.runtimeDataPlane.accessType &&
-                it.stringOrNull("session_selection") == binding.runtimeDataPlane.sessionSelection
-        }
-        if (matchingAccesses.size != 1) {
-            throw ComputeBindingException("data-plane-access-unsupported")
-        }
-        val template = matchingAccesses.single().stringOrNull("endpoint_template")
-        if (template == null || template.windowed("{pdu_session_id}".length)
-                .count { it == "{pdu_session_id}" } != 1
-        ) {
-            throw ComputeBindingException("data-plane-access-unsupported")
-        }
-        val expanded = template.replace("{pdu_session_id}", binding.pduSessionId.toString())
-        val accessUri = runCatching { URI(expanded) }.getOrNull()
-        if (
-            accessUri?.scheme != "https" || accessUri.host.isNullOrBlank() ||
-            !masqueTransport.connected
-        ) {
+        // Runtime 的 data_plane_accesses 声明（advertisedEndpoint）仅作为信息，
+        // 不再强制校验；只要求既有 CONNECT-IP 隧道处于连接状态。
+        if (!masqueTransport.connected) {
             throw ComputeBindingException("data-plane-access-unsupported")
         }
         installComputeRoute(session)
@@ -3708,6 +3679,7 @@ class AgentSdk internal constructor(
         private const val COMPUTE_SESSION_CLOSE = "COMPUTE_SESSION_CLOSE"
         private const val COMPUTE_STATUS_RESULT_LOG_LIMIT = 2_000
         private const val RECEIVED_A2A_MESSAGE_CACHE_LIMIT = 1_024
+        private const val MIN_API_TIMEOUT_SECONDS = 20.0
         private val CONTROL_ACTION_STATUSES = setOf(
             "ACCEPTED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED", "UNKNOWN",
         )

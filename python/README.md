@@ -8,7 +8,7 @@ SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.17.9-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
+- `agent_connect_sdk-0.17.10-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/interactive_linux_agent.py`：复用真实 Linux 全流程参数，每按一次回车只调用下一个 SDK 接口。
@@ -48,7 +48,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.17.9-py3-none-any.whl
+dist/agent_connect_sdk-0.17.10-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -60,7 +60,7 @@ dist/agent_connect_sdk-0.17.9-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.17.9-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.17.10-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -97,14 +97,14 @@ python -m pip install -e '.[test]'
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.17.9-py3-none-any.whl
+  ./agent_connect_sdk-0.17.10-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.17.9-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.17.10-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -126,6 +126,12 @@ FULL FLOW DEMO PASSED
 该示例依次调用：`init`、`apply_identity`、`get_network_ability`、`register_capabilities`、`update_capabilities`、`discover_agents`、`create_group`、群组通知处理、`send_message`、消息接收、计算/视频卸载和 `deregister_identity`。
 
 ## 3. 组网和 MASQUE 配置
+
+Python MASQUE 的 QUIC UDP payload 上限为 1400 字节，为默认 1280 字节
+TUN IP 包及 HTTP/3/QUIC 封装预留空间；外层路径需要支持该大小。
+`max_datagram_frame_size` 是接收能力声明，不能代替发送侧的
+`max_datagram_size`。后者使用 aioquic 默认的 1200 字节会使满 MTU
+报文滞留，表现为小消息正常而 SDP 或视频传输超时。
 
 下面的地址只是部署示例，均通过配置传入，SDK 源码没有硬编码这些地址。
 
@@ -431,7 +437,7 @@ profile = await sdk.apply_identity(
     owner="customer-a",
     name="Agent A",
     description="RayNeo edge agent",
-    metadata={"region": "CN", "os": "Linux", "version": "0.17.9"},
+    metadata={"region": "CN", "os": "Linux", "version": "0.17.10"},
 )
 
 ability = await sdk.get_network_ability(profile.agent_id)
@@ -573,10 +579,11 @@ service_endpoints = http://agent-b:4001/A2A/message
 POST http://{agent_runtime_ip}:{agent_runtime_port}/v1/computing/session-requests
 ```
 
-每次请求前，SDK 自动读取 `/v1/acn/status` 和 `/v1/ue/info`，确认 NAS 已就绪、
-至少有一个 ACTIVE IPv4 PDU Session，并存在
-`HTTP3_CONNECT_IP + EXACT_PDU_SESSION_ID` 数据面能力。CREATE 还会确认
-`acn_context.group_id` 在本地为 `ACTIVE`、请求方是本机 Agent、目标 Agent 在群组中。
+每次请求前，SDK 自动读取 `/v1/acn/status` 和 `/v1/ue/info`，确认 NAS 已就绪且
+至少有一个 ACTIVE IPv4 PDU Session。CREATE 还会确认 `acn_context.group_id`
+在本地为 `ACTIVE`、请求方是本机 Agent、目标 Agent 在群组中。计算数据面复用
+`init()` 时通过 `masque_url` 建立的 CONNECT-IP 隧道；Runtime 返回的
+`data_plane_accesses` 仅供诊断，不参与 CREATE 前置判定或重新拨号。
 
 结构化 CREATE 示例：
 
@@ -586,7 +593,6 @@ from agent_sdk import (
     ComputeConstraints,
     ComputeInputFormat,
     ComputeRequestType,
-    ComputeResources,
     ComputeSessionRequest,
 )
 
@@ -603,10 +609,6 @@ create_status = await sdk.create_computing_session(
         ),
         constraints=ComputeConstraints(
             capability_id="dog-vision",
-            resources=ComputeResources(
-                cpu_millicores=2000,
-                memory_mib=4096,
-            ),
             dnn="internet",
             allow_base_qos=True,
         ),
@@ -717,30 +719,11 @@ SDK 将会话 ID 展开到 C-02 路径模板，使用同一个 UE IPv4 访问 Sa
 `target_revision` 以及 `target.label/target.prompt`。同一更新重试时，应用复用原
 `request_id` 和原文本。
 
-运行期动作同样由 SDK 直接发送到 Sandbox。文本动作由 Sandbox 规范化，结构化动作
-则显式提供 `movement`、`grab` 或 `search_object` 和参数：
-
-```python
-from agent_sdk import ControlActionRequest, ControlInputType
-
-action = await sdk.create_control_action(
-    session_id,
-    ControlActionRequest(
-        request_id="control-search-001",
-        input_type=ControlInputType.TEXT,
-        text="寻找杯子",
-        language="zh",
-    ),
-)
-
-while action.status in {"ACCEPTED", "RUNNING", "UNKNOWN"}:
-    action = await sdk.get_control_action(session_id, action.action_id)
-```
-
-创建固定调用 `POST /v1/control-actions` 并要求 HTTP 202；查询调用
-`GET /v1/control-actions/{action_id}` 并要求 HTTP 200。SDK 校验请求和动作 ID、状态、
-`cause`、可选结果，以及创建响应的 `computing_context` 回显。Sandbox 向 producer
-Runtime 转发机器狗动作的接口不向应用暴露。
+最新 pruned_sandbox 已停用文本控制资源：`POST /v1/control-actions` 和
+`GET /v1/control-actions/{action_id}` 固定返回 HTTP 410
+`control-actions-disabled`，不再向 producer Runtime 转发机器狗动作。Python SDK 暂时保留
+`create_control_action`/`get_control_action` 以兼容旧调用方；连接新 Sandbox 时会返回
+`SANDBOX_REJECTED`，示例和全接口测试不再调用这两个接口。
 
 请求方是 consumer，CREATE 中的目标 Agent 是 producer。应用如需通知 producer 启动
 上传，只通过现有 `send_message` 传递 `compute_service_session_id`；不要传 Sandbox IP、
@@ -1014,8 +997,6 @@ sudo -E .venv/bin/python examples/linux_agent.py \
   --dnn internet \
   --message '{"type":"text","content":"hello"}' \
   --compute-capability-id dog-vision \
-  --compute-cpu-millicores 2000 \
-  --compute-memory-mib 4096 \
   --log-file /var/log/agent-sdk/agent-a.log \
   --log-level INFO
 ```
@@ -1081,13 +1062,14 @@ WebSocket、A2A HTTP 监听仍然正常工作。交互步骤覆盖监听器注�
 身份申请、网络能力获取和 Agent Card 发布。`--force-registration` 与
 `--fresh-registration` 互斥。
 
-Linux B 与 Android B 默认同时发布 Agent skill `robot dog` 和算力能力 `dog-vision`：
-意图响应的 `executor=robot dog` 直接用于发现，C-01 继续使用
-`capability_id=dog-vision`。如果 Linux B 的
+Linux B 与 Android B 默认同时发布 Discovery skills `patrol`、`camera` 和算力能力
+`dog-vision`。Agent A 将 9004 ASR 响应中的 `required_skills` 原样传给 H-DISCOVERY，
+不再读取 8011 意图响应中的 `executor`；C-01 继续使用 `capability_id=dog-vision`。如果 Linux B 的
 状态目录中保存的是旧版 `video_rendering` Agent Card，首次与 Android A 联调时应带
-`--force-registration`，让 B 重新发布两个能力后再等待发现。
+`--force-registration`，让 B 重新发布这些能力后再等待发现。
 
-本测试使用两个独立脚本。B 先发布 `robot dog` 与 `dog-vision` 并等待；A 按能力发现 B、
+本测试使用两个独立脚本。B 先发布 `patrol`、`camera` 与 `dog-vision` 并等待；A 按 9004
+返回的技能列表发现 B、
 建立二人群组，然后执行完整的算力媒体流程：
 
 1. A 使用正式 `ComputeSessionRequest` 调用 `create_computing_session()`；
@@ -1112,7 +1094,8 @@ sudo -E .venv/bin/python examples/agent_b_test.py \
   --runtime-ip 192.168.3.10 \
   --runtime-port 8089 \
   --masque-url https://192.168.3.10:8444/.well-known/masque/ip \
-  --agent-skill 'robot dog' \
+  --agent-skill patrol \
+  --agent-skill camera \
   --capability dog-vision \
   --force-registration \
   --video-source file \
@@ -1135,13 +1118,12 @@ sudo -E .venv/bin/python examples/agent_a_test.py \
   --runtime-ip 192.168.3.10 \
   --runtime-port 8088 \
   --masque-url https://192.168.3.10:8443/.well-known/masque/ip \
-  --target-capability dog-vision \
+  --required-skill patrol \
+  --required-skill camera \
   --group-name agent-a-b-test-group \
   --dnn internet \
   --message '{"type":"text","content":"hello Agent B from Agent A"}' \
   --compute-capability-id dog-vision \
-  --compute-cpu-millicores 2000 \
-  --compute-memory-mib 4096 \
   --frame-count 1 \
   --terminal-action release \
   --log-file ./logs/agent-a-test.log
@@ -1155,6 +1137,10 @@ A 仍会先发送原 ACN 文本测试消息，再申请算力会话。能力发�
 约束可通过 `--compute-api-version`、`--compute-image-id`、`--compute-gpu-count`、
 `--compute-gpu-model`、`--compute-snssai`、`--compute-max-duration-ms`、区域及
 `--[no-]allow-base-qos` 传入。
+
+`--required-skill` 和 `--agent-skill` 都可重复；不传时分别默认使用
+`patrol`、`camera`。所有公开 SDK 超时参数及脚本传给 SDK 的超时值均不小于 20 秒；
+显式传入小于 20 秒会返回参数错误。
 
 成功判据如下：
 

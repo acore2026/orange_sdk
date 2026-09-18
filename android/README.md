@@ -442,10 +442,12 @@ POST http://{agentRuntimeIp}:{agentRuntimePort}/v1/computing/session-requests
 ```
 
 Before each operation, the SDK checks `/v1/acn/status` and `/v1/ue/info` for
-NAS readiness, an active IPv4 PDU session, and an
-`HTTP3_CONNECT_IP + EXACT_PDU_SESSION_ID` access. CREATE also requires the
+NAS readiness and an active IPv4 PDU session. CREATE also requires the
 referenced local group to be `ACTIVE`, the requester to match the local Agent,
-and the target Agent to be a member.
+and the target Agent to be a member. The computing data plane reuses the
+CONNECT-IP tunnel established from the `masqueUrl` passed to `initialize()`;
+Runtime `data_plane_accesses`, when present, are diagnostic metadata and do not
+trigger a second connection or gate CREATE.
 
 ```kotlin
 val createStatus = sdk.createComputingSession(
@@ -461,10 +463,6 @@ val createStatus = sdk.createComputingSession(
         ),
         constraints = ComputeConstraints(
             capabilityId = "video_rendering",
-            resources = ComputeResources(
-                cpuMillicores = 2000,
-                memoryMib = 4096,
-            ),
             dnn = "internet",
             allowBaseQos = true,
         ),
@@ -579,46 +577,16 @@ SDK 内部展开 `recognition_target_path_template`，自动加入完整
 `computing_context`，并校验 HTTP 200、上下文回显、`target_revision` 和目标内容。
 应用重试同一更新时复用原 `requestId` 和原文本。
 
-运行期动作使用 Sandbox 的固定控制资源；SDK 自动注入 consumer 上下文并通过同一个
-UE IPv4 发送：
+最新 pruned_sandbox 已停用文本控制资源：`POST /v1/control-actions` 和
+`GET /v1/control-actions/{action_id}` 固定返回 HTTP 410
+`control-actions-disabled`。Android 示例 App 不再调用这两个接口；SDK 中保留的
+`createControlAction`/`getControlAction` 仅用于兼容旧调用方，连接新 Sandbox 时会把
+410 作为 `SANDBOX_REJECTED` 返回，不能再据此等待或执行机器狗动作。
 
-```kotlin
-val action = sdk.createControlAction(
-    sessionId,
-    ControlActionRequest(
-        requestId = "control-search-001",
-        inputType = ControlInputType.TEXT,
-        text = "寻找杯子",
-        language = "zh",
-    ),
-)
-val current = sdk.getControlAction(sessionId, action.actionId)
-```
-
-`createControlAction` 固定调用 `POST /v1/control-actions` 并要求 HTTP 202；
-`getControlAction` 调用 `GET /v1/control-actions/{action_id}` 并要求 HTTP 200。
-Sandbox 到 producer Runtime 的动作转发由 Runtime 内部处理，不新增应用回调。
-
-pruned_sandbox 的文字意图接口同样不依赖 C-02 或算力会话。SDK 接受完整 URL，并把内部
-分类名和参数归一化为园区业务意图与槽位：
-
-```kotlin
-val result = sdk.recognizeIntent(
-    intentUrl = "http://intent.example:8011/api/v1/intent",
-    text = "派机器狗巡逻A区域",
-)
-check(result.intent == "security patrol")
-println(result.area) // A
-```
-
-当前 pruned_sandbox 的直接响应使用 `intent=patrol`、`argument=A区域`，而 9004 ASR 返回的
-嵌套公共格式使用 `intent=security patrol`、`area=A`；`recognizeIntent` 兼容两种形式，并
-统一返回公共名称。pruned_sandbox 默认让 8011 只监听容器内的 `127.0.0.1`，Android 实机
-使用前必须由部署方提供可达的反向代理 URL，或把该服务改为可控网络内的外部监听地址。
-
-意图驱动发现时，App 直接把响应中的 `executor` 作为 H-DISCOVERY `required_skills`，
-并把原始文本、意图和 `area` 写入 `task_description`。Agent B 发布 `robot dog` skill，
-后续算力请求继续使用独立的 `dog-vision` capability ID。当前 H-DISCOVERY 线协议包含
+Discovery 改由 9004 独立 ASR 的结构化结果驱动，不再调用 8011 文本意图接口，也不再把
+`executor` 当作技能。ASR 的 `text` 原样作为 `task_description`，`required_skills` 原样
+传给 H-DISCOVERY；Agent B 必须发布与它完全一致的 `patrol`、`camera`，算力请求继续使用
+独立的 `dog-vision` capability ID。当前 H-DISCOVERY 线协议包含
 `request_id`、`agent_id`、`task_description`、`required_skills`、`discovery_scope`、
 `max_results`、`timestamp` 和 `proof`，SDK 会补齐所有必填控制字段。协议仍缺少两类业务关联：
 结构化的 `intent/slots` 字段，以及连接意图、发现、建组和算力会话的 `task_id`。在网侧协议
@@ -634,23 +602,27 @@ val transcription = sdk.transcribeAudio(
         audio = recordedBytes,
         fileName = "speech.m4a",
         contentType = "audio/mp4",
-        sessionId = "demo-room",
-        taskId = "task-001",
-        source = "glasses",
+        requestId = "asr-001",
         language = "zh",
     ),
 )
-println(transcription.text)
+check(transcription.intent.type == "TASK")
+val agents = sdk.discoverAgents(
+    profile.agentId,
+    taskDescription = transcription.text,
+    requiredSkills = transcription.requiredSkills,
+)
 ```
 
-`transcribeAudio` 使用 `multipart/form-data` 上传 `file/session_id/task_id/source`，并返回
-转写文本、语言概率、分段时间和处理耗时。调用方传入完整 ASR URL；SDK 不从 C-02 推导
-9004 地址。支持 `wav/mp3/m4a/flac/ogg/webm`。
+`transcribeAudio` 使用 `multipart/form-data` 上传 `file/request_id/language`，并返回
+`request_id/text/intent/required_skills`。只有 `intent.type` 为 `TASK`、`VIDEO_TASK` 或
+`OBJECT_RECOGNITION` 且技能列表非空时才应发起 Discovery。调用方传入完整 ASR URL；SDK
+不从 C-02 推导 9004 地址。支持 `wav/mp3/m4a/flac/ogg/webm`。
 
-consumer 已收到 C-02 后，可以把录音直接创建为运行期控制动作：
+consumer 已收到 C-02 后，可以把录音提交给运行期动作识别接口：
 
 ```kotlin
-val voiceAction = sdk.createAudioControlAction(
+val recognition = sdk.createAudioControlAction(
     computeServiceSessionId = sessionId,
     request = AudioControlActionRequest(
         requestId = "voice-action-001",
@@ -660,12 +632,15 @@ val voiceAction = sdk.createAudioControlAction(
         language = "zh",
     ),
 )
-println(voiceAction.transcription?.text)
+println("${recognition.text}: ${recognition.intent.intent}")
 ```
 
 该接口使用 C-02 的 `service_endpoint` 调用 `POST /v1/audio-control-actions`，自动携带
-`computing_context`，要求 HTTP 202，并把响应中的 `transcription` 与标准控制动作状态一起
-返回。后续仍使用 `getControlAction` 查询动作执行结果。
+`computing_context`，要求 HTTP 200，并返回 `request_id/text/intent`。它只做识别，没有
+控制副作用，也没有可供 `getControlAction` 查询的 `action_id`。只有调用方明确允许并且
+`intent.matched=true`、`intent.intent=movement` 时，才可在上层构造后续 A2A 业务消息。
+
+所有公开 SDK 超时参数的默认值都不小于 20 秒；显式传入小于 20 秒会返回参数错误。
 
 If the requester tells the producer to start, the application sends only
 `compute_service_session_id` through the existing `sendMessage` API. It does
@@ -678,7 +653,7 @@ to `initialize`; the SDK no longer exposes a separate compute-control target.
 ### N6 / DN Mock 算力视频联调
 
 仓库的 [`mock-video-server`](../mock-video-server/README.md) 已部署到 free6GC 的
-`compose_n6`，默认地址 `172.30.0.10:28500`。该地址不再由 App 配置。算网控制面需要在
+`compose_n6`，N6 用户面默认地址 `172.30.0.10:28502`。该地址不再由 App 配置。算网控制面需要在
 C-02 中把 `service_endpoint` 下发为该地址，并把 `media_connections_path` 下发为
 `/v1/media-connections`；SDK 据此安装路由并发起 Sandbox 信令。
 
@@ -693,7 +668,7 @@ C-02 中把 `service_endpoint` 下发为该地址，并把 `media_connections_pa
    Sandbox IP、端口、URL、角色、`binding_ref` 或 SDP。
 4. A 可以在 B 首帧到达前完成 consumer WebRTC 并先看到占位流。出现 `VIDEO STREAM`
    和 `VIDEO FRAME frames=1` 后，预览窗显示处理后画面；右上角 `LIVE` 来自实际绘制首帧回调。
-5. 在 DN 查看 `curl http://172.30.0.10:28500/debug/v1/sessions`，可以按 consumer
+5. 在 DN 查看 `curl http://172.30.0.10:28502/debug/v1/sessions`，可以按 consumer
    核对 `frames_processed`、`packets_sent`、`bytes_sent`、`codec`、首帧状态和
    `keyframes_requested`。停止 App 时，A 先调用 RELEASE，双方媒体连接由 SDK 清理。
 6. 可直接运行 `python3 mock-video-server/smoke_client.py`，验证正式 U-MEDIA 的

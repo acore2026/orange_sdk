@@ -13,7 +13,7 @@ def test_launcher_creates_network_and_replaces_existing_container(tmp_path: Path
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     call_log = tmp_path / "docker-calls.log"
-    archive = tmp_path / "agent-compute-sandbox-mock-0.2.0-linux-arm64.tar.gz"
+    archive = tmp_path / "agent-compute-sandbox-mock-0.3.0-linux-arm64.tar.gz"
     with gzip.open(archive, "wb") as stream:
         stream.write(b"mock image archive")
     checksum = subprocess.check_output(["sha256sum", archive.name], cwd=tmp_path, text=True)
@@ -26,8 +26,8 @@ set -eu
 printf '%s\\n' "$*" >>"${FAKE_DOCKER_LOG}"
 case "$*" in
   "compose version") exit 0 ;;
-  "image inspect agent-compute-sandbox-mock:0.2.0-arm64") exit 0 ;;
-  "image inspect --format {{.Os}}/{{.Architecture}} agent-compute-sandbox-mock:0.2.0-arm64")
+  "image inspect agent-compute-sandbox-mock:0.3.0-arm64") exit 0 ;;
+  "image inspect --format {{.Os}}/{{.Architecture}} agent-compute-sandbox-mock:0.3.0-arm64")
     printf '%s\\n' 'linux/arm64'
     ;;
   "network inspect compose_n6") exit 1 ;;
@@ -66,7 +66,8 @@ esac
     )
 
     assert result.returncode == 0, result.stderr
-    assert "Sandbox is healthy" in result.stdout
+    assert "Sandbox management is healthy at http://172.30.0.10:28501." in result.stdout
+    assert "Sandbox user plane is healthy at http://172.30.0.10:28502." in result.stdout
     calls = call_log.read_text()
     assert (
         "network create --driver bridge --subnet 172.30.0.0/24 "

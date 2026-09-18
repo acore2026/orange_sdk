@@ -13,7 +13,6 @@ from agent_sdk import (
     ComputeConstraints,
     ComputeInputFormat,
     ComputeRequestType,
-    ComputeResources,
     ComputeSessionRequest,
     ComputeSessionStatus,
     NetworkMessageAction,
@@ -87,6 +86,13 @@ def _message(value: str) -> Mapping[str, Any]:
     return parsed
 
 
+def _timeout_seconds(value: str) -> float:
+    parsed = float(value)
+    if parsed < 20.0:
+        raise argparse.ArgumentTypeError("timeout must be at least 20 seconds")
+    return parsed
+
+
 def _processed_video_message(status: ComputeSessionStatus) -> Mapping[str, Any]:
     session_id = status.compute_service_session_id
     if session_id is None:
@@ -155,7 +161,7 @@ async def run_full_flow(
         metadata={
             "region": args.region,
             "os": "Linux",
-            "version": "0.17.9",
+            "version": "0.17.10",
         },
     )
     print("[2 apply_identity]", profile.agent_id)
@@ -294,9 +300,7 @@ async def run_full_flow(
         before_step,
         "sdk.create_computing_session",
         "POST /v1/computing/session-requests 提交结构化 CREATE；"
-        f"capability_id={args.compute_capability_id!r}，"
-        f"resources={args.compute_cpu_millicores}m CPU/"
-        f"{args.compute_memory_mib} MiB",
+        f"capability_id={args.compute_capability_id!r}",
     )
     status = await sdk.create_computing_session(
         ComputeSessionRequest(
@@ -311,10 +315,6 @@ async def run_full_flow(
             ),
             constraints=ComputeConstraints(
                 capability_id=args.compute_capability_id,
-                resources=ComputeResources(
-                    cpu_millicores=args.compute_cpu_millicores,
-                    memory_mib=args.compute_memory_mib,
-                ),
                 dnn=args.dnn,
                 allow_base_qos=True,
             ),
@@ -450,25 +450,23 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--dnn", default="internet")
     value.add_argument("--group-scope", default="private")
     value.add_argument("--max-members", type=int, default=2)
-    value.add_argument("--group-timeout", type=float, default=30.0)
+    value.add_argument("--group-timeout", type=_timeout_seconds, default=30.0)
     value.add_argument(
         "--message",
         type=_message,
         default={"type": "text", "content": "hello from linux_agent.py"},
     )
-    value.add_argument("--message-timeout", type=float, default=5.0)
+    value.add_argument("--message-timeout", type=_timeout_seconds, default=20.0)
     value.add_argument("--message-type", default="application/json")
     value.add_argument("--compute-capability-id", default="dog-vision")
-    value.add_argument("--compute-cpu-millicores", type=int, default=2000)
-    value.add_argument("--compute-memory-mib", type=int, default=4096)
     value.add_argument("--compute-request-id")
-    value.add_argument("--compute-timeout", type=float, default=30.0)
+    value.add_argument("--compute-timeout", type=_timeout_seconds, default=30.0)
     value.add_argument("--camera-id", type=int, default=0)
     value.add_argument("--video-width", type=int, default=1280)
     value.add_argument("--video-height", type=int, default=720)
     value.add_argument("--video-fps", type=int, default=30)
     value.add_argument("--video-bitrate-kbps", type=int, default=2500)
-    value.add_argument("--processed-stream-timeout", type=float, default=10.0)
+    value.add_argument("--processed-stream-timeout", type=_timeout_seconds, default=20.0)
     value.add_argument("--stay-running", action="store_true")
     value.add_argument(
         "--keep-identity",

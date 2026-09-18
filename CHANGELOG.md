@@ -2,6 +2,81 @@
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
 
+## 2026-09-17 — SDK 放宽 Runtime 数据面访问声明校验
+
+### 修改原因
+
+- 正式算力会话实现让 SDK 在创建前 preflight 和 C-02 安装时强校验 Runtime
+  `/v1/ue/info` 上报的 `data_plane_accesses`（依赖 UE 配置 `connectIP.advertisedEndpoint`）。
+  free6GC 部署包（本机 09-16 重新打包版与远端 0.4.0 包）的 UE 配置缺少该字段，
+  runtime 上报为 null，A 侧创建算力会话被拒（"Runtime provides no exact HTTP3
+  CONNECT-IP data-plane access"）。
+- 该声明在 SDK 内只用于契约对账，不发起拨号或可达性探测；真实数据面可达性由
+  既有 CONNECT-IP 隧道状态保证，不应强依赖部署包配置项。
+
+### 修改方式
+
+- Python SDK `_compute_preflight` 不再要求 `data_plane_accesses` 包含
+  `HTTP3_CONNECT_IP + EXACT_PDU_SESSION_ID`；`_validate_and_install_compute_binding`
+  移除唯一匹配声明与 `endpoint_template` 格式校验，仅保留 CONNECT-IP 隧道连接状态
+  和 C-02/PDU Session 一致性校验。Android SDK 同步等价修改。
+- Python SDK 升级 `0.17.10` 并重新发布 ARM64 镜像与 `agent.tar.gz`；
+  Android 测试 App 升级 `0.2.43`（versionCode 45）。
+
+### 验证内容
+
+- 新增回归测试：`/v1/ue/info` 缺少 `data_plane_accesses` 时，创建算力会话 preflight
+  与 C-02 绑定安装均成功且路由正常写入；Python 全量测试、Android agent-sdk
+  单元测试、ARM64 镜像构建自检与 `agent.tar.gz` 重打包通过。
+
+## 2026-09-17 — Sandbox Mock 对齐 pruned_sandbox 双入口
+
+### 修改原因
+
+- `mock-video-server` 只有单个 `28500` 业务端口，没有 `pruned_sandbox` 的 CMF 管理面，
+  也没有 M-BIND/unbind、绑定校验、幂等摘要和统一错误码；用正式网侧流程联调时接口
+  行为与真实 Sandbox 不一致。
+- 交付物需要区分网侧 Sandbox 与端侧 A/B：`sandbox.tar.gz` 与 `agent.tar.gz` 分别打包
+  各自的服务镜像、启动脚本和 README。
+
+### 修改方式
+
+- Mock 重构为与 `pruned_sandbox` 同构的 `services/{asr,intent,sandbox,video}` 包，单进程
+  监听四个入口：CMF 管理面 `28501`、N6 用户面 `28502`、独立 ASR `9004`、内部 Intent
+  `127.0.0.1:8011`。管理面提供 `compute-session-bindings` 的 bind/查询/media-state/unbind
+  并支持 `FREE6GC_COMPUTING_SANDBOX_MANAGEMENT_TOKEN` Bearer 鉴权；管理面接口仅供核心网
+  调用，不在 SDK/App 文档暴露。用户面强制按 `computing_context` 校验绑定，未绑定或已解绑
+  返回 `409 binding-mismatch`。
+- 除“无模型、返回固定结果”外与 `pruned_sandbox` 一致：ASR 固定返回
+  `MOCK_AUDIO_TRANSCRIPTION_TEXT`（默认 `向左转`），意图走相同规则分类（`backend=rules`），
+  检测对每个激活类别返回固定 confidence `0.99` 的结果并在帧左上角绘制紫块+绿条标记；
+  `search_object`、控制动作生命周期（`ACCEPTED/RUNNING/COMPLETED/FAILED/CANCELLED`）、
+  未配置机器狗端点时 `producer-control-endpoint-unconfigured`、幂等重放与 409 冲突、
+  错误体结构和日志脱敏都按正式实现移植。删除正式版没有的 `/compute/v1/offloading-sessions`。
+- 环境变量与正式 Sandbox 同名（`SANDBOX_USER_PORT`、`SANDBOX_MANAGEMENT_PORT`、
+  `VIDEO_PUBLIC_IP` 等，保留 `MOCK_*` 回退）；镜像升级 `0.3.0`，`EXPOSE 9004 28501 28502`，
+  Compose/Dockerfile/健康检查覆盖四个入口。`smoke_client.py` 改为 bind→建连→识别→搜索→
+  语音→media-state→解绑→解绑后 409 的全链路烟测。
+- 新增 `python/docker/arm64/package-agent.sh`：把 ARM64 端侧镜像与
+  `start-agent-a.sh`/`start-agent-b.sh`/`compose-launch-agent.sh`/Compose/README 打包为
+  `dist/agent.tar.gz`；`package-sandbox.sh` 同步打包 `services` 源码树，交付物为
+  `dist/sandbox.tar.gz` 与 `dist/agent.tar.gz`，各含服务镜像、启动脚本和 README。
+- `start_sandbox.sh` 在容器健康后自动添加幂等的宿主机防火墙放行：Docker 29
+  nftables 后端的 `raw PREROUTING` 容器 IP 防伪 DROP 和跨网桥 FORWARD 隔离会
+  阻断其他网桥上的 CMF 访问 Sandbox 管理面/用户面；脚本按 Sandbox 容器 IP 在
+  `raw PREROUTING` 顶部与 `DOCKER-USER` 链首插入双向 ACCEPT，重复执行不叠加，
+  主机重启或 Docker 重建网络后重跑脚本即可恢复；`SANDBOX_SKIP_FIREWALL=1` 可跳过。
+
+### 验证内容
+
+- Mock 44 项单元测试通过，覆盖管理/用户面路由隔离与鉴权、bind/unbind 幂等与冲突、
+  上下文校验、真实 aiortc WebRTC 端到端（consumer 先建链、占位帧、H.264 High 源 Answer、
+  处理帧无重协商切换、media-state 观测）、识别与搜索固定结果、语音动作全链路和日志脱敏。
+- ARM64 镜像构建内烟测通过；`sandbox.tar.gz` 与 `agent.tar.gz` 完成打包、清单与 SHA-256 校验。
+- 目标 ARM64 主机实测：0.3.0 部署健康、`start_sandbox.sh --smoke` 全链路通过；
+  `switch-remote-sandbox.sh 172.30.0.10` 后 CMF 对账 recovered、管理面 bind 通路验证；
+  防火墙放行规则序列（插入/校验/删除）在本机 Docker 29 实测通过。
+
 ## 2026-09-16 — 增加 Sandbox 离线启动整包
 
 ### 修改原因

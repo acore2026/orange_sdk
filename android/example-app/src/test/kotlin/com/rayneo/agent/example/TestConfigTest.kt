@@ -25,8 +25,8 @@ class TestConfigTest {
         assertEquals(8443, config.masquePort)
         assertEquals("dog-vision", config.capability)
         assertEquals(
-            "http://101.245.78.174:8011/api/v1/intent",
-            config.intentServiceUrl,
+            "http://101.245.78.174:9004/api/v1/transcribe",
+            config.discoveryAsrUrl,
         )
         assertEquals(
             "https://101.245.78.174:8443/.well-known/masque/ip",
@@ -61,11 +61,11 @@ class TestConfigTest {
     }
 
     @Test
-    fun roleARequiresAnAbsoluteIntentServiceUrl() {
-        val invalidA = validConfig().copy(intentServiceUrl = "127.0.0.1:8011")
+    fun roleARequiresTheDiscoveryAsrTranscribeUrl() {
+        val invalidA = validConfig().copy(discoveryAsrUrl = "127.0.0.1:9004")
         val validB = invalidA.copy(role = TestRole.B)
 
-        assertTrue(invalidA.validate().any { it.contains("意图识别地址") })
+        assertTrue(invalidA.validate().any { it.contains("Discovery ASR") })
         assertTrue(validB.validate().isEmpty())
     }
 
@@ -85,7 +85,7 @@ class TestConfigTest {
         localTcpPort = 4001,
         localUdpPort = 28443,
         masqueToken = null,
-        intentServiceUrl = "http://intent.test:8011/api/v1/intent",
+        discoveryAsrUrl = "http://asr.test:9004/api/v1/transcribe",
         owner = "test-owner",
         agentName = "Agent-${role.name}",
         capability = "text",

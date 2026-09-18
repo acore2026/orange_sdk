@@ -50,7 +50,7 @@ def test_agent_b_defaults_to_the_bundled_local_video():
 
     assert args.video_source == "file"
     assert args.loop_video is True
-    assert args.agent_skill == "robot dog"
+    assert args.agent_skill is None
     assert args.capability == "dog-vision"
     assert args.media_timeout == 120.0
     assert "local_vlan_ip" not in vars(args)
@@ -61,11 +61,25 @@ def test_linux_ab_separates_discovery_skill_from_compute_capability():
     agent_a = _base_arguments(_load_example("agent_a_test"))
     agent_b = _base_arguments(_load_example("agent_b_test"))
 
-    assert agent_a.target_capability == "robot dog"
+    assert agent_a.required_skill is None
     assert agent_a.compute_capability_id == "dog-vision"
+    assert "compute_cpu_millicores" not in vars(agent_a)
+    assert "compute_memory_mib" not in vars(agent_a)
     assert agent_a.media_timeout == 120.0
     assert agent_b.capability == "dog-vision"
-    assert agent_b.agent_skill == "robot dog"
+    assert agent_b.agent_skill is None
+
+
+def test_agent_a_does_not_send_resource_constraints():
+    module = _load_example("agent_a_test")
+    default_args = _base_arguments(module)
+    default_request = module._create_compute_request(
+        default_args,
+        group_id="group-1",
+        requester_agent_id="agent-a",
+        target_agent_id="agent-b",
+    )
+    assert default_request.constraints.resources is None
 
 
 async def test_agent_a_runs_acn_and_computing_consumer_flow():
@@ -95,7 +109,7 @@ async def test_agent_a_runs_acn_and_computing_consumer_flow():
     target = SimpleNamespace(
         agent_id="did:example:b",
         service_endpoints="http://agent-b:4001/A2A/message",
-        skills=("robot dog", "dog-vision"),
+        skills=("patrol", "camera", "dog-vision"),
         priority=1,
     )
     member = SimpleNamespace(
@@ -185,7 +199,8 @@ async def test_agent_a_runs_acn_and_computing_consumer_flow():
     ]
     assert "task_id" not in sdk.discover_agents.await_args.kwargs
     assert sdk.discover_agents.await_args.kwargs["required_skills"] == [
-        "robot dog"
+        "patrol",
+        "camera",
     ]
     assert sdk.create_group.await_args.args[1] == ["did:example:b"]
     assert sdk.create_group.await_args.kwargs["dnn"] == "internet"
@@ -199,13 +214,12 @@ async def test_agent_a_runs_acn_and_computing_consumer_flow():
     assert create_request.acn_context.requester_agent_id == "did:example:a"
     assert create_request.acn_context.target_agent_id == "did:example:b"
     assert create_request.constraints.capability_id == "dog-vision"
-    assert create_request.constraints.resources.cpu_millicores == 2000
-    assert create_request.constraints.resources.memory_mib == 4096
+    assert create_request.constraints.resources is None
     assert sdk.send_message.await_args_list[1].args[2] == {
         "compute_service_session_id": "compute-session-1"
     }
     assert sdk.send_message.await_args_list[1].kwargs == {
-        "timeout_seconds": 10.0,
+        "timeout_seconds": 20.0,
         "message_type": "computing_video_session",
         "task_id": "computing:compute-session-1",
     }
@@ -286,11 +300,12 @@ async def test_agent_b_publishes_capability_and_can_stop_before_session():
     )
 
     assert result["agent_id"] == "did:example:b"
-    assert result["agent_skill"] == "robot dog"
+    assert result["agent_skills"] == ["patrol", "camera"]
     assert result["capability"] == "dog-vision"
     assert result["completed_sessions"] == []
     assert sdk.register_capabilities.await_args.kwargs["capabilities"] == [
-        "robot dog",
+        "patrol",
+        "camera",
         "dog-vision",
     ]
     assert sdk.register_capabilities.await_args.kwargs["credentials"] == [

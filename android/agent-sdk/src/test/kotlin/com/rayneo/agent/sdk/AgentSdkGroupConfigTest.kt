@@ -44,6 +44,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -518,7 +519,7 @@ class AgentSdkGroupConfigTest {
             CompletableDeferred<RuntimeHttpResponse>().await()
         }
 
-        val status = sdk.createComputingSession(createComputeRequest(), timeoutSeconds = 2.0)
+        val status = sdk.createComputingSession(createComputeRequest(), timeoutSeconds = 20.0)
 
         assertEquals("css-async-001", status.computeServiceSessionId)
         assertEquals("ACTIVE", status.status)
@@ -1014,21 +1015,20 @@ class AgentSdkGroupConfigTest {
                 audio = byteArrayOf(1, 2, 3),
                 fileName = "speech.m4a",
                 contentType = "audio/mp4",
-                sessionId = "voice-session-001",
-                taskId = "voice-task-001",
-                source = "glasses",
+                requestId = "voice-task-001",
                 language = "zh",
             ),
         )
 
-        assertEquals("transcript-001", result.transcriptId)
-        assertEquals("向左移动", result.text)
-        assertEquals("zh", result.language)
-        assertEquals(1, result.segments.size)
+        assertEquals("voice-task-001", result.requestId)
+        assertEquals("派机器狗巡逻A区域", result.text)
+        assertEquals("TASK", result.intent.type)
+        assertEquals("A", result.intent.area)
+        assertEquals(listOf("patrol", "camera"), result.requiredSkills)
         val upload = sandbox.uploads.single()
         assertEquals("http://sandbox.example:9004/api/v1/transcribe", upload.url)
-        assertEquals("voice-session-001", upload.fields["session_id"])
-        assertEquals("glasses", upload.fields["source"])
+        assertEquals("voice-task-001", upload.fields["request_id"])
+        assertEquals(null, upload.fields["session_id"])
         assertEquals(null, upload.sourceIpv4)
     }
 
@@ -1092,8 +1092,11 @@ class AgentSdkGroupConfigTest {
             ),
         )
 
-        assertEquals("向左移动", action.transcription?.text)
-        assertEquals(ControlAction.movement, action.normalizedAction)
+        assertEquals("voice-action-001", action.requestId)
+        assertEquals("威吓歹徒", action.text)
+        assertEquals("movement", action.intent.intent)
+        assertEquals("forward", action.intent.direction)
+        assertTrue(action.intent.matched)
         val upload = sandbox.uploads.single()
         assertEquals("http://8.8.8.9:8788/v1/audio-control-actions", upload.url)
         assertEquals("8.8.8.7", upload.sourceIpv4)
@@ -2124,43 +2127,29 @@ class AgentSdkGroupConfigTest {
             uploads += Upload(url, fields, fileName, sourceIpv4)
             if (url.endsWith("/api/v1/transcribe")) {
                 return RuntimeHttpResponse(200, buildJsonObject {
-                    put("transcriptId", "transcript-001")
-                    put("sessionId", fields.getValue("session_id"))
-                    put("taskId", fields.getValue("task_id"))
-                    put("source", fields.getValue("source"))
-                    put("text", "向左移动")
-                    put("language", "zh")
-                    put("languageProbability", 0.99)
-                    put("durationMs", 800)
-                    put("processingMs", 120)
-                    put("createdAtMs", 1_789_000_000_000)
-                    put("stopReason", null as String?)
-                    put("segments", buildJsonArray {
-                        add(buildJsonObject {
-                            put("startSec", 0.0)
-                            put("endSec", 0.8)
-                            put("text", "向左移动")
-                        })
+                    put("request_id", fields.getValue("request_id"))
+                    put("text", "派机器狗巡逻A区域")
+                    put("intent", buildJsonObject {
+                        put("type", "TASK")
+                        put("parameters", buildJsonObject { put("area", "A") })
                     })
-                    put("audioFilename", fileName)
+                    put("required_skills", buildJsonArray {
+                        add("patrol")
+                        add("camera")
+                    })
                 })
             }
-            val context = Json.parseToJsonElement(fields.getValue("computing_context")).jsonObject
-            controlAction = buildJsonObject {
+            return RuntimeHttpResponse(200, buildJsonObject {
                 put("request_id", fields.getValue("request_id"))
-                put("action_id", "voice-action-001")
-                put("computing_context", context)
-                put("normalized_action", "movement")
-                put("normalized_parameters", buildJsonObject { put("direction", "left") })
-                put("status", "RUNNING")
-                put("cause", "")
-                put("transcription", buildJsonObject {
-                    put("text", "向左移动")
-                    put("language", "zh")
-                    put("transcript_id", "transcript-001")
+                put("text", "威吓歹徒")
+                put("intent", buildJsonObject {
+                    put("executor", "robot dog")
+                    put("intent", "movement")
+                    put("direction", "forward")
+                    put("matched", true)
+                    put("backend", "rules")
                 })
-            }
-            return RuntimeHttpResponse(202, checkNotNull(controlAction))
+            })
         }
 
         override suspend fun close() = Unit

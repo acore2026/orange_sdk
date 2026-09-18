@@ -25,7 +25,7 @@ def test_host_launcher_recreates_service_and_preserves_registration_semantics(
     fake_bin.mkdir()
     call_log = tmp_path / "docker-calls.log"
     env_file = tmp_path / ".env"
-    env_file.write_text("AGENT_IMAGE=agent-connect-sdk:0.17.9-arm64\n")
+    env_file.write_text("AGENT_IMAGE=agent-connect-sdk:0.17.10-arm64\n")
     docker = fake_bin / "docker"
     docker.write_text(
         """#!/bin/sh
@@ -33,11 +33,11 @@ set -eu
 printf '%s|%s\\n' "${AGENT_REGISTRATION_MODE:-unset}" "$*" >>"${FAKE_DOCKER_LOG}"
 case "$*" in
   "compose version") exit 0 ;;
-  *" config --images") printf '%s\\n' 'agent-connect-sdk:0.17.9-arm64' ;;
-  "image inspect --format {{.Os}}/{{.Architecture}} agent-connect-sdk:0.17.9-arm64")
+  *" config --images") printf '%s\\n' 'agent-connect-sdk:0.17.10-arm64' ;;
+  "image inspect --format {{.Os}}/{{.Architecture}} agent-connect-sdk:0.17.10-arm64")
     printf '%s\\n' 'linux/arm64'
     ;;
-  "image inspect agent-connect-sdk:0.17.9-arm64") exit 0 ;;
+  "image inspect agent-connect-sdk:0.17.10-arm64") exit 0 ;;
   *" ps -aq "*) printf '%s\\n' 'old-container' ;;
   *" ps -q "*) printf '%s\\n' 'new-container' ;;
   "logs new-container") printf '{\"event\": \"%s\"}\\n' "${FAKE_READY_EVENT}" ;;
@@ -79,9 +79,20 @@ esac
     if mode == "force-register":
         assert f" kill {service}" in calls
         assert f" rm -f {service}" in calls
+        assert (
+            " run --rm --no-deps --entrypoint /bin/sh "
+            f"{service} -c "
+        ) in calls
+        assert calls.index(f" rm -f {service}") < calls.index(
+            f" run --rm --no-deps --entrypoint /bin/sh {service} -c "
+        )
+        assert calls.index(
+            f" run --rm --no-deps --entrypoint /bin/sh {service} -c "
+        ) < calls.index(f" up -d --no-deps --force-recreate {service}")
     else:
         assert f" kill {service}" not in calls
         assert f" rm -f {service}" not in calls
+        assert " run --rm --no-deps --entrypoint /bin/sh " not in calls
 
 
 def test_compose_uses_internal_run_commands() -> None:
@@ -89,3 +100,19 @@ def test_compose_uses_internal_run_commands() -> None:
     assert 'command: ["run-agent-a.sh",' in compose
     assert 'command: ["run-agent-b.sh",' in compose
     assert 'command: ["start-agent-' not in compose
+    assert 'AGENT_TARGET_ID: "${AGENT_TARGET_ID:-}"' in compose
+    assert "AGENT_COMPUTE_CPU_MILLICORES" not in compose
+    assert "AGENT_COMPUTE_MEMORY_MIB" not in compose
+
+    runner = (ARM64_DIR / "run-agent-a.sh").read_text()
+    assert "compute-cpu-millicores" not in runner
+    assert "compute-memory-mib" not in runner
+
+
+def test_force_register_clears_all_agent_state_and_logs() -> None:
+    launcher = (ARM64_DIR / "compose-launch-agent.sh").read_text()
+
+    assert "for persistent_directory in /var/lib/agent-sdk /var/log/agent-sdk" in launcher
+    assert 'find "${persistent_directory}" -mindepth 1 -maxdepth 1' in launcher
+    assert "-exec rm -rf -- {} +" in launcher
+    assert "force-register-backups" not in launcher

@@ -24,6 +24,48 @@ class _FakeProtocol:
         self.ping_sent.set()
 
 
+async def test_default_tun_packet_fits_quic_datagram(monkeypatch, tmp_path) -> None:
+    from aioquic.quic.crypto import CryptoPair
+    from aioquic.quic.packet import QuicPacketType
+    from aioquic.quic.packet_builder import QuicPacketBuilder
+    from aioquic.quic.packet import QuicFrameType
+
+    class CapturedConfiguration(BaseException):
+        pass
+
+    def capture(*args, **kwargs):
+        config = kwargs["configuration"]
+        connection = QuicConnection(configuration=config)
+        crypto = CryptoPair()
+        crypto.setup_initial(cid=b"12345678", is_client=True, version=1)
+        builder = QuicPacketBuilder(
+            host_cid=b"12345678", peer_cid=b"87654321", version=1,
+            is_client=True, max_datagram_size=config.max_datagram_size,
+            packet_number=0, peer_token=b"", spin_bit=False,
+        )
+        builder.start_packet(QuicPacketType.ONE_RTT, crypto)
+        # Quarter stream ID and CONNECT-IP context ID precede the IP packet.
+        payload = b"\x00\x00" + bytes(1280)
+        assert connection._write_datagram_frame(
+            builder, payload, QuicFrameType.DATAGRAM_WITH_LENGTH
+        )
+        datagrams, _ = builder.flush()
+        assert len(datagrams) == 1
+        assert len(datagrams[0]) <= config.max_datagram_size
+        raise CapturedConfiguration
+
+    monkeypatch.setattr(masque_module, "connect", capture)
+    transport = AioquicConnectIpTransport(
+        server_url="https://127.0.0.1:8443/.well-known/masque/ip",
+        identity_store=ClientTlsIdentityStore(tmp_path / "tls"),
+    )
+    async def on_packet(packet):
+        pass
+
+    with pytest.raises(CapturedConfiguration):
+        await transport.start(on_packet)
+
+
 def test_keep_alive_interval_must_be_positive() -> None:
     with pytest.raises(ValueError, match="greater than zero"):
         AioquicConnectIpTransport(
@@ -50,9 +92,12 @@ async def test_connect_timeout_reports_phase_endpoint_and_source(
     transport = AioquicConnectIpTransport(
         server_url="https://192.168.3.10:8444/.well-known/masque/ip",
         local_address="192.168.2.10",
-        connect_timeout=0.01,
+        connect_timeout=20.0,
         identity_store=ClientTlsIdentityStore(tmp_path / "tls"),
     )
+    # Keep the public constructor contract at >=20s while shortening this unit
+    # test's injected slow handshake.
+    transport._connect_timeout = 0.01
 
     async def on_packet(packet: bytes) -> None:
         raise AssertionError(f"unexpected packet: {packet!r}")

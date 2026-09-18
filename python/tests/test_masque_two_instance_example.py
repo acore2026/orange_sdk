@@ -232,7 +232,7 @@ async def test_control_curl_configures_peer_then_triggers_exact_message_url(tmp_
         port=control_port,
         peer_state=state,
         message_port=4001,
-        message_timeout=5.0,
+        message_timeout=20.0,
         logger=_logger(),
         http_transport=httpx.MockTransport(peer_handler),
     )

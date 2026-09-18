@@ -131,9 +131,11 @@ class HttpRuntimeTransport:
         port: int,
         *,
         verify: bool | str = True,
-        timeout: float = 10.0,
+        timeout: float = 30.0,
         logger: logging.Logger | None = None,
     ) -> None:
+        if timeout < 20:
+            raise ValueError("timeout must be at least 20 seconds")
         self._base_url = f"http://{host}:{port}"
         self._timeout = timeout
         self._client = httpx.AsyncClient(

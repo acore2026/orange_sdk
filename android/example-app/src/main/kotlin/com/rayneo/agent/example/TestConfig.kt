@@ -21,7 +21,7 @@ data class TestConfig(
     val localTcpPort: Int,
     val localUdpPort: Int,
     val masqueToken: String?,
-    val intentServiceUrl: String,
+    val discoveryAsrUrl: String,
     val owner: String,
     val agentName: String,
     val capability: String,
@@ -44,11 +44,11 @@ data class TestConfig(
         }
         if (masquePath.isBlank()) add("MASQUE 路径不能为空")
         if (role == TestRole.A) {
-            val endpoint = runCatching { URI(intentServiceUrl) }.getOrNull()
+            val endpoint = runCatching { URI(discoveryAsrUrl) }.getOrNull()
             if (endpoint == null || endpoint.scheme !in setOf("http", "https") ||
-                endpoint.host.isNullOrBlank()
+                endpoint.host.isNullOrBlank() || endpoint.path != "/api/v1/transcribe"
             ) {
-                add("意图识别地址必须是完整 HTTP/HTTPS URL")
+                add("Discovery ASR 地址必须是完整的 /api/v1/transcribe HTTP/HTTPS URL")
             }
         }
         if (owner.isBlank()) add("Owner 不能为空")
@@ -68,11 +68,11 @@ object RayNeoX3ProDeployment {
     const val RUNTIME_PORT = 8088
     const val MASQUE_PORT = 8443
     const val MASQUE_PATH = "/.well-known/masque/ip"
-    const val INTENT_SERVICE_URL = "http://101.245.78.174:8011/api/v1/intent"
+    const val DISCOVERY_ASR_URL = "http://101.245.78.174:9004/api/v1/transcribe"
 
     fun agentAConfig(
         masqueToken: String? = null,
-        intentServiceUrl: String? = null,
+        discoveryAsrUrl: String? = null,
     ): TestConfig = TestConfig(
         role = TestRole.A,
         serverIp = SERVER_IP,
@@ -82,7 +82,7 @@ object RayNeoX3ProDeployment {
         localTcpPort = 4001,
         localUdpPort = 28443,
         masqueToken = masqueToken?.takeIf(String::isNotBlank),
-        intentServiceUrl = intentServiceUrl?.takeIf(String::isNotBlank) ?: INTENT_SERVICE_URL,
+        discoveryAsrUrl = discoveryAsrUrl?.takeIf(String::isNotBlank) ?: DISCOVERY_ASR_URL,
         owner = "rayneo-x3-pro-owner-a",
         agentName = "RayNeo-X3-Pro-A",
         capability = "dog-vision",

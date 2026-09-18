@@ -878,3 +878,42 @@ async def test_c02_rejects_network_binding_mismatch(sdk_fixture):
 
     assert response["accepted"] is False
     assert response["cause"] == "network-binding-mismatch"
+
+
+def _strip_data_plane_accesses(runtime):
+    """Runtime 未配置 advertisedEndpoint 时 /v1/ue/info 不含 data_plane_accesses。"""
+    original = runtime.get_ue_info
+
+    async def stripped():
+        info = dict(await original())
+        info.pop("data_plane_accesses", None)
+        return info
+
+    runtime.get_ue_info = stripped
+
+
+async def test_create_preflight_allows_runtime_without_data_plane_accesses(
+    sdk_fixture,
+):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    await runtime.deliver_group_config(group_payload())
+    _strip_data_plane_accesses(runtime)
+
+    status = await sdk.create_computing_session(create_request())
+
+    assert isinstance(status, ComputeSessionStatus)
+    assert status.compute_service_session_id == "css-001"
+
+
+async def test_c02_is_accepted_without_data_plane_accesses(sdk_fixture):
+    runtime = sdk_fixture["runtime"]
+    _strip_data_plane_accesses(runtime)
+
+    response = await runtime.deliver_downlink(
+        "COMPUTE_CONNECT_CONFIG", connect_config(), 51
+    )
+
+    assert response["accepted"] is True
+    assert response["cause"] == ""
+    assert "8.8.8.9/32" in sdk_fixture["backend"].routes

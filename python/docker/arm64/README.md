@@ -14,17 +14,17 @@ cd /root/lpx/sdk/python
 默认生成：
 
 ```text
-镜像：agent-connect-sdk:0.17.9-arm64
-归档：dist/arm64/agent-connect-sdk-0.17.9-linux-arm64.tar.gz
-校验：dist/arm64/agent-connect-sdk-0.17.9-linux-arm64.tar.gz.sha256
+镜像：agent-connect-sdk:0.17.10-arm64
+归档：dist/arm64/agent-connect-sdk-0.17.10-linux-arm64.tar.gz
+校验：dist/arm64/agent-connect-sdk-0.17.10-linux-arm64.tar.gz.sha256
 ```
 
 ARM64 目标机导入：
 
 ```bash
-sha256sum -c agent-connect-sdk-0.17.9-linux-arm64.tar.gz.sha256
-gzip -dc agent-connect-sdk-0.17.9-linux-arm64.tar.gz | docker load
-docker image inspect --format '{{.Os}}/{{.Architecture}}' agent-connect-sdk:0.17.9-arm64
+sha256sum -c agent-connect-sdk-0.17.10-linux-arm64.tar.gz.sha256
+gzip -dc agent-connect-sdk-0.17.10-linux-arm64.tar.gz | docker load
+docker image inspect --format '{{.Os}}/{{.Architecture}}' agent-connect-sdk:0.17.10-arm64
 ```
 
 ## 同一宿主机运行 A 和 B
@@ -97,8 +97,10 @@ docker exec agent-sdk-b ip route get 10.60.0.2
 ```
 
 `fresh-register` 会正常停止原容器，使其先注销当前身份；新容器再注销状态卷中恢复出的
-遗留身份并重新注册。`force-register` 会强制停止并删除原容器，避免退出钩子发送注销，
-新容器只调用本地 `reset_agent()` 清除 Profile/Card 状态，再从状态1注册。容器镜像内部的
+遗留身份并重新注册。`force-register` 会强制停止并删除原容器，避免退出钩子发送注销；
+启动器随后清空该 Agent 的整个状态卷和日志卷，再启动新容器。因此 Profile/Card、TLS/设备
+私钥、缓存和历史日志都不会复用，PDU Session IPv4 已变化的 Agent 也会像首次运行一样从
+状态1重新注册。新容器中的 `reset_agent()` 仍会执行，并在无旧 Profile/Card 时幂等成功。容器镜像内部的
 `run-agent-a.sh` 和 `run-agent-b.sh` 负责把模式及环境变量转换为 Python 示例参数。
 `AGENT_RUNTIME_IP` 必须是容器可达的 Runtime IPv4 地址。CONNECT-IP 外层源地址由
 容器内的系统路由自动选择，不再配置 `LOCAL_VLAN_IP`。
@@ -109,9 +111,9 @@ docker exec agent-sdk-b ip route get 10.60.0.2
 `AGENT_REGISTRATION_MODE`、`AGENT_FORCE_REGISTRATION`、`AGENT_FRESH_REGISTRATION`、
 `AGENT_DEREGISTER_ON_EXIT`、`AGENT_FULL_INTERFACE_SUITE`。A 还支持
 `AGENT_TARGET_ID`、`AGENT_MESSAGE_JSON`、`AGENT_GROUP_NAME`、
-`AGENT_COMPUTE_CAPABILITY_ID`、CPU/内存/GPU/镜像等正式算力约束、
+`AGENT_COMPUTE_CAPABILITY_ID`、镜像等算力约束、
 `AGENT_COMPUTE_TERMINAL_ACTION`、`AGENT_SANDBOX_TIMEOUT`、
-`AGENT_RECOGNITION_TARGET`、`AGENT_CONTROL_TEXT` 和
+`AGENT_RECOGNITION_TARGET` 和
 `AGENT_PROCESSED_FRAME_COUNT`。B 还支持
 `AGENT_WAIT_TIMEOUT`、`AGENT_VIDEO_SOURCE`、`AGENT_VIDEO_FILE`、
 `AGENT_LOOP_VIDEO`、`AGENT_VIDEO_WIDTH`、
@@ -133,7 +135,7 @@ A 的身份 Reset 探针会先恢复临时 Profile 再执行网侧注销，不�
 `compute_service_session_id` 通过 A2A 发给 B。B 默认循环读取镜像内测试 MP4，A 收到
 处理帧后发送 RELEASE。成功日志还包含 `IDENTITY_LIFECYCLE_PROBE_VERIFIED`、
 `COMPUTING_CANCEL_PROBE_VERIFIED`、`RECOGNITION_TARGET_VERIFIED`、
-`CONTROL_ACTIONS_VERIFIED`、`VIDEO_UPLOAD_PAUSED/RESUMED/STOP_VERIFIED`。
+`CONTROL_ACTIONS_DISABLED`、`VIDEO_UPLOAD_PAUSED/RESUMED/STOP_VERIFIED`。
 
 如需改用真实摄像头，将 `AGENT_VIDEO_SOURCE=camera`，并在 compose 的 Agent B
 `devices` 中增加 `/dev/video0:/dev/video0`；`AGENT_CAMERA_ID`、分辨率和帧率仅在该模式
@@ -150,10 +152,11 @@ A 的身份 Reset 探针会先恢复临时 Profile 再执行网侧注销，不�
 
 需要直接丢弃本地 Profile/Card 状态并重新申请身份、且不向网侧注销旧身份时，执行
 `./start-agent-a.sh force-register` 或 `./start-agent-b.sh force-register`。启动器会绕过旧
-容器的注销钩子，容器内脚本再传入 `--force-registration` 并调用 SDK 的本地
-`reset_agent()`。
-默认 Discovery skill 是意图服务 `executor` 对应的 `robot dog`；正式算力 capability
-保持为 `dog-vision`。两者分别配置，不能互相替代。只需回归旧视频主链路时可设置
+容器的注销钩子，彻底清空对应的状态卷和日志卷，容器内脚本再传入
+`--force-registration` 并调用 SDK 的本地 `reset_agent()`。此操作不可恢复，并会生成新的
+TLS/设备私钥；需要保留旧身份并正常网侧注销时必须使用 `fresh-register`。
+默认 Discovery skills 是 9004 ASR `required_skills` 对应的 `patrol,camera`；
+正式算力 capability 保持为 `dog-vision`。两者分别配置，不能互相替代。只需回归旧视频主链路时可设置
 `AGENT_FULL_INTERFACE_SUITE=false`。
 
 身份、Agent 状态和自动生成的 TLS 私钥保存在 `/var/lib/agent-sdk`，A、B 使用独立
@@ -163,7 +166,7 @@ A 的身份 Reset 探针会先恢复临时 Profile 再执行网侧注销，不�
 docker compose --env-file .env -f docker-compose.same-host.yml down
 ```
 
-## 升级到 0.17.9
+## 升级到 0.17.10
 
 升级前保留 `agent-a-state` 和 `agent-b-state` 卷，让新版容器第一次启动时可以读取旧
 Agent ID 并注销网侧遗留身份。不要使用 `docker compose down -v`。
@@ -173,13 +176,13 @@ docker compose --env-file .env -f docker-compose.same-host.yml \
   down --remove-orphans
 docker image rm agent-connect-sdk:0.17.8-arm64
 
-sha256sum -c agent-connect-sdk-0.17.9-linux-arm64.tar.gz.sha256
-gzip -dc agent-connect-sdk-0.17.9-linux-arm64.tar.gz | docker load
+sha256sum -c agent-connect-sdk-0.17.10-linux-arm64.tar.gz.sha256
+gzip -dc agent-connect-sdk-0.17.10-linux-arm64.tar.gz | docker load
 docker image inspect --format '{{.Os}}/{{.Architecture}}' \
-  agent-connect-sdk:0.17.9-arm64
+  agent-connect-sdk:0.17.10-arm64
 ```
 
-将 `.env` 中的 `AGENT_IMAGE` 更新为 `agent-connect-sdk:0.17.9-arm64`，并使用本版本
+将 `.env` 中的 `AGENT_IMAGE` 更新为 `agent-connect-sdk:0.17.10-arm64`，并使用本版本
 随附的 Compose 文件和宿主机启动脚本。随后直接重启两个服务：
 
 ```bash

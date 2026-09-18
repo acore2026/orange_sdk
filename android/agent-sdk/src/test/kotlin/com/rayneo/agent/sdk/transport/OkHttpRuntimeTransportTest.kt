@@ -46,7 +46,7 @@ class OkHttpRuntimeTransportTest {
                 method = "POST",
                 url = server.url("/api/v1/intent").toString(),
                 body = buildJsonObject { put("text", "派机器狗巡逻A区域") },
-                timeoutSeconds = 2.0,
+                timeoutSeconds = 20.0,
                 sourceIpv4 = null,
             )
             assertEquals(200, response.statusCode)
@@ -80,7 +80,7 @@ class OkHttpRuntimeTransportTest {
                 fileName = "speech.m4a",
                 contentType = "audio/mp4",
                 content = byteArrayOf(1, 2, 3),
-                timeoutSeconds = 2.0,
+                timeoutSeconds = 20.0,
                 sourceIpv4 = null,
             )
             assertEquals(200, response.statusCode)

@@ -54,6 +54,13 @@ def _non_negative_int(value: str) -> int:
     return parsed
 
 
+def _timeout_seconds(value: str) -> float:
+    parsed = float(value)
+    if parsed < 20.0:
+        raise argparse.ArgumentTypeError("timeout must be at least 20 seconds")
+    return parsed
+
+
 async def _before_step(
     gate: EnterStepGate | None, interface_name: str, description: str
 ) -> None:
@@ -182,6 +189,7 @@ async def run_agent_b(
     gate: EnterStepGate | None = None,
     stop_event: asyncio.Event | None = None,
 ) -> dict[str, Any]:
+    agent_skills = args.agent_skill or ["patrol", "camera"]
     video_file: Path | None = None
     if sdk is not None:
         client = sdk
@@ -353,7 +361,7 @@ async def run_agent_b(
                 capabilities=list(
                     dict.fromkeys(
                         (
-                            args.agent_skill,
+                            *agent_skills,
                             args.capability,
                             *(
                                 (args.capability_update_probe,)
@@ -404,7 +412,7 @@ async def run_agent_b(
         _emit(
             "B_READY",
             agent_id=profile.agent_id,
-            agent_skill=args.agent_skill,
+            agent_skills=agent_skills,
             capability=args.capability,
             video_source=args.video_source,
             video_file=str(video_file) if video_file is not None else None,
@@ -519,7 +527,7 @@ async def run_agent_b(
 
         return {
             "agent_id": profile.agent_id,
-            "agent_skill": args.agent_skill,
+            "agent_skills": agent_skills,
             "capability": args.capability,
             "last_message": message_listener.last_message,
             "completed_sessions": completed_sessions,
@@ -576,8 +584,11 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--region", default="CN")
     value.add_argument(
         "--agent-skill",
-        default="robot dog",
-        help="Agent Card skill matched against the intent response executor",
+        action="append",
+        help=(
+            "Agent Card skill matched against discovery ASR required_skills; repeat "
+            "for multiple skills (default: patrol, camera)"
+        ),
     )
     value.add_argument("--capability", default="dog-vision")
     value.add_argument(
@@ -619,9 +630,9 @@ def parser() -> argparse.ArgumentParser:
     )
     value.add_argument(
         "--wait-timeout",
-        type=float,
-        default=0,
-        help="seconds to wait for each computing session ID; 0 waits indefinitely",
+        type=_timeout_seconds,
+        default=20.0,
+        help="seconds to wait for each computing session ID",
     )
     value.add_argument(
         "--video-source",
@@ -647,15 +658,15 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--video-bitrate-kbps", type=int, default=2500)
     value.add_argument(
         "--media-timeout",
-        type=float,
+        type=_timeout_seconds,
         default=120.0,
         help="seconds to wait for asynchronous C-02 and WebRTC negotiation",
     )
     value.add_argument(
         "--session-close-timeout",
-        type=float,
+        type=_timeout_seconds,
         default=60.0,
-        help="seconds to wait for C-05 after upload starts; 0 waits indefinitely",
+        help="seconds to wait for C-05 after upload starts",
     )
     value.add_argument(
         "--max-sessions",

@@ -22,7 +22,7 @@ usage() {
         '' \
         "Start or restart the ${SERVICE} Docker Compose service and wait for ${READY_EVENT}." \
         '  fresh-register  stop gracefully, deregister the saved identity, then register again' \
-        '  force-register  kill without deregistration, reset local state 1, then register again' \
+        '  force-register  kill without deregistration, erase all local state/logs, then register again' \
         '' \
         'Optional environment:' \
         '  AGENT_ENV_FILE       Compose env file; default: .env beside this script' \
@@ -52,7 +52,7 @@ esac
 
 COMPOSE_FILE="${AGENT_COMPOSE_FILE:-${SCRIPT_DIR}/docker-compose.same-host.yml}"
 ENV_FILE="${AGENT_ENV_FILE:-${SCRIPT_DIR}/.env}"
-SDK_VERSION="${AGENT_SDK_VERSION:-0.17.9}"
+SDK_VERSION="${AGENT_SDK_VERSION:-0.17.10}"
 START_TIMEOUT="${AGENT_START_TIMEOUT:-120}"
 
 case "${START_TIMEOUT}" in
@@ -134,6 +134,18 @@ if [ "${REGISTRATION_MODE}" = "force-register" ] \
     printf 'Force-stopping the old %s container without running its deregistration hook ...\n' "${SERVICE}"
     compose kill "${SERVICE}" >/dev/null 2>&1 || true
     compose rm -f "${SERVICE}" >/dev/null
+fi
+
+if [ "${REGISTRATION_MODE}" = "force-register" ]; then
+    printf 'Clearing all persisted %s state and logs before force registration ...\n' "${SERVICE}"
+    compose run --rm --no-deps --entrypoint /bin/sh "${SERVICE}" -c '
+        set -eu
+        for persistent_directory in /var/lib/agent-sdk /var/log/agent-sdk; do
+            [ -d "${persistent_directory}" ] || continue
+            find "${persistent_directory}" -mindepth 1 -maxdepth 1 \
+                -exec rm -rf -- {} +
+        done
+    '
 fi
 
 printf 'Starting or restarting %s with %s using %s ...\n' \

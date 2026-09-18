@@ -55,6 +55,7 @@ if [ ! -c /dev/net/tun ]; then
 fi
 
 AGENT_LOG_FILE="${AGENT_LOG_FILE:-/var/log/agent-sdk/agent-b.log}"
+AGENT_SKILLS="${AGENT_SKILLS:-patrol,camera}"
 AGENT_CAMERA_ID="${AGENT_CAMERA_ID:-0}"
 AGENT_VIDEO_SOURCE="${AGENT_VIDEO_SOURCE:-file}"
 AGENT_VIDEO_FILE="${AGENT_VIDEO_FILE:-/opt/agent-sdk/examples/assets/video-offload-test.mp4}"
@@ -92,11 +93,10 @@ set -- \
     --description "${AGENT_DESCRIPTION:-Agent B video offload producer test}" \
     --region "${AGENT_REGION:-CN}" \
     --capability "${AGENT_CAPABILITY:-dog-vision}" \
-    --agent-skill "${AGENT_SKILL:-robot dog}" \
     --capability-update-probe "${AGENT_CAPABILITY_UPDATE_PROBE:-full-interface-probe}" \
     --upload-control-delay "${AGENT_UPLOAD_CONTROL_DELAY:-0.25}" \
     --priority "${AGENT_PRIORITY:-1}" \
-    --wait-timeout "${AGENT_WAIT_TIMEOUT:-0}" \
+    --wait-timeout "${AGENT_WAIT_TIMEOUT:-20}" \
     --video-source "${AGENT_VIDEO_SOURCE}" \
     --video-file "${AGENT_VIDEO_FILE}" \
     --camera-id "${AGENT_CAMERA_ID}" \
@@ -109,6 +109,15 @@ set -- \
     --max-sessions "${AGENT_MAX_SESSIONS:-1}" \
     --log-file "${AGENT_LOG_FILE}" \
     --log-level "${AGENT_LOG_LEVEL:-INFO}"
+
+old_ifs="${IFS}"
+IFS=,
+for skill in ${AGENT_SKILLS}; do
+    if [ -n "${skill}" ]; then
+        set -- "$@" --agent-skill "${skill}"
+    fi
+done
+IFS="${old_ifs}"
 
 if [ -n "${MASQUE_TOKEN:-}" ]; then
     set -- "$@" --masque-token "${MASQUE_TOKEN}"

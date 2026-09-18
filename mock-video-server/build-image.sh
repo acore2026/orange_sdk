@@ -3,15 +3,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPOSITORY_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-MOCK_VERSION="${MOCK_VERSION:-0.2.0}"
+MOCK_VERSION="${MOCK_VERSION:-0.3.0}"
 IMAGE_TAG="agent-compute-sandbox-mock:${MOCK_VERSION}-arm64"
 OUTPUT_PATH="${REPOSITORY_ROOT}/dist/compute-mock/agent-compute-sandbox-mock-${MOCK_VERSION}-linux-arm64.tar.gz"
-SMOKE_PORT="${MOCK_SMOKE_PORT:-38500}"
+SMOKE_USER_PORT="${MOCK_SMOKE_USER_PORT:-38502}"
+SMOKE_MANAGEMENT_PORT="${MOCK_SMOKE_MANAGEMENT_PORT:-38501}"
+SMOKE_ASR_PORT="${MOCK_SMOKE_ASR_PORT:-39004}"
+SMOKE_INTENT_PORT="${MOCK_SMOKE_INTENT_PORT:-38011}"
 EXPORT_IMAGE=1
 
 usage() {
     printf '%s\n' \
-        "Usage: $(basename "$0") [--tag IMAGE] [--output FILE] [--smoke-port PORT] [--no-export]" \
+        "Usage: $(basename "$0") [--tag IMAGE] [--output FILE] [--smoke-user-port PORT] [--smoke-management-port PORT] [--no-export]" \
         '' \
         'Build, run the complete Sandbox smoke test and export the linux/arm64 image.'
 }
@@ -20,7 +23,9 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --tag) IMAGE_TAG="$2"; shift 2 ;;
         --output) OUTPUT_PATH="$2"; shift 2 ;;
-        --smoke-port) SMOKE_PORT="$2"; shift 2 ;;
+        --smoke-user-port) SMOKE_USER_PORT="$2"; shift 2 ;;
+        --smoke-management-port) SMOKE_MANAGEMENT_PORT="$2"; shift 2 ;;
+        --smoke-port) SMOKE_USER_PORT="$2"; shift 2 ;;
         --no-export) EXPORT_IMAGE=0; shift ;;
         -h|--help) usage; exit 0 ;;
         *) printf 'unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
@@ -61,15 +66,27 @@ docker run --detach --rm \
     --name "${container_name}" \
     --network host \
     --entrypoint python \
+    -e SANDBOX_INTENT_URL="http://127.0.0.1:${SMOKE_INTENT_PORT}/api/v1/intent" \
+    -e ASR_INTENT_URL="http://127.0.0.1:${SMOKE_INTENT_PORT}/api/v1/intent" \
+    -e SANDBOX_ASR_URL="http://127.0.0.1:${SMOKE_ASR_PORT}/api/v1/transcribe" \
     "${IMAGE_TAG}" \
     /opt/mock-video-server/server.py \
     --host 127.0.0.1 \
-    --port "${SMOKE_PORT}" \
+    --user-port "${SMOKE_USER_PORT}" \
+    --management-host 127.0.0.1 \
+    --management-port "${SMOKE_MANAGEMENT_PORT}" \
+    --asr-host 127.0.0.1 \
+    --asr-port "${SMOKE_ASR_PORT}" \
+    --intent-host 127.0.0.1 \
+    --intent-port "${SMOKE_INTENT_PORT}" \
     --public-ip 127.0.0.1 >/dev/null
 
 healthy=0
-for _ in $(seq 1 120); do
-    if curl --fail --silent "http://127.0.0.1:${SMOKE_PORT}/healthz" >/dev/null; then
+for _ in $(seq 1 240); do
+    if curl --fail --silent "http://127.0.0.1:${SMOKE_USER_PORT}/healthz" >/dev/null \
+        && curl --fail --silent "http://127.0.0.1:${SMOKE_MANAGEMENT_PORT}/healthz" >/dev/null \
+        && curl --fail --silent "http://127.0.0.1:${SMOKE_ASR_PORT}/health" >/dev/null \
+        && curl --fail --silent "http://127.0.0.1:${SMOKE_INTENT_PORT}/health" >/dev/null; then
         healthy=1
         break
     fi
@@ -87,7 +104,9 @@ docker run --rm \
     --entrypoint python \
     "${IMAGE_TAG}" \
     /opt/mock-video-server/smoke_client.py \
-    --base-url "http://127.0.0.1:${SMOKE_PORT}" \
+    --management-url "http://127.0.0.1:${SMOKE_MANAGEMENT_PORT}" \
+    --base-url "http://127.0.0.1:${SMOKE_USER_PORT}" \
+    --asr-url "http://127.0.0.1:${SMOKE_ASR_PORT}" \
     --media-timeout 60
 
 cleanup

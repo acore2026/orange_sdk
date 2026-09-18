@@ -2,7 +2,7 @@
 set -eu
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-IMAGE_TAG="${COMPUTE_MOCK_IMAGE:-agent-compute-sandbox-mock:0.2.0-arm64}"
+IMAGE_TAG="${COMPUTE_MOCK_IMAGE:-agent-compute-sandbox-mock:0.3.0-arm64}"
 IMAGE_ARCHIVE="${SANDBOX_IMAGE_ARCHIVE:-}"
 COMPOSE_FILE="${SANDBOX_COMPOSE_FILE:-${SCRIPT_DIR}/docker-compose.n6.yml}"
 CONTAINER_NAME="agent-sdk-mock-video-server"
@@ -21,7 +21,8 @@ usage() {
         '  SANDBOX_IMAGE_ARCHIVE  image archive path' \
         '  SANDBOX_COMPOSE_FILE   Compose file path' \
         '  SANDBOX_START_TIMEOUT  health timeout in seconds; default: 120' \
-        '  SANDBOX_RELOAD_IMAGE   set to 1 to reload an already installed image'
+        '  SANDBOX_RELOAD_IMAGE   set to 1 to reload an already installed image' \
+        '  SANDBOX_SKIP_FIREWALL  set to 1 to skip the host firewall allowance'
 }
 
 case "${1:-}" in
@@ -69,8 +70,8 @@ fi
 
 if [ -z "${IMAGE_ARCHIVE}" ]; then
     for candidate in \
-        "${SCRIPT_DIR}/agent-compute-sandbox-mock-0.2.0-linux-arm64.tar.gz" \
-        "${SCRIPT_DIR}/../dist/compute-mock/agent-compute-sandbox-mock-0.2.0-linux-arm64.tar.gz"
+        "${SCRIPT_DIR}/agent-compute-sandbox-mock-0.3.0-linux-arm64.tar.gz" \
+        "${SCRIPT_DIR}/../dist/compute-mock/agent-compute-sandbox-mock-0.3.0-linux-arm64.tar.gz"
     do
         if [ -f "${candidate}" ]; then
             IMAGE_ARCHIVE="${candidate}"
@@ -127,6 +128,62 @@ compose() {
     docker compose -f "${COMPOSE_FILE}" "$@"
 }
 
+# Docker 29 的 nftables 后端在 raw PREROUTING 为每个容器 IP 生成防伪 DROP
+# （iifname != 所属网桥即丢弃），并且跨网桥 FORWARD 默认被隔离。CMF 等核心网
+# 组件位于其他网桥时无法访问 Sandbox 的管理面/用户面。以下放行按 Sandbox 容器
+# IP 精确限定、幂等可重跑；主机重启或 Docker 重建网络规则后重新执行本脚本即可。
+ensure_sandbox_reachable() {
+    if [ "${SANDBOX_SKIP_FIREWALL:-0}" = "1" ]; then
+        printf 'SANDBOX_SKIP_FIREWALL=1: skipping host firewall allowance.\n'
+        return 0
+    fi
+    if ! command -v iptables >/dev/null 2>&1; then
+        printf 'WARNING: iptables is unavailable; cross-network access to the Sandbox may be blocked.\n' >&2
+        return 0
+    fi
+    sandbox_ip="$(
+        docker inspect \
+            -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+            "${CONTAINER_NAME}" 2>/dev/null || true
+    )"
+    if [ -z "${sandbox_ip}" ]; then
+        printf 'WARNING: Sandbox container IP not found; skipping firewall allowance.\n' >&2
+        return 0
+    fi
+    bridge_if="$(
+        docker network inspect "${NETWORK_NAME}" \
+            -f '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || true
+    )"
+    if [ -z "${bridge_if}" ]; then
+        network_id="$(docker network inspect "${NETWORK_NAME}" -f '{{.Id}}' 2>/dev/null || true)"
+        if [ -n "${network_id}" ]; then
+            bridge_if="br-$(printf '%s' "${network_id}" | cut -c1-12)"
+        fi
+    fi
+    if [ -z "${bridge_if}" ]; then
+        printf 'WARNING: bridge interface of %s not found; skipping firewall allowance.\n' \
+            "${NETWORK_NAME}" >&2
+        return 0
+    fi
+    if ! iptables -w -t raw -C PREROUTING -d "${sandbox_ip}" -j ACCEPT >/dev/null 2>&1; then
+        iptables -w -t raw -I PREROUTING 1 -d "${sandbox_ip}" -j ACCEPT >/dev/null 2>&1 \
+            || printf 'WARNING: failed to insert raw PREROUTING allowance for %s.\n' \
+                "${sandbox_ip}" >&2
+    fi
+    if ! iptables -w -C DOCKER-USER -o "${bridge_if}" -d "${sandbox_ip}" -j ACCEPT >/dev/null 2>&1; then
+        iptables -w -I DOCKER-USER 1 -o "${bridge_if}" -d "${sandbox_ip}" -j ACCEPT >/dev/null 2>&1 \
+            || printf 'WARNING: failed to insert DOCKER-USER inbound allowance for %s.\n' \
+                "${sandbox_ip}" >&2
+    fi
+    if ! iptables -w -C DOCKER-USER -i "${bridge_if}" -s "${sandbox_ip}" -j ACCEPT >/dev/null 2>&1; then
+        iptables -w -I DOCKER-USER 1 -i "${bridge_if}" -s "${sandbox_ip}" -j ACCEPT >/dev/null 2>&1 \
+            || printf 'WARNING: failed to insert DOCKER-USER outbound allowance for %s.\n' \
+                "${sandbox_ip}" >&2
+    fi
+    printf 'Host firewall allowance ensured for %s via %s (raw PREROUTING + DOCKER-USER).\n' \
+        "${sandbox_ip}" "${bridge_if}"
+}
+
 printf 'Starting Sandbox from %s ...\n' "${IMAGE_TAG}"
 compose up -d --no-build --force-recreate mock-video-server
 container_id="$(compose ps -q mock-video-server)"
@@ -145,16 +202,21 @@ while [ "${elapsed}" -lt "${START_TIMEOUT}" ]; do
     case "${health}" in
         healthy)
             compose ps mock-video-server
-            printf 'Sandbox is healthy at http://172.30.0.10:28500.\n'
+            ensure_sandbox_reachable
+            printf 'Sandbox management is healthy at http://172.30.0.10:28501.\n'
+            printf 'Sandbox user plane is healthy at http://172.30.0.10:28502.\n'
             if [ "${RUN_SMOKE}" -eq 1 ]; then
                 printf 'Running complete HTTP/WebRTC smoke test ...\n'
                 docker run --rm \
                     --platform linux/arm64 \
                     --network "${NETWORK_NAME}" \
                     --entrypoint python \
+                    -e FREE6GC_COMPUTING_SANDBOX_MANAGEMENT_TOKEN="${SANDBOX_MANAGEMENT_TOKEN:-}" \
                     "${IMAGE_TAG}" \
                     /opt/mock-video-server/smoke_client.py \
-                    --base-url http://172.30.0.10:28500 \
+                    --management-url http://172.30.0.10:28501 \
+                    --base-url http://172.30.0.10:28502 \
+                    --asr-url http://172.30.0.10:9004 \
                     --media-timeout 60
             fi
             exit 0

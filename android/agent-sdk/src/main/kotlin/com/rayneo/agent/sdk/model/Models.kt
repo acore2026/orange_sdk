@@ -251,40 +251,42 @@ data class AudioControlActionRequest(
     val fileName: String,
     val contentType: String,
     val language: String = "zh",
-    val stopReason: String? = null,
 )
 
 data class AudioTranscriptionRequest(
     val audio: ByteArray,
     val fileName: String,
     val contentType: String,
-    val sessionId: String = "demo-room",
-    val taskId: String = "demo-room",
-    val source: String = "agent-sdk",
+    val requestId: String,
     val language: String? = null,
-    val stopReason: String? = null,
 )
 
-data class AudioTranscriptionSegment(
-    val startSeconds: Double,
-    val endSeconds: Double,
-    val text: String,
-)
+data class DiscoveryIntent(
+    val type: String,
+    val parameters: Map<String, String>,
+) {
+    val area: String? get() = parameters["area"]
+}
 
 data class AudioTranscriptionResult(
-    val transcriptId: String,
-    val sessionId: String,
-    val taskId: String,
-    val source: String,
+    val requestId: String,
     val text: String,
-    val language: String?,
-    val languageProbability: Double?,
-    val durationMs: Long,
-    val processingMs: Long,
-    val createdAtMs: Long,
-    val stopReason: String?,
-    val segments: List<AudioTranscriptionSegment>,
-    val audioFilename: String,
+    val intent: DiscoveryIntent,
+    val requiredSkills: List<String>,
+)
+
+data class RuntimeAudioIntent(
+    val executor: String?,
+    val intent: String,
+    val direction: String?,
+    val matched: Boolean,
+    val backend: String?,
+)
+
+data class RuntimeAudioRecognitionResult(
+    val requestId: String,
+    val text: String,
+    val intent: RuntimeAudioIntent,
 )
 
 /**

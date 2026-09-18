@@ -1,33 +1,51 @@
 services:
   mock-video-server:
-    image: "${COMPUTE_MOCK_IMAGE:-agent-compute-sandbox-mock:0.2.0-arm64}"
+    image: "${COMPUTE_MOCK_IMAGE:-agent-compute-sandbox-mock:0.3.0-arm64}"
     platform: linux/arm64
     build:
       context: .
       args:
-        MOCK_VERSION: "0.2.0"
+        MOCK_VERSION: "0.3.0"
     container_name: agent-sdk-mock-video-server
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
     environment:
-      MOCK_VIDEO_SERVER_IP: "172.30.0.10"
-      MOCK_VIDEO_PORT: "28500"
+      # 与 pruned_sandbox 相同的双入口：CMF 管理面 28501、N6 用户面 28502
+      VIDEO_PUBLIC_IP: "172.30.0.10"
+      SANDBOX_MANAGEMENT_HOST: "0.0.0.0"
+      SANDBOX_MANAGEMENT_PORT: "28501"
+      SANDBOX_USER_PORT: "28502"
+      ASR_HOST: "0.0.0.0"
+      ASR_PORT: "9004"
+      INTENT_HOST: "127.0.0.1"
+      INTENT_PORT: "8011"
+      SANDBOX_ASR_URL: "http://127.0.0.1:9004/api/v1/transcribe"
+      SANDBOX_INTENT_URL: "http://127.0.0.1:8011/api/v1/intent"
+      # 管理接口 Bearer Token；为空仅适用于本地开发
+      FREE6GC_COMPUTING_SANDBOX_MANAGEMENT_TOKEN: "${SANDBOX_MANAGEMENT_TOKEN:-}"
+      # Mock 固定转写文本（无模型）
+      MOCK_AUDIO_TRANSCRIPTION_TEXT: "向左转"
       UPF_N6_IP: "172.30.0.2"
       UE_INTERNET_CIDR: "10.60.0.0/16"
       UE_ACN_CIDR: "10.61.0.0/16"
       LOG_LEVEL: "INFO"
-      MOCK_VIDEO_OUTPUT_FPS: "30"
-      MOCK_VIDEO_H264_RTP_PAYLOAD_BYTES: "1150"
-      MOCK_AUDIO_TRANSCRIPTION_TEXT: "向左移动"
+      LOG_DIR: "/opt/mock-video-server/logs"
+      VIDEO_FPS: "30"
+      VIDEO_H264_RTP_PAYLOAD_BYTES: "1150"
+      # 机器狗业务控制端点由部署方配置；未配置时动作进入 FAILED
+      # SANDBOX_PRODUCER_CONTROL_URL: "http://{ue_ipv4_address}:8080/v1/control-actions"
+    volumes:
+      - ./logs:/opt/mock-video-server/logs
     networks:
       n6:
         ipv4_address: 172.30.0.10
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:28500/healthz', timeout=2)"]
-      interval: 10s
-      timeout: 3s
-      retries: 6
+      test: ["CMD", "python", "-c", "import urllib.request\nfor url in ('http://127.0.0.1:28501/healthz','http://127.0.0.1:28502/healthz','http://127.0.0.1:9004/health','http://127.0.0.1:8011/health'):\n    urllib.request.urlopen(url, timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
 
 networks:
   n6:

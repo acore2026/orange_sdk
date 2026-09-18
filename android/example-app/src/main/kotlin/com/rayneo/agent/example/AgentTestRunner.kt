@@ -3,15 +3,13 @@ package com.rayneo.agent.example
 import com.rayneo.agent.sdk.AgentSdk
 import com.rayneo.agent.sdk.model.AcnContext
 import com.rayneo.agent.sdk.model.AgentLifecycleState
-import com.rayneo.agent.sdk.model.AgentProfile
 import com.rayneo.agent.sdk.model.AudioControlActionRequest
 import com.rayneo.agent.sdk.model.AudioTranscriptionRequest
+import com.rayneo.agent.sdk.model.AudioTranscriptionResult
 import com.rayneo.agent.sdk.model.ComputeConstraints
 import com.rayneo.agent.sdk.model.ComputeInputFormat
 import com.rayneo.agent.sdk.model.ComputeRequestType
 import com.rayneo.agent.sdk.model.ComputeSessionRequest
-import com.rayneo.agent.sdk.model.ControlActionRequest
-import com.rayneo.agent.sdk.model.ControlInputType
 import com.rayneo.agent.sdk.model.GroupConfigSnapshot
 import com.rayneo.agent.sdk.model.MessageReceipt
 import com.rayneo.agent.sdk.model.NetworkMessageAction
@@ -67,7 +65,6 @@ data class SdkFeatureState(
     val videoUploadState: String?,
     val processedVideoState: String?,
     val recognitionTargetRevision: String?,
-    val controlActionId: String?,
     val lastTranscription: String?,
     val recognizedIntent: String?,
     val recognizedArea: String?,
@@ -167,7 +164,6 @@ class AgentTestRunner(
     @Volatile private var pendingComputeNotification: PendingComputeNotification? = null
     @Volatile private var lastComputeStatus: String? = null
     @Volatile private var recognitionTargetRevision: String? = null
-    @Volatile private var lastControlActionId: String? = null
     @Volatile private var lastTranscription: String? = null
     @Volatile private var recognizedIntent: String? = null
     @Volatile private var recognizedArea: String? = null
@@ -185,7 +181,7 @@ class AgentTestRunner(
             "BOOT",
             "角色=${config.role.name}，Runtime=http://${config.serverIp}:${config.runtimePort}，" +
                 "MASQUE=${config.masqueServerUrl}" +
-                if (config.role == TestRole.A) "，Intent=${config.intentServiceUrl}" else "",
+                if (config.role == TestRole.A) "，Discovery ASR=${config.discoveryAsrUrl}" else "",
         )
         val initialized = retryableStep("INIT", "建立端侧链路") {
             sdk.initialize(
@@ -222,7 +218,7 @@ class AgentTestRunner(
                     metadata = buildJsonObject {
                         put("region", "CN")
                         put("os", "Android")
-                        put("version", "0.2.42")
+                        put("version", "0.2.43")
                     },
                 )
             }
@@ -250,7 +246,7 @@ class AgentTestRunner(
                     priority = 1,
                     credentials = listOf(networkAbility.abilityVc),
                     capabilities = if (config.role == TestRole.B) {
-                        listOf(DEFAULT_EXECUTOR_SKILL, config.capability).distinct()
+                        (DISCOVERY_SKILLS + config.capability).distinct()
                     } else {
                         emptyList()
                     },
@@ -261,7 +257,8 @@ class AgentTestRunner(
                 LabLogLevel.SUCCESS,
                 "H-PROFILE",
                 if (config.role == TestRole.B) {
-                    "已发布 skill=$DEFAULT_EXECUTOR_SKILL、capability_id=${config.capability}，" +
+                    "已发布 discovery skills=$DISCOVERY_SKILLS、" +
+                        "capability_id=${config.capability}，" +
                         "等待 Agent A 发现"
                 } else {
                     "Agent A Profile 已发布"
@@ -271,7 +268,7 @@ class AgentTestRunner(
             onLog(LabLogLevel.SUCCESS, "H-PROFILE", "Agent Card 已发布，跳过重复 registerCapabilities")
         }
         emitFeatureState()
-        if (config.role == TestRole.A) runAgentA(activeProfile) else runAgentB()
+        if (config.role == TestRole.A) runAgentA() else runAgentB()
     }
 
     fun featureState(): SdkFeatureState = SdkFeatureState(
@@ -282,7 +279,6 @@ class AgentTestRunner(
         videoUploadState = videoUploadHandle?.state,
         processedVideoState = processedVideoStream?.state,
         recognitionTargetRevision = recognitionTargetRevision,
-        controlActionId = lastControlActionId,
         lastTranscription = lastTranscription,
         recognizedIntent = recognizedIntent,
         recognizedArea = recognizedArea,
@@ -389,7 +385,6 @@ class AgentTestRunner(
             appendLine("video_upload_state=${videoUploadHandle?.state ?: "<none>"}")
             appendLine("processed_video_state=${processedVideoStream?.state ?: "<none>"}")
             appendLine("recognition_target_revision=${recognitionTargetRevision ?: "<none>"}")
-            appendLine("last_control_action_id=${lastControlActionId ?: "<none>"}")
             appendLine("last_transcription=${lastTranscription ?: "<none>"}")
             appendLine("recognized_intent=${recognizedIntent ?: "<none>"}")
             appendLine("recognized_area=${recognizedArea ?: "<none>"}")
@@ -419,7 +414,7 @@ class AgentTestRunner(
                     },
                     messageType = "text",
                     taskId = "android-ab-manual-message",
-                    timeoutSeconds = 10.0,
+                    timeoutSeconds = 20.0,
                 ).also { receipt ->
                     check(receipt.delivered) { "对端未返回 status=OK" }
                     onLog(LabLogLevel.SUCCESS, "A2A SEND", "message_id=${receipt.messageId}，投递成功")
@@ -566,60 +561,58 @@ class AgentTestRunner(
         summary
     }
 
-    suspend fun createControlAction(text: String): String = operationMutex.withLock {
-        ensureResetNotRequested()
-        val normalized = text.trim().takeIf(String::isNotEmpty) ?: error("控制指令不能为空")
-        val action = sdk.createControlAction(
-            requireConsumerSessionId(),
-            ControlActionRequest(
-                requestId = UUID.randomUUID().toString(),
-                inputType = ControlInputType.TEXT,
-                text = normalized,
-                language = "zh",
-            ),
-        )
-        lastControlActionId = action.actionId
-        val summary = "action_id=${action.actionId}，status=${action.status}，" +
-            "normalized_action=${action.normalizedAction ?: "<none>"}"
-        onLog(LabLogLevel.SUCCESS, "CONTROL CREATE", summary)
-        emitFeatureState()
-        summary
-    }
-
     suspend fun transcribeAudio(
         audio: ByteArray,
         fileName: String,
         contentType: String,
-    ): String = operationMutex.withLock {
+    ): String {
         ensureResetNotRequested()
-        val operationId = UUID.randomUUID().toString()
-        val transcription = sdk.transcribeAudio(
-            asrUrl = "http://${config.serverIp}:9004/api/v1/transcribe",
-            request = AudioTranscriptionRequest(
-                audio = audio,
-                fileName = fileName,
-                contentType = contentType,
-                sessionId = activeComputeSessionId ?: "agent-link-$operationId",
-                taskId = "asr-$operationId",
-                source = "android-${config.role.name.lowercase()}",
-                language = "zh",
-            ),
-        )
+        val requestId = "asr-${UUID.randomUUID()}"
+        val transcription = operationMutex.withLock {
+            sdk.transcribeAudio(
+                asrUrl = config.discoveryAsrUrl,
+                request = AudioTranscriptionRequest(
+                    audio = audio,
+                    fileName = fileName,
+                    contentType = contentType,
+                    requestId = requestId,
+                    language = "zh",
+                ),
+            )
+        }
         lastTranscription = transcription.text
-        val summary = "transcript_id=${transcription.transcriptId}，" +
-            "language=${transcription.language ?: "<unknown>"}，text=${transcription.text}"
+        recognizedIntent = transcription.intent.type
+        recognizedArea = transcription.intent.area
+        discoverySkill = transcription.requiredSkills.joinToString(",").ifBlank { null }
+        val summary = "request_id=${transcription.requestId}，text=${transcription.text}，" +
+            "intent=${transcription.intent.type}，" +
+            "required_skills=${transcription.requiredSkills}"
         onLog(LabLogLevel.SUCCESS, "ASR 9004", summary)
         emitFeatureState()
-        summary
+        if (
+            config.role == TestRole.A &&
+            transcription.intent.type in DISCOVERY_INTENT_TYPES &&
+            transcription.requiredSkills.isNotEmpty() &&
+            manualMessageSession == null
+        ) {
+            discoverAndCreateGroup(transcription)
+        } else if (transcription.requiredSkills.isEmpty()) {
+            onLog(
+                LabLogLevel.INFO,
+                "H-DISCOVERY",
+                "intent=${transcription.intent.type} 未提供 required_skills，不发起发现",
+            )
+        }
+        return summary
     }
 
-    suspend fun createAudioControlAction(
+    suspend fun recognizeRuntimeAudioIntent(
         audio: ByteArray,
         fileName: String,
         contentType: String,
     ): String = operationMutex.withLock {
         ensureResetNotRequested()
-        val action = sdk.createAudioControlAction(
+        val recognition = sdk.createAudioControlAction(
             computeServiceSessionId = requireConsumerSessionId(),
             request = AudioControlActionRequest(
                 requestId = UUID.randomUUID().toString(),
@@ -629,23 +622,11 @@ class AgentTestRunner(
                 language = "zh",
             ),
         )
-        lastControlActionId = action.actionId
-        lastTranscription = action.transcription?.text
-        val summary = "text=${action.transcription?.text ?: "<none>"}，" +
-            "action_id=${action.actionId}，status=${action.status}，" +
-            "normalized_action=${action.normalizedAction ?: "<none>"}"
-        onLog(LabLogLevel.SUCCESS, "VOICE CONTROL", summary)
-        emitFeatureState()
-        summary
-    }
-
-    suspend fun getControlAction(): String = operationMutex.withLock {
-        ensureResetNotRequested()
-        val actionId = checkNotNull(lastControlActionId) { "尚未创建控制动作" }
-        val action = sdk.getControlAction(requireConsumerSessionId(), actionId)
-        val summary = "action_id=${action.actionId}，status=${action.status}，" +
-            "cause=${action.cause.ifBlank { "<none>" }}，result=${action.result ?: "<none>"}"
-        onLog(LabLogLevel.SUCCESS, "CONTROL GET", summary)
+        lastTranscription = recognition.text
+        val summary = "request_id=${recognition.requestId}，text=${recognition.text}，" +
+            "intent=${recognition.intent.intent}，direction=${recognition.intent.direction ?: "<none>"}，" +
+            "matched=${recognition.intent.matched}（仅识别，未下发机器狗控制）"
+        onLog(LabLogLevel.SUCCESS, "RUNTIME AUDIO INTENT", summary)
         emitFeatureState()
         summary
     }
@@ -703,7 +684,7 @@ class AgentTestRunner(
             jsonMessage = buildJsonObject { put(COMPUTE_SESSION_ID_FIELD, sessionId) },
             messageType = COMPUTE_SESSION_MESSAGE_TYPE,
             taskId = "computing:$sessionId",
-            timeoutSeconds = 10.0,
+            timeoutSeconds = 20.0,
         )
         check(delivery.delivered) { "compute_service_session_id 未送达 ${route.targetAgentName}" }
         onLog(
@@ -821,57 +802,33 @@ class AgentTestRunner(
         onProducerSessionReady()
     }
 
-    private suspend fun runAgentA(profile: AgentProfile) {
+    private suspend fun runAgentA() {
+        onStatus(RunnerStatus("Agent A 已就绪", "请录制任务语音；ASR 返回技能后自动发现 Agent B"))
         onLog(
             LabLogLevel.INFO,
-            "INTENT",
-            "POST ${config.intentServiceUrl} text=$PATROL_UTTERANCE",
+            "ASR DISCOVERY READY",
+            "等待 POST ${config.discoveryAsrUrl}；required_skills 将原样传给 H-DISCOVERY",
         )
-        val recognition = retryableStep("INTENT", "识别巡逻意图并提取槽位") {
-            sdk.recognizeIntent(
-                intentUrl = config.intentServiceUrl,
-                text = PATROL_UTTERANCE,
-            ).also { result ->
-                check(result.matched && result.intent == SECURITY_PATROL_INTENT) {
-                    "意图未命中 $SECURITY_PATROL_INTENT：intent=${result.intent}，" +
-                        "matched=${result.matched}"
-                }
-                check(!result.executor.isNullOrBlank()) {
-                    "意图响应缺少可用于 Agent Discovery 的 executor skill"
-                }
-            }
-        }
-        val requiredSkill = checkNotNull(recognition.executor).trim()
-        recognizedIntent = recognition.intent
-        recognizedArea = recognition.area
-        discoverySkill = requiredSkill
-        emitFeatureState()
-        onLog(
-            LabLogLevel.SUCCESS,
-            "INTENT",
-            "intent=${recognition.intent}，executor=${recognition.executor ?: "<none>"}，" +
-                "area=${recognition.area ?: "<none>"}，backend=${recognition.backend ?: "<none>"}，" +
-                "discovery skill 直接使用 executor=$requiredSkill",
-        )
-        val taskDescription = buildString {
-            append(PATROL_UTTERANCE)
-            append("；intent=${recognition.intent}")
-            recognition.area?.let { append("；area=$it") }
-        }
+        waitUntilCancelled()
+    }
+
+    private suspend fun discoverAndCreateGroup(transcription: AudioTranscriptionResult) {
+        val profileId = checkNotNull(localAgentId) { "Agent A 尚未完成身份初始化" }
+        val requiredSkills = transcription.requiredSkills
         onLog(
             LabLogLevel.INFO,
             "H-DISCOVERY",
-            "task_description=$taskDescription，required_skills=[$requiredSkill]",
+            "task_description=${transcription.text}，required_skills=$requiredSkills",
         )
-        val discovered = retryableStep("H-DISCOVERY", "按巡逻能力发现 Agent B") {
+        val discovered = retryableStep("H-DISCOVERY", "按 ASR 返回技能发现 Agent B") {
             sdk.discoverAgents(
-                agentId = profile.agentId,
-                taskDescription = taskDescription,
-                requiredSkills = listOf(requiredSkill),
+                agentId = profileId,
+                taskDescription = transcription.text,
+                requiredSkills = requiredSkills,
                 maxResults = 10,
             ).firstOrNull { candidate ->
-                candidate.agentId != profile.agentId && requiredSkill in candidate.skills
-            } ?: error("没有发现声明 $requiredSkill 能力的 Agent B")
+                candidate.agentId != profileId && requiredSkills.all(candidate.skills::contains)
+            } ?: error("没有发现同时声明 $requiredSkills 能力的 Agent B")
         }
         onLog(
             LabLogLevel.SUCCESS,
@@ -880,7 +837,7 @@ class AgentTestRunner(
         )
         val group = retryableStep("H-GROUP", "与 Agent B 建组") {
             sdk.createGroup(
-                agentId = profile.agentId,
+                agentId = profileId,
                 targetAgentIds = listOf(discovered.agentId),
                 groupName = config.groupName,
                 dnn = config.dnn,
@@ -895,7 +852,6 @@ class AgentTestRunner(
         }
         onLog(LabLogLevel.SUCCESS, "GROUP CONFIG", "成员路由已进入 SDK 缓存")
         activateManualMessaging(group.groupId)
-        waitUntilCancelled()
     }
 
     private suspend fun runAgentB() {
@@ -1091,7 +1047,6 @@ class AgentTestRunner(
         createComputeRequest = null
         lastComputeStatus = "CLOSED"
         recognitionTargetRevision = null
-        lastControlActionId = null
         lastTranscription = null
         onComputeActionAvailability(config.role == TestRole.A && manualMessageSession != null)
         emitFeatureState()
@@ -1175,9 +1130,8 @@ class AgentTestRunner(
     }
 
     private companion object {
-        const val PATROL_UTTERANCE = "派机器狗巡逻A区域"
-        const val SECURITY_PATROL_INTENT = "security patrol"
-        const val DEFAULT_EXECUTOR_SKILL = "robot dog"
+        val DISCOVERY_SKILLS = listOf("patrol", "camera")
+        val DISCOVERY_INTENT_TYPES = setOf("TASK", "VIDEO_TASK", "OBJECT_RECOGNITION")
         const val COMPUTE_REQUEST_MESSAGE_TYPE = "COMPUTE_SESSION_REQUEST"
         const val COMPUTE_SESSION_MESSAGE_TYPE = "computing_video_session"
         const val COMPUTE_SESSION_ID_FIELD = "compute_service_session_id"

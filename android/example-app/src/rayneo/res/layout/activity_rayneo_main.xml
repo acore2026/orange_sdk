@@ -154,7 +154,7 @@
             android:focusable="true"
             android:fontFamily="sans"
             android:gravity="center"
-            android:text="语音控制"
+            android:text="运行期意图"
             android:textColor="#5EEAD4"
             android:textSize="16sp"
             android:textStyle="bold" />

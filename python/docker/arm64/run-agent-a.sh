@@ -56,6 +56,7 @@ fi
 
 AGENT_LOG_FILE="${AGENT_LOG_FILE:-/var/log/agent-sdk/agent-a.log}"
 AGENT_COMPUTE_CAPABILITY_ID="${AGENT_COMPUTE_CAPABILITY_ID:-dog-vision}"
+AGENT_REQUIRED_SKILLS="${AGENT_REQUIRED_SKILLS:-patrol,camera}"
 AGENT_MESSAGE_JSON="${AGENT_MESSAGE_JSON:-}"
 if [ -z "${AGENT_MESSAGE_JSON}" ]; then
     AGENT_MESSAGE_JSON='{"type":"text","content":"hello Agent B from Agent A"}'
@@ -74,7 +75,6 @@ set -- \
     --owner "${AGENT_OWNER:-ab-test-owner-a}" \
     --description "${AGENT_DESCRIPTION:-Agent A video offload consumer test}" \
     --region "${AGENT_REGION:-CN}" \
-    --target-capability "${AGENT_TARGET_CAPABILITY:-robot dog}" \
     --priority "${AGENT_PRIORITY:-1}" \
     --task-id "${AGENT_TASK_ID:-agent-a-to-b-test}" \
     --task-description "${AGENT_TASK_DESCRIPTION:-discover a video offload Agent B}" \
@@ -86,14 +86,11 @@ set -- \
     --group-timeout "${AGENT_GROUP_TIMEOUT:-60}" \
     --message "${AGENT_MESSAGE_JSON}" \
     --message-type "${AGENT_MESSAGE_TYPE:-text}" \
-    --message-timeout "${AGENT_MESSAGE_TIMEOUT:-10}" \
+    --message-timeout "${AGENT_MESSAGE_TIMEOUT:-20}" \
     --compute-capability-id "${AGENT_COMPUTE_CAPABILITY_ID}" \
-    --compute-cpu-millicores "${AGENT_COMPUTE_CPU_MILLICORES:-2000}" \
-    --compute-memory-mib "${AGENT_COMPUTE_MEMORY_MIB:-4096}" \
     --compute-timeout "${AGENT_COMPUTE_TIMEOUT:-30}" \
-    --sandbox-timeout "${AGENT_SANDBOX_TIMEOUT:-15}" \
+    --sandbox-timeout "${AGENT_SANDBOX_TIMEOUT:-20}" \
     --recognition-target "${AGENT_RECOGNITION_TARGET:-寻找穿红色衣服的人}" \
-    --control-text "${AGENT_CONTROL_TEXT:-向左移动一米}" \
     --control-language "${AGENT_CONTROL_LANGUAGE:-zh-CN}" \
     --terminal-action "${AGENT_COMPUTE_TERMINAL_ACTION:-release}" \
     --media-timeout "${AGENT_MEDIA_TIMEOUT:-120}" \
@@ -101,6 +98,15 @@ set -- \
     --frame-timeout "${AGENT_PROCESSED_FRAME_TIMEOUT:-30}" \
     --log-file "${AGENT_LOG_FILE}" \
     --log-level "${AGENT_LOG_LEVEL:-INFO}"
+
+old_ifs="${IFS}"
+IFS=,
+for skill in ${AGENT_REQUIRED_SKILLS}; do
+    if [ -n "${skill}" ]; then
+        set -- "$@" --required-skill "${skill}"
+    fi
+done
+IFS="${old_ifs}"
 
 if [ -n "${MASQUE_TOKEN:-}" ]; then
     set -- "$@" --masque-token "${MASQUE_TOKEN}"

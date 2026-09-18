@@ -23,13 +23,7 @@ from agent_sdk import (
     ComputeConstraints,
     ComputeInputFormat,
     ComputeRequestType,
-    ComputeResources,
     ComputeSessionRequest,
-    ControlAction,
-    ControlActionRequest,
-    ControlActionTarget,
-    ControlInputType,
-    ControlTargetRole,
     NetworkMessageAction,
     NetworkMessageType,
     __version__,
@@ -70,6 +64,13 @@ def _non_negative_int(value: str) -> int:
     return parsed
 
 
+def _timeout_seconds(value: str) -> float:
+    parsed = float(value)
+    if parsed < 20.0:
+        raise argparse.ArgumentTypeError("timeout must be at least 20 seconds")
+    return parsed
+
+
 def _create_compute_request(
     args: argparse.Namespace,
     *,
@@ -78,12 +79,6 @@ def _create_compute_request(
     target_agent_id: str,
     request_id: str | None = None,
 ) -> ComputeSessionRequest:
-    resources = ComputeResources(
-        cpu_millicores=args.compute_cpu_millicores,
-        memory_mib=args.compute_memory_mib,
-        gpu_count=args.compute_gpu_count,
-        gpu_model=args.compute_gpu_model,
-    )
     return ComputeSessionRequest(
         message_type=COMPUTE_REQUEST_MESSAGE_TYPE,
         request_type=ComputeRequestType.CREATE,
@@ -98,7 +93,6 @@ def _create_compute_request(
             capability_id=args.compute_capability_id,
             api_version=args.compute_api_version,
             image_id=args.compute_image_id,
-            resources=resources,
             dnn=args.dnn,
             snssai=args.compute_snssai,
             allow_base_qos=args.allow_base_qos,
@@ -124,13 +118,6 @@ def _compute_control_request(
 
 def _compute_session_message(compute_service_session_id: str) -> Mapping[str, str]:
     return {COMPUTE_SESSION_ID_FIELD: compute_service_session_id}
-
-
-def _control_target(target_agent_id: str) -> ControlActionTarget:
-    return ControlActionTarget(
-        role=ControlTargetRole.PRODUCER,
-        agent_id=target_agent_id,
-    )
 
 
 def _frame_details(frame: Any) -> Mapping[str, Any]:
@@ -450,16 +437,17 @@ async def run_agent_a(
             "sdk.discover_agents",
             "POST /arf/v1/agent-discoveries，按目标能力发现 Agent B。",
         )
+        required_skills = args.required_skill or ["patrol", "camera"]
         discovered = await client.discover_agents(
             agent_id=profile.agent_id,
             task_description=args.task_description,
-            required_skills=[args.target_capability],
+            required_skills=required_skills,
             discovery_scope=args.discovery_scope,
             max_results=args.max_results,
         )
         _emit(
             "DISCOVERY_RESULT",
-            required_capability=args.target_capability,
+            required_skills=required_skills,
             agents=[
                 {
                     "agent_id": item.agent_id,
@@ -482,10 +470,10 @@ async def run_agent_a(
         candidates = [
             item
             for item in candidates
-            if args.target_capability in item.skills
+            if all(skill in item.skills for skill in required_skills)
         ]
         if not candidates:
-            expected = args.target_agent_id or args.target_capability
+            expected = args.target_agent_id or required_skills
             raise RuntimeError(f"Agent B was not found for selector {expected!r}")
         target = candidates[0]
         _emit(
@@ -711,58 +699,11 @@ async def run_agent_a(
                 prompt=current_target.target.prompt,
             )
 
-            await _before_step(
-                gate,
-                "sdk.create_control_action/get_control_action",
-                "分别提交自然语言和结构化 Sandbox 控制动作并查询最终状态。",
-            )
-            text_action = await client.create_control_action(
-                compute_session_id,
-                ControlActionRequest(
-                    request_id=str(uuid.uuid4()),
-                    input_type=ControlInputType.TEXT,
-                    text=args.control_text,
-                    language=args.control_language,
-                    target=_control_target(target.agent_id),
-                ),
-                timeout_seconds=args.sandbox_timeout,
-            )
-            text_action_result = await client.get_control_action(
-                compute_session_id,
-                text_action.action_id,
-                timeout_seconds=args.sandbox_timeout,
-            )
-            structured_action = await client.create_control_action(
-                compute_session_id,
-                ControlActionRequest(
-                    request_id=str(uuid.uuid4()),
-                    input_type=ControlInputType.STRUCTURED,
-                    action=ControlAction.MOVEMENT,
-                    parameters={"direction": "forward", "distance_m": 1},
-                    target=_control_target(target.agent_id),
-                ),
-                timeout_seconds=args.sandbox_timeout,
-            )
-            structured_action_result = await client.get_control_action(
-                compute_session_id,
-                structured_action.action_id,
-                timeout_seconds=args.sandbox_timeout,
-            )
             _emit(
-                "CONTROL_ACTIONS_VERIFIED",
-                text_action_id=text_action.action_id,
-                text_action_status=text_action_result.status,
-                text_normalized_action=(
-                    text_action.normalized_action.value
-                    if text_action.normalized_action is not None
-                    else None
-                ),
-                structured_action_id=structured_action.action_id,
-                structured_action_status=structured_action_result.status,
-                structured_normalized_action=(
-                    structured_action.normalized_action.value
-                    if structured_action.normalized_action is not None
-                    else None
+                "CONTROL_ACTIONS_DISABLED",
+                reason=(
+                    "pruned_sandbox returns HTTP 410 for /v1/control-actions; "
+                    "runtime audio recognition is exercised by the Android client"
                 ),
             )
 
@@ -956,9 +897,12 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--description", default="Agent A video offload consumer test")
     value.add_argument("--region", default="CN")
     value.add_argument(
-        "--target-capability",
-        default="robot dog",
-        help="Agent Card skill used for discovery; compute capability is separate",
+        "--required-skill",
+        action="append",
+        help=(
+            "skill returned by discovery ASR and passed to H-DISCOVERY; repeat for "
+            "multiple skills (default: patrol, camera)"
+        ),
     )
     value.add_argument("--target-agent-id")
     value.add_argument("--priority", type=int, default=1)
@@ -971,40 +915,35 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--group-name", default="agent-a-b-test-group")
     value.add_argument("--dnn", default="internet")
     value.add_argument("--group-scope", default="private")
-    value.add_argument("--group-timeout", type=float, default=60.0)
+    value.add_argument("--group-timeout", type=_timeout_seconds, default=60.0)
     value.add_argument(
         "--message",
         type=_json_object,
         default={"type": "text", "content": "hello Agent B from Agent A"},
     )
     value.add_argument("--message-type", default="text")
-    value.add_argument("--message-timeout", type=float, default=10.0)
+    value.add_argument("--message-timeout", type=_timeout_seconds, default=20.0)
     value.add_argument("--compute-capability-id", default="dog-vision")
     value.add_argument("--compute-api-version")
     value.add_argument("--compute-image-id")
-    value.add_argument("--compute-cpu-millicores", type=int, default=2000)
-    value.add_argument("--compute-memory-mib", type=int, default=4096)
-    value.add_argument("--compute-gpu-count", type=_non_negative_int)
-    value.add_argument("--compute-gpu-model")
     value.add_argument("--compute-snssai")
     value.add_argument("--compute-max-duration-ms", type=_non_negative_int)
     value.add_argument("--compute-placement-region")
     value.add_argument("--compute-data-residency-region")
     value.add_argument("--compute-ui-locale")
     value.add_argument("--compute-request-id")
-    value.add_argument("--compute-timeout", type=float, default=30.0)
+    value.add_argument("--compute-timeout", type=_timeout_seconds, default=30.0)
     value.add_argument(
         "--full-interface-suite",
         action=argparse.BooleanOptionalAction,
         default=False,
         help=(
             "exercise the reversible identity lifecycle, capability/session cancel, "
-            "recognition-target and Sandbox control APIs in addition to video"
+            "recognition-target and the disabled control-action contract in addition to video"
         ),
     )
-    value.add_argument("--sandbox-timeout", type=float, default=15.0)
+    value.add_argument("--sandbox-timeout", type=_timeout_seconds, default=20.0)
     value.add_argument("--recognition-target", default="寻找穿红色衣服的人")
-    value.add_argument("--control-text", default="向左移动一米")
     value.add_argument("--control-language", default="zh-CN")
     value.add_argument(
         "--allow-base-qos",
@@ -1025,7 +964,7 @@ def parser() -> argparse.ArgumentParser:
     )
     value.add_argument(
         "--media-timeout",
-        type=float,
+        type=_timeout_seconds,
         default=120.0,
         help="seconds to wait for asynchronous C-02 and WebRTC negotiation",
     )
@@ -1035,7 +974,7 @@ def parser() -> argparse.ArgumentParser:
         default=1,
         help="processed frames required for success; 0 receives until interrupted",
     )
-    value.add_argument("--frame-timeout", type=float, default=30.0)
+    value.add_argument("--frame-timeout", type=_timeout_seconds, default=30.0)
     value.add_argument("--log-file", default="./logs/agent-a-test.log")
     value.add_argument(
         "--log-level",

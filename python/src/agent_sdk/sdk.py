@@ -102,6 +102,7 @@ _COMPUTING_SESSION_REQUEST_PATH = "/v1/computing/session-requests"
 _COMPUTE_CONNECT_CONFIG = "COMPUTE_CONNECT_CONFIG"
 _COMPUTE_SESSION_STATUS = "COMPUTE_SESSION_STATUS"
 _COMPUTE_SESSION_CLOSE = "COMPUTE_SESSION_CLOSE"
+_MIN_API_TIMEOUT_SECONDS = 20.0
 _COMPUTE_TERMINAL_STATUSES = {
     "REJECTED",
     "CLARIFICATION_REQUIRED",
@@ -1006,16 +1007,16 @@ class AgentSdk:
         group_id: str,
         target_agent_id: str,
         json_message: Mapping[str, Any],
-        timeout_seconds: float = 5.0,
+        timeout_seconds: float = _MIN_API_TIMEOUT_SECONDS,
         *,
         message_type: str,
         task_id: str,
     ) -> MessageReceipt:
         self._require_ready()
-        if timeout_seconds <= 0:
+        if timeout_seconds < _MIN_API_TIMEOUT_SECONDS:
             raise AgentSdkError(
                 ErrorCode.INVALID_ARGUMENT,
-                "timeout_seconds must be greater than zero",
+                "timeout_seconds must be at least 20 seconds",
                 field="timeout_seconds",
             )
         if self._profile is None:
@@ -1667,10 +1668,10 @@ class AgentSdk:
             "compute_service_session_id",
             ErrorCode.INVALID_ARGUMENT,
         )
-        if timeout_seconds <= 0:
+        if timeout_seconds < _MIN_API_TIMEOUT_SECONDS:
             raise AgentSdkError(
                 ErrorCode.INVALID_ARGUMENT,
-                "timeout_seconds must be greater than zero",
+                "timeout_seconds must be at least 20 seconds",
                 field="timeout_seconds",
             )
 
@@ -1699,10 +1700,10 @@ class AgentSdk:
         bitrate_kbps: int = 4000,
         timeout_seconds: float = 120.0,
     ) -> VideoUploadHandle:
-        if timeout_seconds <= 0:
+        if timeout_seconds < _MIN_API_TIMEOUT_SECONDS:
             raise AgentSdkError(
                 ErrorCode.INVALID_ARGUMENT,
-                "timeout_seconds must be greater than zero",
+                "timeout_seconds must be at least 20 seconds",
                 field="timeout_seconds",
             )
         self._require_ready()
@@ -1829,10 +1830,10 @@ class AgentSdk:
         compute_service_session_id: str,
         timeout_seconds: float = 120.0,
     ) -> RemoteVideoStream:
-        if timeout_seconds <= 0:
+        if timeout_seconds < _MIN_API_TIMEOUT_SECONDS:
             raise AgentSdkError(
                 ErrorCode.INVALID_ARGUMENT,
-                "timeout_seconds must be greater than zero",
+                "timeout_seconds must be at least 20 seconds",
                 field="timeout_seconds",
             )
         self._require_ready()
@@ -1941,7 +1942,7 @@ class AgentSdk:
         request_id: str,
         text: str,
         language: str | None = None,
-        timeout_seconds: float = 15.0,
+        timeout_seconds: float = _MIN_API_TIMEOUT_SECONDS,
     ) -> RecognitionTargetStatus:
         """Replace the consumer session's current visual recognition target."""
         self._validate_sandbox_timeout(timeout_seconds)
@@ -1979,7 +1980,7 @@ class AgentSdk:
     async def get_recognition_target(
         self,
         compute_service_session_id: str,
-        timeout_seconds: float = 15.0,
+        timeout_seconds: float = _MIN_API_TIMEOUT_SECONDS,
     ) -> RecognitionTargetStatus:
         """Read the latest recognition target applied to a consumer session."""
         self._validate_sandbox_timeout(timeout_seconds)
@@ -2001,7 +2002,7 @@ class AgentSdk:
         self,
         compute_service_session_id: str,
         request: ControlActionRequest,
-        timeout_seconds: float = 15.0,
+        timeout_seconds: float = _MIN_API_TIMEOUT_SECONDS,
     ) -> ControlActionStatus:
         """Submit one runtime action to the Sandbox for a consumer session."""
         self._validate_sandbox_timeout(timeout_seconds)
@@ -2049,7 +2050,7 @@ class AgentSdk:
         self,
         compute_service_session_id: str,
         action_id: str,
-        timeout_seconds: float = 15.0,
+        timeout_seconds: float = _MIN_API_TIMEOUT_SECONDS,
     ) -> ControlActionStatus:
         """Read an asynchronous Sandbox action without executing it again."""
         self._validate_sandbox_timeout(timeout_seconds)
@@ -2282,10 +2283,10 @@ class AgentSdk:
 
     @staticmethod
     def _validate_sandbox_timeout(timeout_seconds: float) -> None:
-        if timeout_seconds <= 0:
+        if timeout_seconds < _MIN_API_TIMEOUT_SECONDS:
             raise AgentSdkError(
                 ErrorCode.INVALID_ARGUMENT,
-                "timeout_seconds must be greater than zero",
+                "timeout_seconds must be at least 20 seconds",
                 field="timeout_seconds",
             )
 
@@ -2874,29 +2875,17 @@ class AgentSdk:
                 "no active IPv4 PDU Session is available",
                 details={"cause": "pdu-session-required"},
             )
-        accesses = ue_info.get("data_plane_accesses")
-        compatible = [
-            item
-            for item in accesses or ()
-            if isinstance(item, Mapping)
-            and item.get("access_type") == "HTTP3_CONNECT_IP"
-            and item.get("session_selection") == "EXACT_PDU_SESSION_ID"
-        ]
-        if not compatible:
-            raise AgentSdkError(
-                ErrorCode.RUNTIME_REJECTED,
-                "Runtime provides no exact HTTP3 CONNECT-IP data-plane access",
-                details={"cause": "data-plane-access-unsupported"},
-            )
+        # 不再要求 Runtime 上报 data_plane_accesses/advertisedEndpoint；数据面
+        # 可达性由既有 CONNECT-IP 隧道状态保证（见 C-02 绑定校验）。
         self._ue_info = ue_info
 
     async def _send_compute_request(
         self, request: ComputeSessionRequest, timeout_seconds: float
     ) -> ComputeSessionStatus:
-        if timeout_seconds <= 0:
+        if timeout_seconds < _MIN_API_TIMEOUT_SECONDS:
             raise AgentSdkError(
                 ErrorCode.INVALID_ARGUMENT,
-                "timeout_seconds must be greater than zero",
+                "timeout_seconds must be at least 20 seconds",
                 field="timeout_seconds",
             )
         body = self._compute_request_body(request)
@@ -3321,13 +3310,6 @@ class AgentSdk:
                 "binding-mismatch", "receiver_agent_id does not match the local Agent"
             )
         binding = session.network_binding
-        if (
-            binding.runtime_data_plane.access_type != "HTTP3_CONNECT_IP"
-            or binding.runtime_data_plane.session_selection != "EXACT_PDU_SESSION_ID"
-        ):
-            self._raise_compute_binding_error(
-                "data-plane-access-unsupported", "unsupported Runtime data-plane mapping"
-            )
         ue_info = self._ue_info
         if ue_info is None:
             assert self._runtime is not None
@@ -3367,37 +3349,9 @@ class AgentSdk:
             self._raise_compute_binding_error(
                 "network-binding-mismatch", "C-02 does not match the local PDU Session"
             )
-        accesses = ue_info.get("data_plane_accesses")
-        matching_accesses = [
-            item
-            for item in accesses or ()
-            if isinstance(item, Mapping)
-            and item.get("access_type") == binding.runtime_data_plane.access_type
-            and item.get("session_selection") == binding.runtime_data_plane.session_selection
-        ]
-        if len(matching_accesses) != 1:
-            self._raise_compute_binding_error(
-                "data-plane-access-unsupported", "no unique matching data-plane access"
-            )
-        template = matching_accesses[0].get("endpoint_template")
-        if not isinstance(template, str) or template.count("{pdu_session_id}") != 1:
-            self._raise_compute_binding_error(
-                "data-plane-access-unsupported", "invalid data-plane endpoint template"
-            )
-        expanded = template.replace("{pdu_session_id}", str(binding.pdu_session_id))
-        try:
-            parsed_access = urlsplit(expanded)
-        except ValueError:
-            parsed_access = None
-        if (
-            parsed_access is None
-            or parsed_access.scheme != "https"
-            or not parsed_access.hostname
-            or parsed_access.username is not None
-            or parsed_access.fragment
-            or self._masque is None
-            or not self._masque.connected
-        ):
+        # Runtime 的 data_plane_accesses 声明（advertisedEndpoint）仅作为信息，
+        # 不再强制校验；只要求既有 CONNECT-IP 隧道处于连接状态。
+        if self._masque is None or not self._masque.connected:
             self._raise_compute_binding_error(
                 "data-plane-access-unsupported", "CONNECT-IP data plane is unavailable"
             )

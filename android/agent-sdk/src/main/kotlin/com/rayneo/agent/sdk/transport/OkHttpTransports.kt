@@ -198,11 +198,25 @@ internal class OkHttpSandboxTransport(
 class OkHttpRuntimeTransport(
     host: String,
     port: Int,
-    private val client: OkHttpClient = OkHttpClient(),
+    client: OkHttpClient = OkHttpClient(),
     private val json: Json = Json,
     private val reconnectInitialDelayMillis: Long = 1_000,
     private val reconnectMaxDelayMillis: Long = 30_000,
 ) : RuntimeTransport {
+    private val client = client.newBuilder().apply {
+        if (client.connectTimeoutMillis < MIN_RUNTIME_TIMEOUT_MILLIS) {
+            connectTimeout(MIN_RUNTIME_TIMEOUT_MILLIS.toLong(), TimeUnit.MILLISECONDS)
+        }
+        if (client.readTimeoutMillis < MIN_RUNTIME_TIMEOUT_MILLIS) {
+            readTimeout(MIN_RUNTIME_TIMEOUT_MILLIS.toLong(), TimeUnit.MILLISECONDS)
+        }
+        if (client.writeTimeoutMillis < MIN_RUNTIME_TIMEOUT_MILLIS) {
+            writeTimeout(MIN_RUNTIME_TIMEOUT_MILLIS.toLong(), TimeUnit.MILLISECONDS)
+        }
+        if (client.callTimeoutMillis in 1 until MIN_RUNTIME_TIMEOUT_MILLIS) {
+            callTimeout(MIN_RUNTIME_TIMEOUT_MILLIS.toLong(), TimeUnit.MILLISECONDS)
+        }
+    }.build()
     private val baseUrl = "http://$host:$port"
     private val downlinkScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val downlinkClient = client.newBuilder()
@@ -594,6 +608,7 @@ class OkHttpRuntimeTransport(
 
     private companion object {
         const val TAG = "AgentSdkRuntime"
+        const val MIN_RUNTIME_TIMEOUT_MILLIS = 20_000
         const val NORMAL_CLOSE_CODE = 1000
         const val DOWNLINK_PING_INTERVAL_SECONDS = 20L
         val IPV4_LITERAL = Regex("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}")
@@ -603,7 +618,7 @@ class OkHttpRuntimeTransport(
         method: String,
         path: String,
         body: JsonObject,
-    ): RuntimeHttpResponse = requestWithStatus(method, path, body, 10.0)
+    ): RuntimeHttpResponse = requestWithStatus(method, path, body, 30.0)
 
     override suspend fun requestWithStatus(
         method: String,
@@ -768,7 +783,7 @@ class OkHttpPeerMessenger(
 
     private companion object {
         const val TAG_PEER = "AgentSdkPeer"
-        const val A2A_ATTEMPT_TIMEOUT_MILLIS = 2_000L
+        const val A2A_ATTEMPT_TIMEOUT_MILLIS = 20_000L
         val A2A_RETRY_DELAYS_MILLIS = longArrayOf(100L, 250L, 500L, 1_000L)
     }
 }

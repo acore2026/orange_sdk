@@ -56,7 +56,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     private val config by lazy {
         RayNeoX3ProDeployment.agentAConfig(
             masqueToken = intent.getStringExtra("masque_token"),
-            intentServiceUrl = intent.getStringExtra("intent_url"),
+            discoveryAsrUrl = intent.getStringExtra("discovery_asr_url"),
         )
     }
     private val logLines = ArrayDeque<String>()
@@ -172,7 +172,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             primaryAction.setOnClickListener { handlePrimaryAction() }
             asrAction.setOnClickListener { toggleVoiceRecording(VoiceMode.TRANSCRIBE) }
             voiceControlAction.setOnClickListener {
-                toggleVoiceRecording(VoiceMode.CONTROL_ACTION)
+                toggleVoiceRecording(VoiceMode.RUNTIME_INTENT)
             }
             resetAction.setOnClickListener { requestAgentReset() }
             dumpAction.setOnClickListener { dumpLogs() }
@@ -198,7 +198,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                     voiceControlAction,
                     eventHandler = { action ->
                         if (action is TempleAction.Click) {
-                            toggleVoiceRecording(VoiceMode.CONTROL_ACTION)
+                            toggleVoiceRecording(VoiceMode.RUNTIME_INTENT)
                         }
                     },
                     focusChangeHandler = { focused ->
@@ -399,17 +399,17 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             asrAction.alpha = if (asrAction.isEnabled) 1f else 0.45f
             voiceControlAction.alpha = if (voiceControlAction.isEnabled) 1f else 0.45f
             asrAction.text = "语音转文字"
-            voiceControlAction.text = "语音控制"
+            voiceControlAction.text = "运行期意图"
             when (voiceRecordingMode) {
                 VoiceMode.TRANSCRIBE -> {
                     asrAction.isEnabled = true
                     asrAction.alpha = 1f
                     asrAction.text = "停止并转写"
                 }
-                VoiceMode.CONTROL_ACTION -> {
+                VoiceMode.RUNTIME_INTENT -> {
                     voiceControlAction.isEnabled = true
                     voiceControlAction.alpha = 1f
-                    voiceControlAction.text = "停止并执行"
+                    voiceControlAction.text = "停止并识别"
                 }
                 null -> Unit
             }
@@ -454,7 +454,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 LabLogLevel.INFO,
                 "VOICE RECORD",
                 if (mode == VoiceMode.TRANSCRIBE) "录音开始；再次单击上传 ASR 9004"
-                else "录音开始；再次单击创建运行期语音动作",
+                else "录音开始；再次单击识别运行期动作意图（不会直接控制设备）",
             )
             setStatus("正在录音", "再次单击当前语音按钮停止并提交")
             refreshVoiceActions()
@@ -490,14 +490,14 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                         recording.fileName,
                         recording.contentType,
                     )
-                    VoiceMode.CONTROL_ACTION -> activeRunner.createAudioControlAction(
+                    VoiceMode.RUNTIME_INTENT -> activeRunner.recognizeRuntimeAudioIntent(
                         audio,
                         recording.fileName,
                         recording.contentType,
                     )
                 }
                 setStatus(
-                    if (mode == VoiceMode.TRANSCRIBE) "语音转文字成功" else "语音动作已创建",
+                    if (mode == VoiceMode.TRANSCRIBE) "任务语音识别成功" else "运行期意图识别成功",
                     detail.take(300),
                 )
             } catch (error: CancellationException) {
@@ -941,7 +941,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
 
     private enum class PrimaryMode { BUSY, RETRY, SEND, COMPUTE }
     private enum class ActionTarget { PRIMARY, ASR, VOICE_CONTROL, RESET, DUMP, STOP }
-    private enum class VoiceMode { TRANSCRIBE, CONTROL_ACTION }
+    private enum class VoiceMode { TRANSCRIBE, RUNTIME_INTENT }
 
     private companion object {
         const val MAX_VISIBLE_LOG_LINES = 7

@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPOSITORY_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-MOCK_VERSION="${MOCK_VERSION:-0.2.0}"
+MOCK_VERSION="${MOCK_VERSION:-0.3.0}"
 IMAGE_ARCHIVE="${SANDBOX_IMAGE_ARCHIVE:-${REPOSITORY_ROOT}/dist/compute-mock/agent-compute-sandbox-mock-${MOCK_VERSION}-linux-arm64.tar.gz}"
 OUTPUT_PATH="${SANDBOX_BUNDLE_OUTPUT:-${REPOSITORY_ROOT}/dist/sandbox.tar.gz}"
 STAGING_ROOT="${REPOSITORY_ROOT}/dist/.sandbox-package-$$"
@@ -58,6 +58,8 @@ for source_file in \
 do
     install -m 0644 "${SCRIPT_DIR}/${source_file}" "${BUNDLE_ROOT}/source/${source_file}"
 done
+cp -a "${SCRIPT_DIR}/services" "${BUNDLE_ROOT}/source/services"
+find "${BUNDLE_ROOT}/source/services" -name '__pycache__' -type d -prune -exec rm -rf {} +
 chmod 0755 \
     "${BUNDLE_ROOT}/source/build-image.sh" \
     "${BUNDLE_ROOT}/source/entrypoint.sh" \

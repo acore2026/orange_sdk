@@ -463,8 +463,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("message port must be in 1..65535")
     if not 1 <= args.control_port <= 65535:
         raise ValueError("control port must be in 1..65535")
-    if args.message_timeout <= 0:
-        raise ValueError("message timeout must be greater than zero")
+    if args.message_timeout < 20:
+        raise ValueError("message timeout must be at least 20 seconds")
 
 
 async def _query_agent_ip(
@@ -678,7 +678,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--message-port", type=int, default=4001)
     value.add_argument("--control-host", default="127.0.0.1")
     value.add_argument("--control-port", type=int)
-    value.add_argument("--message-timeout", type=float, default=10.0)
+    value.add_argument("--message-timeout", type=float, default=20.0)
     value.add_argument("--tun-name")
     value.add_argument("--tun-mtu", type=int, default=1280)
     value.add_argument("--state-dir")

@@ -226,11 +226,13 @@ class AioquicConnectIpTransport:
         ca_certificate_pem: bytes | None = None,
         authorization: str | None = None,
         local_address: str | None = None,
-        connect_timeout: float = 10.0,
+        connect_timeout: float = 20.0,
         keep_alive_interval: float = 15.0,
         logger: logging.Logger | None = None,
         identity_store: ClientTlsIdentityStore | None = None,
     ) -> None:
+        if connect_timeout < 20:
+            raise ValueError("connect_timeout must be at least 20 seconds")
         if keep_alive_interval <= 0:
             raise ValueError("keep_alive_interval must be greater than zero")
         self._url = urlparse(server_url)
@@ -267,6 +269,9 @@ class AioquicConnectIpTransport:
             alpn_protocols=H3_ALPN,
             server_name=self._server_name or host,
             max_datagram_frame_size=65536,
+            # Leave room for a 1280-byte IP packet plus HTTP/3 and QUIC framing.
+            # aioquic defaults to 1200 and cannot drain an oversized DATAGRAM.
+            max_datagram_size=1400,
             verify_mode=ssl.CERT_NONE,
         )
         configuration.load_cert_chain(

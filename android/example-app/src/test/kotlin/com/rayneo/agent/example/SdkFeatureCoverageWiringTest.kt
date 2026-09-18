@@ -22,11 +22,8 @@ class SdkFeatureCoverageWiringTest {
             "upload.resume()",
             "sdk.updateRecognitionTarget(",
             "sdk.getRecognitionTarget(",
-            "sdk.createControlAction(",
             "sdk.transcribeAudio(",
-            "sdk.recognizeIntent(",
             "sdk.createAudioControlAction(",
-            "sdk.getControlAction(",
         ).forEach { call ->
             assertTrue("Missing example-app coverage for $call", runner.contains(call))
         }
@@ -48,10 +45,8 @@ class SdkFeatureCoverageWiringTest {
             "暂停摄像头上传",
             "写入目标",
             "读取目标",
-            "创建动作",
-            "查询动作",
             "开始录音 · 仅转文字",
-            "开始录音 · 转写并执行",
+            "开始录音 · 运行期意图",
             "最近转写结果",
             "启动意图",
         ).forEach { label ->
@@ -76,7 +71,7 @@ class SdkFeatureCoverageWiringTest {
         assertTrue(manifest.contains("android.permission.RECORD_AUDIO"))
         assertTrue(recorder.contains("MediaRecorder.AudioSource.MIC"))
         assertTrue(rayneo.contains("VoiceMode.TRANSCRIBE"))
-        assertTrue(rayneo.contains("VoiceMode.CONTROL_ACTION"))
+        assertTrue(rayneo.contains("VoiceMode.RUNTIME_INTENT"))
         assertTrue(rayneoLayout.contains("@+id/asr_action"))
         assertTrue(rayneoLayout.contains("@+id/voice_control_action"))
         assertTrue(rayneoLayout.contains("@+id/voice_result"))
@@ -85,20 +80,20 @@ class SdkFeatureCoverageWiringTest {
     }
 
     @Test
-    fun agentADiscoversOnlyAfterSecurityPatrolIntentIsMappedToSkill() {
+    fun agentADiscoversOnlyAfterDiscoveryAsrReturnsRequiredSkills() {
         val runner = File(
             "src/main/kotlin/com/rayneo/agent/example/AgentTestRunner.kt",
         ).readText()
 
-        val intentCall = runner.indexOf("sdk.recognizeIntent(")
-        val intentGuard = runner.indexOf("result.intent == SECURITY_PATROL_INTENT")
+        val asrCall = runner.indexOf("sdk.transcribeAudio(")
+        val intentGuard = runner.indexOf("transcription.intent.type in DISCOVERY_INTENT_TYPES")
         val discovery = runner.indexOf("sdk.discoverAgents(")
-        assertTrue(intentCall >= 0)
-        assertTrue(intentGuard > intentCall)
+        assertTrue(asrCall >= 0)
+        assertTrue(intentGuard > asrCall)
         assertTrue(discovery > intentGuard)
-        assertTrue(runner.contains("val requiredSkill = checkNotNull(recognition.executor).trim()"))
-        assertTrue(runner.contains("requiredSkills = listOf(requiredSkill)"))
-        assertTrue(runner.contains("PATROL_UTTERANCE = \"派机器狗巡逻A区域\""))
+        assertTrue(runner.contains("val requiredSkills = transcription.requiredSkills"))
+        assertTrue(runner.contains("requiredSkills = requiredSkills"))
+        assertTrue(runner.contains("DISCOVERY_SKILLS = listOf(\"patrol\", \"camera\")"))
     }
 
     @Test

@@ -24,7 +24,7 @@ class DiagnosticLogWiringTest {
         assertTrue(activity.contains("Dump 日志"))
         assertTrue(activity.contains("DiagnosticLogExporter.createDump"))
         assertTrue(exporter.contains("compute_endpoint=<managed by SDK from C-02>"))
-        assertTrue(exporter.contains("asr_endpoint=http://"))
+        assertTrue(exporter.contains("discovery_asr_endpoint="))
         assertTrue(exporter.contains("[VIDEO PREVIEW RENDERER]"))
         assertTrue(renderer.contains("renderer=TextureView/EglRenderer"))
         assertTrue(activity.contains("?.diagnosticSummary()"))

@@ -162,11 +162,10 @@ async def test_linux_agent_full_flow_executes_every_business_api():
     assert request.acn_context.requester_agent_id == profile.agent_id
     assert request.acn_context.target_agent_id == target.agent_id
     assert request.constraints.capability_id == "dog-vision"
-    assert request.constraints.resources.cpu_millicores == 2000
-    assert request.constraints.resources.memory_mib == 4096
+    assert request.constraints.resources is None
     assert request.constraints.dnn == "internet"
     sdk.get_processed_video_stream.assert_awaited_once_with(
-        "session-1", timeout_seconds=10.0
+        "session-1", timeout_seconds=20.0
     )
     assert sdk.send_message.await_count == 2
     session_message = sdk.send_message.await_args_list[1].args[2]
