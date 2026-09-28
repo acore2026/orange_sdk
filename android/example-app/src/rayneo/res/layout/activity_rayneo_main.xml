@@ -94,6 +94,51 @@
                 android:text="等待处理后视频\n收到 B 的邀请后自动播放"
                 android:textColor="#B7CBD4"
                 android:textSize="14sp" />
+
+            <!-- Transparent AR HUD: the same layout is mirrored by Mercury onto both eyes. -->
+            <LinearLayout
+                android:id="@+id/patrol_hud"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="top|start"
+                android:background="#B8001720"
+                android:orientation="vertical"
+                android:paddingStart="10dp"
+                android:paddingTop="7dp"
+                android:paddingEnd="10dp"
+                android:paddingBottom="7dp">
+
+                <TextView
+                    android:id="@+id/patrol_phase"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="PATROL · 等待任务"
+                    android:textColor="#5EEAD4"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/patrol_candidate"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:maxLines="2"
+                    android:text="可信接入：等待 Agent Card"
+                    android:textColor="#FFFFFF"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/patrol_alert"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:maxLines="2"
+                    android:text=""
+                    android:textColor="#FFCE6B"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:visibility="gone" />
+            </LinearLayout>
         </FrameLayout>
     </LinearLayout>
 
@@ -177,6 +222,109 @@
         android:textColor="#FFFFFF"
         android:textIsSelectable="true"
         android:textSize="15sp" />
+
+    <LinearLayout
+        android:id="@+id/patrol_command_row"
+        android:layout_width="match_parent"
+        android:layout_height="42dp"
+        android:layout_marginTop="7dp"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/patrol_command_action"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1.35"
+            android:alpha="0.45"
+            android:background="@drawable/rayneo_action_primary"
+            android:enabled="false"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="巡检指令（按住说话）"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <Space
+            android:layout_width="8dp"
+            android:layout_height="1dp" />
+
+        <TextView
+            android:id="@+id/patrol_confirm_action"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:alpha="0.45"
+            android:background="@drawable/rayneo_action_secondary"
+            android:enabled="false"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="确认派遣"
+            android:textColor="#5EEAD4"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <Space
+            android:layout_width="8dp"
+            android:layout_height="1dp" />
+
+        <TextView
+            android:id="@+id/patrol_reject_action"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="0.8"
+            android:alpha="0.45"
+            android:background="@drawable/rayneo_action_secondary"
+            android:enabled="false"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="取消"
+            android:textColor="#D7E5EA"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/patrol_response_row"
+        android:layout_width="match_parent"
+        android:layout_height="38dp"
+        android:layout_marginTop="6dp"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/patrol_threaten_action"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:alpha="0.45"
+            android:background="@drawable/rayneo_action_secondary"
+            android:enabled="false"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="威吓歹徒 · Scrape"
+            android:textColor="#FFCE6B"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <Space
+            android:layout_width="8dp"
+            android:layout_height="1dp" />
+
+        <TextView
+            android:id="@+id/patrol_evict_action"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:alpha="0.45"
+            android:background="@drawable/rayneo_action_warning"
+            android:enabled="false"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="驱逐歹徒 · FrontPounce"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+    </LinearLayout>
 
     <LinearLayout
         android:layout_width="match_parent"

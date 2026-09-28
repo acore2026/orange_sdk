@@ -28,6 +28,19 @@ data class TestConfig(
     val dnn: String,
     val groupName: String,
     val message: String,
+    /**
+     * Capabilities advertised by this endpoint in its Agent Card.  The generic A/B
+     * harness keeps this empty by default; the RayNeo deployment supplies the
+     * park-administrator capability explicitly so the identity/registration step
+     * is visible in the AR flow.
+     */
+    val capabilities: List<String> = emptyList(),
+    /**
+     * RayNeo runs the patrol flow from a spoken command and waits for an explicit
+     * candidate confirmation.  The generic app remains the deterministic A/B
+     * integration harness unless this flag is enabled by its caller.
+     */
+    val interactivePatrol: Boolean = false,
 ) {
     val masqueServerUrl: String
         get() = "https://$serverIp:$masquePort${normalizedMasquePath()}"
@@ -69,6 +82,9 @@ object RayNeoX3ProDeployment {
     const val MASQUE_PORT = 8443
     const val MASQUE_PATH = "/.well-known/masque/ip"
     const val INTENT_SERVICE_URL = "http://101.245.78.174:8011/api/v1/intent"
+    const val PARK_ADMIN_CAPABILITY = "园区管理员"
+    const val PATROL_CAPABILITY = "巡逻"
+    const val CAMERA_CAPABILITY = "相机"
 
     fun agentAConfig(
         masqueToken: String? = null,
@@ -89,5 +105,7 @@ object RayNeoX3ProDeployment {
         dnn = "internet",
         groupName = "rayneo-x3-pro-ab-group",
         message = "hello Agent B from RayNeo X3 Pro",
+        capabilities = listOf(PARK_ADMIN_CAPABILITY, "voice"),
+        interactivePatrol = true,
     )
 }

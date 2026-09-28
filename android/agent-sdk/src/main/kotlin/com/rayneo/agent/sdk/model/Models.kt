@@ -97,6 +97,11 @@ data class DiscoveredAgent(
     val serviceEndpoints: String,
     val skills: List<String>,
     val priority: Int,
+    /** Agent Card display name; older Runtime responses may omit it. */
+    val agentName: String = agentId,
+    /** Optional placement metadata exposed by newer discovery services. */
+    val distanceMeters: Double? = null,
+    val availability: String? = null,
 )
 
 @Serializable

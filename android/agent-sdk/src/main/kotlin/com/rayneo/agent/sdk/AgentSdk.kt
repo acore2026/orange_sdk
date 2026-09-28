@@ -955,6 +955,13 @@ class AgentSdk internal constructor(
                 serviceEndpoints = card.requireString("service_endpoints"),
                 skills = (card["skills"] as? JsonArray).orEmpty().map { it.jsonPrimitive.content },
                 priority = item["priority"]?.jsonPrimitive?.intOrNull ?: 0,
+                agentName = card.stringOrNull("agent_name")
+                    ?.takeIf(String::isNotBlank)
+                    ?: card.requireString("agent_id"),
+                distanceMeters = item["distance_meters"]?.jsonPrimitive?.doubleOrNull
+                    ?: card["distance_meters"]?.jsonPrimitive?.doubleOrNull,
+                availability = item.stringOrNull("availability")
+                    ?: card.stringOrNull("availability"),
             )
         }.sortedBy { it.priority }
     }

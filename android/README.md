@@ -698,3 +698,27 @@ C-02 中把 `service_endpoint` 下发为该地址，并把 `media_connections_pa
    `keyframes_requested`。停止 App 时，A 先调用 RELEASE，双方媒体连接由 SDK 清理。
 6. 可直接运行 `python3 mock-video-server/smoke_client.py`，验证正式 U-MEDIA 的
    consumer 先建连、producer 后建连、原 Track 切换处理帧以及 DELETE 清理。
+
+### RayNeo AR 园区巡检闭环
+
+RayNeo flavor 现在把 Agent A 作为园区安保负责人佩戴的 AR 眼镜端，按下面的顺序
+执行业务流程。所有控制面、群组、路由和媒体请求仍由 `AgentSdk` 负责，Activity 只
+编排业务状态并渲染双目 HUD：
+
+1. 启用 Agent 网络后，SDK 完成数字身份申请、网络能力获取和 Agent Card 发布；RayNeo
+   Card 默认声明 `园区管理员` 与 `voice`，页面显示“可信接入已就绪”。
+2. 点击“巡检指令（按住说话）”，录音先通过独立 ASR `:9004` 转写，再调用
+   `recognizeIntent`。意图、区域和 `executor` 会显示在 HUD 中；当前示例命令为
+   “派机器狗巡逻园区内 A 区域”。
+3. SDK 用意图返回的 `executor` 作为 `required_skills` 调用 `discoverAgents`，只保留
+   声明该能力且状态为 `AVAILABLE` 的候选，并按 `distance_meters`（若 Runtime 返回）
+   选择最近者。用户必须点击“确认派遣”后才调用 `createGroup`，创建 Secure Domain。
+4. 群组配置进入 SDK 缓存后，AR 端自动创建正式算力会话并接收处理后视频；Sandbox 地址、
+   WebRTC SDP、媒体连接 ID 和隧道路由不会暴露给 App。
+5. 危险识别结果随处理后视频流回传并显示在眼镜 HUD/视频叠加层中。安保负责人可
+   通过语音或按钮下发“威吓歹徒”对应的 `Scrape`（刨地），或下发“驱逐歹徒”对应的
+   `FrontPounce`（前扑）；后者必须二次确认。动作会通过 A2A 投递给机器狗，并在存在
+   consumer C-02 时镜像提交 Sandbox `createControlAction`。
+
+当前 SDK/Runtime 不要求 App 实现独立告警接口；视频识别服务负责产生告警叠加，App
+只消费处理后的视频 Track，并把安保负责人的动作指令路由给机器狗。

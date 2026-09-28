@@ -14,6 +14,10 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.io.File
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.security.MessageDigest
 import java.util.UUID
 
@@ -194,7 +198,23 @@ internal class FileAgentStateStore(private val directory: File) : AgentStateStor
             temporary.setWritable(false, false)
             temporary.setReadable(true, true)
             temporary.setWritable(true, true)
-            check(temporary.renameTo(file)) { "atomic rename failed" }
+            try {
+                Files.move(
+                    temporary.toPath(),
+                    file.toPath(),
+                    REPLACE_EXISTING,
+                    ATOMIC_MOVE,
+                )
+            } catch (_: AtomicMoveNotSupportedException) {
+                // Windows filesystems and some mounted volumes do not expose an atomic
+                // replace operation. REPLACE_EXISTING still keeps the write recoverable
+                // because the temporary file was fully written before this point.
+                Files.move(
+                    temporary.toPath(),
+                    file.toPath(),
+                    REPLACE_EXISTING,
+                )
+            }
         } catch (error: Exception) {
             temporary.delete()
             throw AgentSdkException(
