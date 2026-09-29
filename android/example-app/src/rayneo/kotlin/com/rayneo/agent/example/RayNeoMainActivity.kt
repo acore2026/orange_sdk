@@ -56,7 +56,6 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     private val config by lazy {
         RayNeoX3ProDeployment.agentAConfig(
             masqueToken = intent.getStringExtra("masque_token"),
-            intentServiceUrl = intent.getStringExtra("intent_url"),
         )
     }
     private val logLines = ArrayDeque<String>()
@@ -104,8 +103,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             } else {
                 flowStarted = false
                 appendLog(LabLogLevel.ERROR, "VPN", "VPN 权限被拒绝或授权页已关闭")
-                setStatus("需要 VPN 权限", "单击“启用 Agent 网络”后，在系统页面确认网络连接请求")
-                setPrimaryAction(PrimaryMode.RETRY, "启用 Agent 网络")
+                setStatus("需要网络授权", "请确认系统网络连接请求，然后单击语音框重试")
+                setPrimaryAction(PrimaryMode.RETRY, "重新连接")
             }
         }
 
@@ -147,24 +146,21 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             "固定角色=A，Runtime=${config.serverIp}:${config.runtimePort}，MASQUE/UDP=${config.masquePort}",
         )
 
-        // Do not open Android's system VPN activity during launcher creation. On glasses, a
-        // system activity can cover both the app and launcher while waiting for input. The first
-        // connection is therefore an explicit temple click; subsequent launches continue without
-        // a dialog after Android has retained the user's consent.
+        // Start the secure channel as part of app launch. When appops has already granted
+        // ACTIVATE_VPN this is silent; otherwise Android shows its one-time consent surface.
         setStatus(
-            "Agent 网络尚未启用",
-            "单击“启用 Agent 网络”；首次使用需确认系统网络连接请求",
+            "正在连接",
+            "正在申请安全网络权限并恢复数字身份",
         )
-        setPrimaryAction(PrimaryMode.RETRY, "启用 Agent 网络")
-        appendLog(LabLogLevel.INFO, "APP", "等待用户显式启用 Agent 网络")
+        setPrimaryAction(PrimaryMode.BUSY, "正在连接…")
+        window.decorView.post { beginConnection() }
     }
 
     private fun renderDeployment() {
         mBindingPair.updateView {
-            deploymentLabel.text = "RAYNEO X3 PRO  ·  AGENT A"
-            statusTitle.text = "正在准备端侧链路"
-            statusDetail.text =
-                "Runtime ${config.serverIp}:${config.runtimePort}  ·  MASQUE/UDP ${config.masquePort}"
+            deploymentLabel.text = "雷鸟眼镜"
+            statusTitle.text = "正在连接"
+            statusDetail.text = "正在建立安全连接"
             primaryAction.text = "自动启动中…"
         }
         renderPatrolHud()
@@ -175,10 +171,9 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         mBindingPair.setLeft {
             primaryAction.setOnClickListener { handlePrimaryAction() }
             asrAction.setOnClickListener { toggleVoiceRecording(VoiceMode.TRANSCRIBE) }
-            patrolCommandAction.setOnClickListener { toggleVoiceRecording(VoiceMode.PATROL_COMMAND) }
-            voiceControlAction.setOnClickListener {
-                toggleVoiceRecording(VoiceMode.CONTROL_ACTION)
-            }
+            patrolCommandAction.setOnClickListener { handleVoiceInputAction() }
+            voiceResult.setOnClickListener { handleVoiceInputAction() }
+            voiceControlAction.setOnClickListener { toggleVoiceRecording(VoiceMode.CONTROL_ACTION) }
             patrolConfirmAction.setOnClickListener { confirmPatrolCandidate() }
             patrolRejectAction.setOnClickListener { rejectPatrolCandidate() }
             patrolThreatenAction.setOnClickListener { sendRobotAction(RobotAction.SCRAPE) }
@@ -186,92 +181,14 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             resetAction.setOnClickListener { requestAgentReset() }
             dumpAction.setOnClickListener { dumpLogs() }
             stopAction.setOnClickListener { stopAndFinish() }
-            focusHolder.addFocusTarget(
-                FocusInfo(
-                    primaryAction,
-                    eventHandler = { action ->
-                        if (action is TempleAction.Click) handlePrimaryAction()
-                    },
-                    focusChangeHandler = { focused -> updateFocus(ActionTarget.PRIMARY, focused) },
-                ),
-                FocusInfo(
-                    patrolCommandAction,
-                    eventHandler = { action ->
-                        if (action is TempleAction.Click) toggleVoiceRecording(VoiceMode.PATROL_COMMAND)
-                    },
-                    focusChangeHandler = { focused -> updateFocus(ActionTarget.PATROL_COMMAND, focused) },
-                ),
-                FocusInfo(
-                    patrolConfirmAction,
-                    eventHandler = { action ->
-                        if (action is TempleAction.Click) confirmPatrolCandidate()
-                    },
-                    focusChangeHandler = { focused -> updateFocus(ActionTarget.PATROL_CONFIRM, focused) },
-                ),
-                FocusInfo(
-                    patrolRejectAction,
-                    eventHandler = { action ->
-                        if (action is TempleAction.Click) rejectPatrolCandidate()
-                    },
-                    focusChangeHandler = { focused -> updateFocus(ActionTarget.PATROL_REJECT, focused) },
-                ),
-                FocusInfo(
-                    asrAction,
-                    eventHandler = { action ->
-                        if (action is TempleAction.Click) {
-                            toggleVoiceRecording(VoiceMode.TRANSCRIBE)
-                        }
-                    },
-                    focusChangeHandler = { focused -> updateFocus(ActionTarget.ASR, focused) },
-                ),
-                FocusInfo(
-                    voiceControlAction,
-                    eventHandler = { action ->
-                        if (action is TempleAction.Click) {
-                            toggleVoiceRecording(VoiceMode.CONTROL_ACTION)
-                        }
-                    },
-                    focusChangeHandler = { focused ->
-                        updateFocus(ActionTarget.VOICE_CONTROL, focused)
-                    },
-                ),
-                FocusInfo(
-                    patrolThreatenAction,
-                    eventHandler = { action ->
-                        if (action is TempleAction.Click) sendRobotAction(RobotAction.SCRAPE)
-                    },
-                    focusChangeHandler = { focused -> updateFocus(ActionTarget.PATROL_THREATEN, focused) },
-                ),
-                FocusInfo(
-                    patrolEvictAction,
-                    eventHandler = { action ->
-                        if (action is TempleAction.Click) requestDangerousRobotAction()
-                    },
-                    focusChangeHandler = { focused -> updateFocus(ActionTarget.PATROL_EVICT, focused) },
-                ),
-                FocusInfo(
-                    resetAction,
-                    eventHandler = { action ->
-                        if (action is TempleAction.Click) requestAgentReset()
-                    },
-                    focusChangeHandler = { focused -> updateFocus(ActionTarget.RESET, focused) },
-                ),
-                FocusInfo(
-                    dumpAction,
-                    eventHandler = { action ->
-                        if (action is TempleAction.Click) dumpLogs()
-                    },
-                    focusChangeHandler = { focused -> updateFocus(ActionTarget.DUMP, focused) },
-                ),
-                FocusInfo(
-                    stopAction,
-                    eventHandler = { action ->
-                        if (action is TempleAction.Click) stopAndFinish()
-                    },
-                    focusChangeHandler = { focused -> updateFocus(ActionTarget.STOP, focused) },
-                ),
-            )
-            focusHolder.currentFocus(primaryAction)
+            focusHolder.addFocusTarget(FocusInfo(
+                patrolCommandAction,
+                eventHandler = { action ->
+                    if (action is TempleAction.Click) handleVoiceInputAction()
+                },
+                focusChangeHandler = { focused -> updateFocus(ActionTarget.PATROL_COMMAND, focused) },
+            ))
+            focusHolder.currentFocus(patrolCommandAction)
         }
         focusTracker = FixPosFocusTracker(focusHolder).apply {
             focusObj.reqFocus()
@@ -292,6 +209,13 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
 
     private fun updateFocus(action: ActionTarget, focused: Boolean) {
         mBindingPair.updateView {
+            if (action == ActionTarget.PATROL_COMMAND) {
+                patrolCommandAction.setTextColor(
+                    if (focused) android.graphics.Color.rgb(121, 231, 202)
+                    else android.graphics.Color.rgb(242, 246, 250),
+                )
+                return@updateView
+            }
             val target = when (action) {
                 ActionTarget.PRIMARY -> primaryAction
                 ActionTarget.PATROL_COMMAND -> patrolCommandAction
@@ -318,11 +242,25 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         }
     }
 
+    private fun handleVoiceInputAction() {
+        voiceRecordingMode?.let { toggleVoiceRecording(it); return }
+        if (runner == null) {
+            if (primaryMode == PrimaryMode.RETRY) handlePrimaryAction()
+            return
+        }
+        val mode = when {
+            patrolState.phase == PatrolPhase.DISPATCHING -> VoiceMode.CONFIRMATION
+            sdkFeatureState?.processedVideoState != null -> VoiceMode.CONTROL_ACTION
+            else -> VoiceMode.PATROL_COMMAND
+        }
+        toggleVoiceRecording(mode)
+    }
+
     private fun beginConnection() {
         if (flowStarted || runnerJob?.isActive == true) return
         flowStarted = true
         setPrimaryAction(PrimaryMode.BUSY, "连接中…")
-        setStatus("正在连接 AgentRuntime", "随后自动建立 TUN、MASQUE、身份、发现与建组流程")
+        setStatus("正在连接", "随后自动恢复数字身份并等待语音指令")
         appendLog(LabLogLevel.INFO, "APP", "自动流程启动；准备申请 Android VPN 权限")
 
         if (serviceBound) {
@@ -412,9 +350,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                     PrimaryMode.PATROL_ALERT,
                     "巡检中 · 等待告警",
                 )
-                computeAvailable -> setPrimaryAction(PrimaryMode.COMPUTE, "申请算力会话")
-                messageSession != null -> setPrimaryAction(PrimaryMode.SEND, "发送测试消息")
                 status.canRetry -> setPrimaryAction(PrimaryMode.RETRY, "重试当前步骤")
+                messageSession != null -> setPrimaryAction(PrimaryMode.BUSY, "请按住说话派遣机器狗")
                 else -> setPrimaryAction(PrimaryMode.BUSY, "流程执行中…")
             }
         }
@@ -429,12 +366,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                     setPrimaryAction(PrimaryMode.BUSY, "等待群组配置…")
                 }
             } else {
-                setStatus("群组已就绪 · 可发送", "目标 ${session.targetAgentName} · 单击发送预置测试消息")
-                if (computeAvailable) {
-                    setPrimaryAction(PrimaryMode.COMPUTE, "申请算力会话")
-                } else {
-                    setPrimaryAction(PrimaryMode.SEND, "发送测试消息")
-                }
+                setStatus("机器狗已连接", "目标 ${session.targetAgentName} · 正在准备算力卸载")
+                setPrimaryAction(PrimaryMode.BUSY, "正在准备视频…")
             }
         }
     }
@@ -443,8 +376,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         runOnUiThread {
             computeAvailable = available
             if (available && !computeStarting) {
-                setStatus("群组已就绪 · 可申请算力", "单击后由 SDK 等待 consumer C-02 并连接处理流")
-                setPrimaryAction(PrimaryMode.COMPUTE, "申请算力会话")
+                setStatus("正在准备算力卸载", "SDK 正在建立机器狗视野回传")
+                setPrimaryAction(PrimaryMode.BUSY, "正在准备视频…")
             }
         }
     }
@@ -482,27 +415,43 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             PatrolPhase.HAZARD_RESPONSE,
         )
         mBindingPair.updateView {
-            patrolPhase.text = when (state.phase) {
-                PatrolPhase.IDLE -> "PATROL · 等待任务"
-                PatrolPhase.LISTENING -> "PATROL · 等待语音指令"
-                PatrolPhase.PLANNING -> "PATROL · 解析意图"
-                PatrolPhase.DISPATCHING -> "PATROL · 待确认"
-                PatrolPhase.NAVIGATING -> "PATROL · 正在组网"
-                PatrolPhase.INSPECTING -> "PATROL · 巡逻中"
-                PatrolPhase.HAZARD_RESPONSE -> "PATROL · 危险告警"
-                PatrolPhase.REPORTING -> "PATROL · 上报中"
-                PatrolPhase.COMPLETED -> "PATROL · 已完成"
-                PatrolPhase.ABORTED -> "PATROL · 已中止"
+            patrolPhase.text = when {
+                messageSession != null && !videoReady -> "机器狗正在算力卸载"
+                videoReady && !videoPreviewHasFrame -> "正在连接机器狗视野"
+                state.phase == PatrolPhase.IDLE && sdkFeatureState?.agentReady != true ->
+                    "正在准备连接"
+                state.phase == PatrolPhase.IDLE -> "等待语音派遣"
+                else -> when (state.phase) {
+                    PatrolPhase.IDLE -> "等待语音派遣"
+                    PatrolPhase.LISTENING -> "等待语音指令"
+                    PatrolPhase.PLANNING -> "正在理解指令"
+                    PatrolPhase.DISPATCHING -> "等待确认派遣"
+                    PatrolPhase.NAVIGATING -> "正在安全组网"
+                    PatrolPhase.INSPECTING -> "机器狗巡逻中"
+                    PatrolPhase.HAZARD_RESPONSE -> "收到现场告警"
+                    PatrolPhase.REPORTING -> "正在回传结果"
+                    PatrolPhase.COMPLETED -> "任务已完成"
+                    PatrolPhase.ABORTED -> "任务已取消"
+                }
             }
             patrolCandidate.text = when {
+                messageSession != null && !videoReady -> "准备回传视野"
+                videoReady && !videoPreviewHasFrame -> "等待视频首帧"
                 sdkFeatureState?.agentReady == true && candidate == null ->
-                    "可信接入：${sdkFeatureState?.advertisedCapabilities?.joinToString() ?: "已就绪"}"
-                candidate != null -> "候选：${candidate.name} · ${state.request?.zoneId ?: "目标区域"}"
-                messageSession != null -> "Secure Domain：${messageSession?.groupId}"
-                else -> "可信接入：等待 Agent Card"
+                    "数字身份已就绪"
+                candidate != null && state.phase == PatrolPhase.DISPATCHING ->
+                    "${candidate.name} · ID ${candidate.id}\n${state.request?.zoneId ?: "目标区域"}，请说确认或取消"
+                candidate != null -> "机器狗 ${candidate.name} · ID ${candidate.id}"
+                messageSession != null -> "机器狗已加入安全组网"
+                else -> "正在准备数字身份"
             }
-            patrolAlert.text = if (videoReady) "识别/告警随算力卸载视频流回传" else ""
+            patrolAlert.text = if (videoReady) "视野回传已连接" else ""
             patrolAlert.visibility = if (videoReady) View.VISIBLE else View.GONE
+            patrolHud.visibility = if (videoPreviewHasFrame && state.phase == PatrolPhase.INSPECTING) {
+                View.GONE
+            } else {
+                View.VISIBLE
+            }
             patrolConfirmAction.isEnabled = state.phase == PatrolPhase.DISPATCHING &&
                 state.candidates.isNotEmpty() && !patrolActionRunning
             patrolRejectAction.isEnabled = state.phase == PatrolPhase.DISPATCHING && !patrolActionRunning
@@ -521,7 +470,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         val activeRunner = runner ?: return
         if (patrolActionRunning || patrolState.phase != PatrolPhase.DISPATCHING) return
         patrolActionRunning = true
-        setStatus("正在建立 Secure Domain", "等待网络确认群组配置与专用通道")
+        setStatus("正在组网", "等待机器狗加入并建立专用通道")
         lifecycleScope.launch {
             try {
                 val groupId = withContext(Dispatchers.IO) { activeRunner.confirmInteractivePatrol() }
@@ -575,7 +524,15 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         lifecycleScope.launch {
             try {
                 val receipt = withContext(Dispatchers.IO) { activeRunner.sendRobotAction(action) }
-                val label = if (action == RobotAction.SCRAPE) "Scrape（刨地）" else "FrontPounce（前扑）"
+                val label = when (action) {
+                    RobotAction.FORWARD -> "前进"
+                    RobotAction.BACKWARD -> "后退"
+                    RobotAction.LEFT -> "左转"
+                    RobotAction.RIGHT -> "右转"
+                    RobotAction.STOP -> "停止"
+                    RobotAction.SCRAPE -> "Scrape（刨地）"
+                    RobotAction.FRONT_POUNCE -> "FrontPounce（前扑）"
+                }
                 setStatus("动作已下发", "$label · ${receipt.messageId.take(8)}")
             } catch (error: CancellationException) {
                 throw error
@@ -596,14 +553,19 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         val busy = voiceActionRunning || voiceRecordingMode != null
         mBindingPair.updateView {
             asrAction.isEnabled = directReady && !busy
-            patrolCommandAction.isEnabled = directReady && !busy &&
-                patrolState.phase in setOf(PatrolPhase.LISTENING, PatrolPhase.COMPLETED, PatrolPhase.ABORTED)
+            patrolCommandAction.isEnabled = (directReady || primaryMode == PrimaryMode.RETRY) && !busy
             voiceControlAction.isEnabled = controlReady && !busy
             asrAction.alpha = if (asrAction.isEnabled) 1f else 0.45f
             patrolCommandAction.alpha = if (patrolCommandAction.isEnabled) 1f else 0.45f
             voiceControlAction.alpha = if (voiceControlAction.isEnabled) 1f else 0.45f
             asrAction.text = "语音转文字"
-            patrolCommandAction.text = "巡检指令（按住说话）"
+            patrolCommandAction.text = when {
+                patrolState.phase == PatrolPhase.DISPATCHING -> "单击说确认或取消"
+                controlReady -> "单击说移动指令"
+                directReady -> "单击说巡逻指令"
+                primaryMode == PrimaryMode.RETRY -> "单击重新连接"
+                else -> "正在连接…"
+            }
             voiceControlAction.text = "语音控制"
             when (voiceRecordingMode) {
                 VoiceMode.TRANSCRIBE -> {
@@ -619,25 +581,28 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 VoiceMode.PATROL_COMMAND -> {
                     patrolCommandAction.isEnabled = true
                     patrolCommandAction.alpha = 1f
-                    patrolCommandAction.text = "停止并解析巡检"
+                    patrolCommandAction.text = "单击结束语音"
+                }
+                VoiceMode.CONFIRMATION -> {
+                    patrolCommandAction.isEnabled = true
+                    patrolCommandAction.alpha = 1f
+                    patrolCommandAction.text = "单击结束语音"
                 }
                 null -> Unit
             }
             voiceResult.text = when {
-                voiceRecordingMode != null -> intentDisplay() + "\n最近转写结果：正在录音…"
-                voiceActionRunning -> intentDisplay() + "\n最近转写结果：正在识别…"
-                else -> intentDisplay() + "\n最近转写结果：" +
-                    (sdkFeatureState?.lastTranscription?.ifBlank { "<未识别到文字>" } ?: "<暂无>")
+                voiceRecordingMode != null -> "正在听取指令…"
+                voiceActionRunning -> "正在执行语音指令…"
+                else -> sdkFeatureState?.lastTranscription?.takeIf(String::isNotBlank)
+                    ?: "等待语音指令"
             }
         }
     }
 
     private fun intentDisplay(): String = sdkFeatureState?.let { state ->
-        state.recognizedIntent?.let {
-            "启动意图：$it · area=${state.recognizedArea ?: "<none>"} · " +
-                "skill=${state.discoverySkill ?: "<none>"}"
-        }
-    } ?: "启动意图：<等待识别>"
+        state.recognizedIntent?.let { "巡逻区域：${state.recognizedArea ?: "未知"}" }
+            ?: state.recognizedArea?.let { "巡逻区域：$it" }
+    } ?: "等待巡逻指令"
 
     private fun toggleVoiceRecording(mode: VoiceMode) {
         if (voiceRecordingMode == mode && voiceRecorder.isRecording) {
@@ -667,6 +632,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                     VoiceMode.TRANSCRIBE -> "录音开始；再次单击上传 ASR 9004"
                     VoiceMode.CONTROL_ACTION -> "录音开始；再次单击创建运行期语音动作"
                     VoiceMode.PATROL_COMMAND -> "录音开始；再次单击识别园区巡检意图"
+                    VoiceMode.CONFIRMATION -> "录音开始；再次单击确认机器狗"
                 },
             )
             setStatus("正在录音", "再次单击当前语音按钮停止并提交")
@@ -699,6 +665,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 VoiceMode.TRANSCRIBE -> "ASR :9004 转写中"
                 VoiceMode.CONTROL_ACTION -> "Sandbox 语音动作处理中"
                 VoiceMode.PATROL_COMMAND -> "ASR :9004 转写并解析巡检意图"
+                VoiceMode.CONFIRMATION -> "正在识别确认指令"
             },
         )
         lifecycleScope.launch {
@@ -724,12 +691,31 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                             "候选 ${candidate.name} · ${candidate.id}；请确认是否派遣"
                         }
                     }
+                    VoiceMode.CONFIRMATION -> {
+                        val spoken = activeRunner.transcribeVoiceText(
+                            audio,
+                            recording.fileName,
+                            recording.contentType,
+                        )
+                        when (parsePatrolConfirmation(spoken)) {
+                            false -> {
+                                withContext(Dispatchers.Main) { rejectPatrolCandidate() }
+                                "已取消派遣"
+                            }
+                            true -> {
+                                withContext(Dispatchers.Main) { confirmPatrolCandidate() }
+                                "已确认派遣，正在建立安全组网"
+                            }
+                            null -> "未识别到确认或取消，请再说一次"
+                        }
+                    }
                 }
                 setStatus(
                     when (mode) {
                         VoiceMode.TRANSCRIBE -> "语音转文字成功"
                         VoiceMode.CONTROL_ACTION -> "语音动作已创建"
                         VoiceMode.PATROL_COMMAND -> "巡检意图已解析"
+                        VoiceMode.CONFIRMATION -> "派遣确认"
                     },
                     detail.take(300),
                 )
@@ -753,6 +739,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 runOnUiThread {
                     videoPreviewHasFrame = true
                     renderProcessedVideoLiveStatus()
+                    renderPatrolHud()
                     appendLog(
                         LabLogLevel.SUCCESS,
                         "VIDEO DISPLAY",
@@ -801,6 +788,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                     Gravity.CENTER,
                 )
             }
+            renderPatrolHud()
         }
     }
 
@@ -1021,6 +1009,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             primaryAction.text = label
             primaryAction.alpha = if (mode == PrimaryMode.BUSY) 0.55f else 1f
         }
+        refreshVoiceActions()
     }
 
     private fun appendLog(level: LabLogLevel, stage: String, message: String) {
@@ -1191,7 +1180,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         DUMP,
         STOP,
     }
-    private enum class VoiceMode { TRANSCRIBE, CONTROL_ACTION, PATROL_COMMAND }
+    private enum class VoiceMode { TRANSCRIBE, CONTROL_ACTION, PATROL_COMMAND, CONFIRMATION }
 
     private companion object {
         const val MAX_VISIBLE_LOG_LINES = 7

@@ -24,9 +24,10 @@ class TestConfigTest {
         assertEquals(8088, config.runtimePort)
         assertEquals(8443, config.masquePort)
         assertEquals("dog-vision", config.capability)
+        assertEquals("", config.intentServiceUrl)
         assertEquals(
-            "http://101.245.78.174:8011/api/v1/intent",
-            config.intentServiceUrl,
+            "http://100.123.44.87:9004/api/v1/transcribe",
+            config.resolvedAsrServiceUrl,
         )
         assertEquals(
             "https://101.245.78.174:8443/.well-known/masque/ip",
@@ -40,6 +41,14 @@ class TestConfigTest {
         val config = validConfig(masquePath = "custom/connect-ip")
 
         assertEquals("https://runtime.test:8443/custom/connect-ip", config.masqueServerUrl)
+        assertEquals("http://runtime.test:9004/api/v1/transcribe", config.resolvedAsrServiceUrl)
+    }
+
+    @Test
+    fun customAsrEndpointMustBeAbsolute() {
+        val config = validConfig().copy(asrServiceUrl = "100.123.44.87:9004")
+
+        assertTrue(config.validate().any { it.contains("语音转写地址") })
     }
 
     @Test

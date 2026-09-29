@@ -1,6 +1,7 @@
 package com.rayneo.agent.example
 
 import java.io.File
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -24,15 +25,14 @@ class AgentResetWiringTest {
     }
 
     @Test
-    fun rayneoAppExposesAFocusedTwoStepResetAction() {
+    fun rayneoAppKeepsResetLogicOutsideTheVoiceOnlyUi() {
         val source = File(
             "src/rayneo/kotlin/com/rayneo/agent/example/RayNeoMainActivity.kt",
         ).readText()
         val layout = File("src/rayneo/res/layout/activity_rayneo_main.xml").readText()
 
         assertTrue(layout.contains("@+id/reset_action"))
-        assertTrue(layout.contains("Reset 需单击两次确认"))
-        assertTrue(source.contains("FocusInfo(\n                    resetAction"))
+        assertFalse(source.contains("FocusInfo(\n                    resetAction"))
         assertTrue(source.contains("不修改网侧身份"))
         assertTrue(source.contains("activeSdk.resetAgent()"))
         assertTrue(source.contains("已回到状态1"))

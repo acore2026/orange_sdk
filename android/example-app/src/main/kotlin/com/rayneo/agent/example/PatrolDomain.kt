@@ -57,8 +57,16 @@ data class HazardAlert(
 
 enum class PatrolActionType { SCRAPE, FRONT_POUNCE }
 
-/** Stable action names for UI/transport layers that do not need action payloads. */
-enum class RobotAction { SCRAPE, FRONT_POUNCE }
+/** Stable action names shared by the voice UI and the robot A2A transport. */
+enum class RobotAction {
+    FORWARD,
+    BACKWARD,
+    LEFT,
+    RIGHT,
+    STOP,
+    SCRAPE,
+    FRONT_POUNCE,
+}
 
 /** The two execution actions used by patrol agents. */
 sealed class PatrolAction {
@@ -175,6 +183,15 @@ fun chooseCandidate(candidates: List<CandidateAgent>, required: Set<AgentCapabil
         .filter { it.capabilities.containsAll(required) }
         .sortedWith(compareBy<CandidateAgent> { it.distanceMeters ?: Double.MAX_VALUE }.thenBy { it.id })
         .firstOrNull()
+
+fun parsePatrolConfirmation(spoken: String): Boolean? {
+    val command = spoken.trim()
+    return when {
+        listOf("取消", "不确认", "不用", "不要派遣").any(command::contains) -> false
+        listOf("确认", "同意", "派遣").any(command::contains) -> true
+        else -> null
+    }
+}
 
 /** Deterministic, immutable state transition. Invalid events leave the state unchanged. */
 fun transitionPatrol(state: PatrolState, event: PatrolEvent): PatrolTransition {

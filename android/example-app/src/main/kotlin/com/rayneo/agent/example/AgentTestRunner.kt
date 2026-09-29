@@ -5,7 +5,8 @@ import com.rayneo.agent.sdk.model.AcnContext
 import com.rayneo.agent.sdk.model.AgentLifecycleState
 import com.rayneo.agent.sdk.model.AgentProfile
 import com.rayneo.agent.sdk.model.AudioControlActionRequest
-import com.rayneo.agent.sdk.model.AudioTranscriptionRequest
+import com.rayneo.agent.sdk.model.DiscoveryAudioRequest
+import com.rayneo.agent.sdk.model.DiscoveryAudioResult
 import com.rayneo.agent.sdk.model.ComputeConstraints
 import com.rayneo.agent.sdk.model.ComputeInputFormat
 import com.rayneo.agent.sdk.model.ComputeRequestType
@@ -206,7 +207,11 @@ class AgentTestRunner(
             "BOOT",
             "角色=${config.role.name}，Runtime=http://${config.serverIp}:${config.runtimePort}，" +
                 "MASQUE=${config.masqueServerUrl}" +
-                if (config.role == TestRole.A) "，Intent=${config.intentServiceUrl}" else "",
+                if (config.role == TestRole.A && !interactivePatrol) {
+                    "，Intent=${config.intentServiceUrl}"
+                } else {
+                    ""
+                },
         )
         val initialized = retryableStep("INIT", "建立端侧链路") {
             sdk.initialize(
@@ -351,10 +356,7 @@ class AgentTestRunner(
         fileName: String,
         contentType: String,
     ): PatrolAgentCandidate {
-        transcribeAudio(audio, fileName, contentType)
-        val text = lastTranscription?.trim().takeIf { !it.isNullOrEmpty() }
-            ?: error("未识别到巡逻指令")
-        return startInteractivePatrol(text)
+        return startInteractivePatrol(transcribeDiscoveryAudio(audio, fileName, contentType))
     }
 
     /**
@@ -362,28 +364,26 @@ class AgentTestRunner(
      * candidate in a pending state.  Group creation is intentionally *not* performed
      * here: the AR user must explicitly confirm the candidate first.
      */
-    suspend fun startInteractivePatrol(command: String): PatrolAgentCandidate =
+    suspend fun startInteractivePatrol(transcription: DiscoveryAudioResult): PatrolAgentCandidate =
         operationMutex.withLock {
             ensureResetNotRequested()
             check(config.role == TestRole.A) { "只有 AR 眼镜发起方可以创建巡检任务" }
-            val normalized = command.trim().takeIf(String::isNotEmpty)
+            val normalized = transcription.text.trim().takeIf(String::isNotEmpty)
                 ?: error("巡检语音指令不能为空")
             publishPatrolState(PatrolState(phase = PatrolPhase.LISTENING))
-            onStatus(RunnerStatus("正在解析巡检意图", normalized))
-            val recognition = sdk.recognizeIntent(
-                intentUrl = config.intentServiceUrl,
-                text = normalized,
-            )
-            check(recognition.matched && recognition.intent == SECURITY_PATROL_INTENT) {
-                "未识别为园区巡检：intent=${recognition.intent}，matched=${recognition.matched}"
+            val intent = transcription.intent
+            check(intent.type == "TASK") {
+                "未识别为园区巡检：intent.type=${intent.type}"
             }
-            val requiredSkill = recognition.executor?.trim()?.takeIf { it.isNotEmpty() }
-                ?: error("意图响应缺少机器人执行能力")
-            val area = recognition.area?.trim()?.takeIf { it.isNotEmpty() } ?: "A区域"
-            recognizedIntent = recognition.intent
+            val requiredSkills = transcription.requiredSkills
+            check(requiredSkills.isNotEmpty() && "patrol" in requiredSkills) {
+                "巡逻意图缺少发现机器狗所需的 required_skills"
+            }
+            val requiredSkill = requiredSkills.first()
+            val area = intent.area?.trim()?.takeIf { it.isNotEmpty() } ?: "A区域"
+            recognizedIntent = intent.type
             recognizedArea = area
             discoverySkill = requiredSkill
-            patrolIntentResult = recognition
             val request = PatrolRequest(
                 zoneId = area,
                 intent = PatrolIntent.SECURITY_PATROL,
@@ -395,20 +395,22 @@ class AgentTestRunner(
             onLog(
                 LabLogLevel.SUCCESS,
                 "AR INTENT",
-                "语音=\"$normalized\"，intent=${recognition.intent}，area=$area，" +
-                    "required_skill=$requiredSkill",
+                "语音=\"$normalized\"，intent=${intent.type}，area=$area，" +
+                    "required_skills=$requiredSkills",
             )
-            onStatus(RunnerStatus("正在发现巡检智能体", "区域 $area · 能力 $requiredSkill"))
+            onStatus(RunnerStatus("正在发现巡检智能体", "区域 $area · 能力 ${requiredSkills.joinToString()}"))
             val profile = checkNotNull(sdk.localProfile) { "本端数字身份尚未就绪" }
             val discovered = discoverPatrolAgents(
                 profile.agentId,
-                "$normalized；intent=${recognition.intent}；area=$area",
-                requiredSkill,
+                "$normalized；intent=${intent.type}；area=$area",
+                requiredSkills,
             )
             val candidates = discovered
-                .filter { it.agentId != profile.agentId && requiredSkill in it.skills }
+                .filter { agent ->
+                    agent.agentId != profile.agentId && requiredSkills.all { it in agent.skills }
+                }
                 .map { it.toPatrolCandidate(requiredSkill) }
-            check(candidates.isNotEmpty()) { "未发现声明 $requiredSkill 的机器狗" }
+            check(candidates.isNotEmpty()) { "未发现声明 ${requiredSkills.joinToString()} 的机器狗" }
             val selected = chooseCandidate(candidates, setOf(AgentCapability.PATROL))
                 ?: error("发现的机器狗均不可用，正在执行或离线")
             val listed = transitionPatrol(
@@ -465,6 +467,28 @@ class AgentTestRunner(
             }
         }
         activateManualMessaging(group.groupId)
+        // Establish the patrol context on the dog before opening the compute stream.
+        // The dog agent deliberately waits for explicit A2A motion/action commands;
+        // without this message the Secure Domain exists but the dog has no task.
+        val patrolReceipt = sdk.sendMessage(
+            groupId = group.groupId,
+            targetAgentId = candidate.id,
+            jsonMessage = buildJsonObject {
+                put("type", "patrol_request")
+                put("zone", area)
+                put("confirmed", true)
+                put("task_id", "patrol-${group.groupId}")
+            },
+            messageType = "patrol_request",
+            taskId = "patrol-${group.groupId}",
+            timeoutSeconds = 10.0,
+        )
+        check(patrolReceipt.delivered) { "机器狗未确认巡检任务" }
+        onLog(
+            LabLogLevel.SUCCESS,
+            "PATROL DISPATCH",
+            "已向 ${candidate.name} 下发巡检任务，zone=$area",
+        )
         pendingPatrolAgent = null
         val inspecting = transitionPatrol(
             patrolState,
@@ -504,6 +528,11 @@ class AgentTestRunner(
         val route = checkNotNull(manualMessageSession) { "Secure Domain 尚未就绪" }
         val area = patrolState.request?.zoneId ?: recognizedArea ?: "A区域"
         val (wireAction, spokenText, risk) = when (action) {
+            RobotAction.FORWARD -> Triple("forward", "前进", "medium")
+            RobotAction.BACKWARD -> Triple("back", "后退", "medium")
+            RobotAction.LEFT -> Triple("left", "左转", "medium")
+            RobotAction.RIGHT -> Triple("right", "右转", "medium")
+            RobotAction.STOP -> Triple("stop", "停止", "low")
             RobotAction.SCRAPE -> Triple("Scrape", "威吓歹徒", "medium")
             RobotAction.FRONT_POUNCE -> Triple("FrontPounce", "驱逐歹徒", "high")
         }
@@ -524,13 +553,24 @@ class AgentTestRunner(
         )
         check(receipt.delivered) { "机器狗未确认 $wireAction 指令" }
         lastRobotAction = action
-        patrolState = patrolState.copy(
-            phase = PatrolPhase.HAZARD_RESPONSE,
-            activeAction = if (action == RobotAction.SCRAPE) {
-                PatrolAction.Scrape(area, spokenText)
-            } else {
+        val patrolAction = when (action) {
+            RobotAction.SCRAPE -> PatrolAction.Scrape(area, spokenText)
+            RobotAction.FRONT_POUNCE ->
                 PatrolAction.FrontPounce(area, patrolState.alerts.lastOrNull()?.id, spokenText)
+            RobotAction.FORWARD, RobotAction.BACKWARD, RobotAction.LEFT, RobotAction.RIGHT,
+            RobotAction.STOP -> null
+        }
+        patrolState = patrolState.copy(
+            phase = if (patrolAction == null) {
+                if (patrolState.phase == PatrolPhase.NAVIGATING) {
+                    PatrolPhase.NAVIGATING
+                } else {
+                    PatrolPhase.INSPECTING
+                }
+            } else {
+                PatrolPhase.HAZARD_RESPONSE
             },
+            activeAction = patrolAction,
         )
         onLog(LabLogLevel.SUCCESS, "ROBOT ACTION", "$wireAction → ${route.targetAgentName}，risk=$risk")
         // If C-02 is active, also submit the formal Sandbox action. Direct A2A remains the
@@ -890,25 +930,46 @@ class AgentTestRunner(
         contentType: String,
     ): String = operationMutex.withLock {
         ensureResetNotRequested()
-        val operationId = UUID.randomUUID().toString()
-        val transcription = sdk.transcribeAudio(
-            asrUrl = "http://${config.serverIp}:9004/api/v1/transcribe",
-            request = AudioTranscriptionRequest(
+        // Port 9004 returns the transcript and the parsed intent in one response. Keep
+        // this path on the same contract as patrol and confirmation voice input so the
+        // returned text is published through SdkFeatureState and rendered below the HUD.
+        val transcription = transcribeDiscoveryAudio(audio, fileName, contentType)
+        "request_id=${transcription.requestId}，text=${transcription.text}，" +
+            "intent=${transcription.intent.type}，required_skills=${transcription.requiredSkills}"
+    }
+
+    suspend fun transcribeVoiceText(
+        audio: ByteArray,
+        fileName: String,
+        contentType: String,
+    ): String {
+        return transcribeDiscoveryAudio(audio, fileName, contentType).text.trim()
+    }
+
+    private suspend fun transcribeDiscoveryAudio(
+        audio: ByteArray,
+        fileName: String,
+        contentType: String,
+    ): DiscoveryAudioResult {
+        val result = sdk.transcribeDiscoveryAudio(
+            asrUrl = config.resolvedAsrServiceUrl,
+            request = DiscoveryAudioRequest(
+                requestId = UUID.randomUUID().toString(),
                 audio = audio,
                 fileName = fileName,
                 contentType = contentType,
-                sessionId = activeComputeSessionId ?: "agent-link-$operationId",
-                taskId = "asr-$operationId",
-                source = "android-${config.role.name.lowercase()}",
                 language = "zh",
             ),
         )
-        lastTranscription = transcription.text
-        val summary = "transcript_id=${transcription.transcriptId}，" +
-            "language=${transcription.language ?: "<unknown>"}，text=${transcription.text}"
-        onLog(LabLogLevel.SUCCESS, "ASR 9004", summary)
+        lastTranscription = result.text
+        onLog(
+            LabLogLevel.SUCCESS,
+            "ASR 9004",
+            "request_id=${result.requestId}，text=${result.text}，" +
+                "intent=${result.intent.type}，required_skills=${result.requiredSkills}",
+        )
         emitFeatureState()
-        summary
+        return result
     }
 
     suspend fun createAudioControlAction(
@@ -930,11 +991,22 @@ class AgentTestRunner(
         lastControlActionId = action.actionId
         lastTranscription = action.transcription?.text
         val spokenCommand = action.transcription?.text.orEmpty()
+        val normalizedCommand = spokenCommand.trim().lowercase()
         val robotAction = when {
-            spokenCommand.contains("驱逐") || spokenCommand.contains("前扑") ||
-                spokenCommand.contains("FrontPounce", ignoreCase = true) -> RobotAction.FRONT_POUNCE
-            spokenCommand.contains("威吓") || spokenCommand.contains("刨地") ||
-                spokenCommand.contains("Scrape", ignoreCase = true) -> RobotAction.SCRAPE
+            normalizedCommand.contains("前进") || normalizedCommand.contains("向前") ||
+                normalizedCommand.contains("forward") -> RobotAction.FORWARD
+            normalizedCommand.contains("后退") || normalizedCommand.contains("向后") ||
+                normalizedCommand.contains("back") -> RobotAction.BACKWARD
+            normalizedCommand.contains("左转") || normalizedCommand.contains("向左") ||
+                normalizedCommand.contains("left") -> RobotAction.LEFT
+            normalizedCommand.contains("右转") || normalizedCommand.contains("向右") ||
+                normalizedCommand.contains("right") -> RobotAction.RIGHT
+            normalizedCommand.contains("停止") || normalizedCommand.contains("停下") ||
+                normalizedCommand == "stop" -> RobotAction.STOP
+            normalizedCommand.contains("驱逐") || normalizedCommand.contains("前扑") ||
+                normalizedCommand.contains("frontpounce") -> RobotAction.FRONT_POUNCE
+            normalizedCommand.contains("威吓") || normalizedCommand.contains("刨地") ||
+                normalizedCommand.contains("scrape") -> RobotAction.SCRAPE
             else -> null
         }
         robotAction?.let { mapped ->
@@ -1235,11 +1307,11 @@ class AgentTestRunner(
     private suspend fun discoverPatrolAgents(
         agentId: String,
         taskDescription: String,
-        requiredSkill: String,
+        requiredSkills: List<String>,
     ): List<DiscoveredAgent> = sdk.discoverAgents(
         agentId = agentId,
         taskDescription = taskDescription,
-        requiredSkills = listOf(requiredSkill),
+        requiredSkills = requiredSkills,
         maxResults = 10,
     )
 
@@ -1272,7 +1344,9 @@ class AgentTestRunner(
         manualMessageSession = session
         onManualMessageSession(session)
         emitFeatureState()
-        onComputeActionAvailability(config.role == TestRole.A && processedVideoStream == null)
+        // The RayNeo flow requests compute as soon as the confirmed group is ready.  Keep
+        // this callback disabled so the UI cannot turn compute allocation into a manual step.
+        onComputeActionAvailability(false)
         pendingComputeNotification?.let { pending ->
             pendingComputeNotification = null
             receiveComputeSessionId(

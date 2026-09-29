@@ -1,6 +1,7 @@
 package com.rayneo.agent.example
 
 import java.io.File
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -24,7 +25,7 @@ class DiagnosticLogWiringTest {
         assertTrue(activity.contains("Dump 日志"))
         assertTrue(activity.contains("DiagnosticLogExporter.createDump"))
         assertTrue(exporter.contains("compute_endpoint=<managed by SDK from C-02>"))
-        assertTrue(exporter.contains("asr_endpoint=http://"))
+        assertTrue(exporter.contains("asr_endpoint=${'$'}{config.resolvedAsrServiceUrl}"))
         assertTrue(exporter.contains("[VIDEO PREVIEW RENDERER]"))
         assertTrue(renderer.contains("renderer=TextureView/EglRenderer"))
         assertTrue(activity.contains("?.diagnosticSummary()"))
@@ -42,14 +43,15 @@ class DiagnosticLogWiringTest {
     }
 
     @Test
-    fun rayneoAppExposesFocusedDumpActionAndKeepsFullLogHistory() {
+    fun rayneoAppKeepsDiagnosticsWithoutAddingAVisibleFocusTarget() {
         val activity = File(
             "src/rayneo/kotlin/com/rayneo/agent/example/RayNeoMainActivity.kt",
         ).readText()
         val layout = File("src/rayneo/res/layout/activity_rayneo_main.xml").readText()
 
         assertTrue(layout.contains("@+id/dump_action"))
-        assertTrue(activity.contains("FocusInfo(\n                    dumpAction"))
+        assertFalse(activity.contains("FocusInfo(\n                    dumpAction"))
+        assertTrue(layout.contains("android:visibility=\"gone\""))
         assertTrue(activity.contains("MAX_DIAGNOSTIC_LOG_LINES"))
         assertTrue(activity.contains("DiagnosticLogExporter.share"))
     }

@@ -23,7 +23,7 @@ class SdkFeatureCoverageWiringTest {
             "sdk.updateRecognitionTarget(",
             "sdk.getRecognitionTarget(",
             "sdk.createControlAction(",
-            "sdk.transcribeAudio(",
+            "sdk.transcribeDiscoveryAudio(",
             "sdk.recognizeIntent(",
             "sdk.createAudioControlAction(",
             "sdk.getControlAction(",

@@ -41,9 +41,13 @@ data class TestConfig(
      * integration harness unless this flag is enabled by its caller.
      */
     val interactivePatrol: Boolean = false,
+    val asrServiceUrl: String? = null,
 ) {
     val masqueServerUrl: String
         get() = "https://$serverIp:$masquePort${normalizedMasquePath()}"
+
+    val resolvedAsrServiceUrl: String
+        get() = asrServiceUrl ?: "http://$serverIp:9004/api/v1/transcribe"
 
     fun validate(): List<String> = buildList {
         if (serverIp.isBlank()) add("服务器 IP 不能为空")
@@ -56,12 +60,20 @@ data class TestConfig(
             if (port !in 1..65535) add("$name 必须在 1..65535")
         }
         if (masquePath.isBlank()) add("MASQUE 路径不能为空")
-        if (role == TestRole.A) {
+        if (role == TestRole.A && !interactivePatrol) {
             val endpoint = runCatching { URI(intentServiceUrl) }.getOrNull()
             if (endpoint == null || endpoint.scheme !in setOf("http", "https") ||
                 endpoint.host.isNullOrBlank()
             ) {
                 add("意图识别地址必须是完整 HTTP/HTTPS URL")
+            }
+        }
+        if (asrServiceUrl != null) {
+            val endpoint = runCatching { URI(asrServiceUrl) }.getOrNull()
+            if (endpoint == null || endpoint.scheme !in setOf("http", "https") ||
+                endpoint.host.isNullOrBlank()
+            ) {
+                add("语音转写地址必须是完整 HTTP/HTTPS URL")
             }
         }
         if (owner.isBlank()) add("Owner 不能为空")
@@ -81,15 +93,12 @@ object RayNeoX3ProDeployment {
     const val RUNTIME_PORT = 8088
     const val MASQUE_PORT = 8443
     const val MASQUE_PATH = "/.well-known/masque/ip"
-    const val INTENT_SERVICE_URL = "http://101.245.78.174:8011/api/v1/intent"
+    const val ASR_SERVICE_URL = "http://100.123.44.87:9004/api/v1/transcribe"
     const val PARK_ADMIN_CAPABILITY = "园区管理员"
     const val PATROL_CAPABILITY = "巡逻"
     const val CAMERA_CAPABILITY = "相机"
 
-    fun agentAConfig(
-        masqueToken: String? = null,
-        intentServiceUrl: String? = null,
-    ): TestConfig = TestConfig(
+    fun agentAConfig(masqueToken: String? = null): TestConfig = TestConfig(
         role = TestRole.A,
         serverIp = SERVER_IP,
         runtimePort = RUNTIME_PORT,
@@ -98,7 +107,7 @@ object RayNeoX3ProDeployment {
         localTcpPort = 4001,
         localUdpPort = 28443,
         masqueToken = masqueToken?.takeIf(String::isNotBlank),
-        intentServiceUrl = intentServiceUrl?.takeIf(String::isNotBlank) ?: INTENT_SERVICE_URL,
+        intentServiceUrl = "",
         owner = "rayneo-x3-pro-owner-a",
         agentName = "RayNeo-X3-Pro-A",
         capability = "dog-vision",
@@ -107,5 +116,6 @@ object RayNeoX3ProDeployment {
         message = "hello Agent B from RayNeo X3 Pro",
         capabilities = listOf(PARK_ADMIN_CAPABILITY, "voice"),
         interactivePatrol = true,
+        asrServiceUrl = ASR_SERVICE_URL,
     )
 }

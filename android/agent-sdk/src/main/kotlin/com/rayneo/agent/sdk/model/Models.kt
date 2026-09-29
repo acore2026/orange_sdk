@@ -292,6 +292,28 @@ data class AudioTranscriptionResult(
     val audioFilename: String,
 )
 
+data class DiscoveryAudioRequest(
+    val requestId: String,
+    val audio: ByteArray,
+    val fileName: String,
+    val contentType: String,
+    val language: String? = null,
+)
+
+data class DiscoveryAudioIntent(
+    val type: String,
+    val parameters: Map<String, String>,
+) {
+    val area: String? get() = parameters["area"]
+}
+
+data class DiscoveryAudioResult(
+    val requestId: String,
+    val text: String,
+    val intent: DiscoveryAudioIntent,
+    val requiredSkills: List<String>,
+)
+
 /**
  * Normalized result returned by the standalone pruned_sandbox intent service.
  *

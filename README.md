@@ -12,6 +12,7 @@
 - [按回车逐接口调用的 Linux 交互示例](python/examples/interactive_linux_agent.py)
 - [Agent A：建组、申请算力会话并验证处理视频](python/examples/agent_a_test.py)
 - [Agent B：发布能力、接受建组并上传本地测试视频](python/examples/agent_b_test.py)
+- [机器狗巡检 Agent：身份注册、巡逻、视觉卸载和 Unitree 动作](python/examples/dog_patrol_agent.md)
 - [ARM64 A/B 全公开接口测试镜像](python/docker/arm64/README.md)
 - [A/B 双实例 MASQUE 消息联调脚本](python/examples/masque_two_instance_test.py)
 - [Android/RayNeoOS 使用说明](android/README.md)

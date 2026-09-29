@@ -246,10 +246,9 @@ adb install -r example-app/build/outputs/apk/generic/debug/example-app-generic-d
 
 `rayneo` 构建面向眼镜端低操作场景，固定为发起方 A，并预置服务器
 `101.245.78.174`、Runtime HTTP `8088`、MASQUE QUIC/UDP `8443` 和
-`/.well-known/masque/ip`。页面不显示角色切换、服务器表单或消息输入框；应用先进入
-可操作的双目页面，用户单击“启用 Agent 网络”后才开始连接和 Agent A 全流程。首次
-运行会进入 Android 系统“网络连接请求”，确认一次后系统会保留本 App 的 VPN/TUN
-授权。MASQUE 外层本机地址仍由 Android 路由自动选择；密钥初始化、HTTP、TUN 和
+`/.well-known/masque/ip`。页面不显示角色切换、服务器表单或消息输入框；应用启动后
+自动连接并恢复数字身份。安装脚本默认通过 ADB 预授权 `ACTIVATE_VPN`；若系统仍显示
+一次“网络连接请求”，确认后系统会保留本 App 的 VPN/TUN 授权。MASQUE 外层本机地址仍由 Android 路由自动选择；密钥初始化、HTTP、TUN 和
 同步 JNI CONNECT-IP 握手均在后台线程执行，不阻塞眼镜 UI。
 
 雷鸟 X 系列把左右两块物理屏组合成一块逻辑屏，普通单份 Android UI 会被左右眼各
@@ -260,30 +259,29 @@ adb install -r example-app/build/outputs/apk/generic/debug/example-app-generic-d
 `example-app/libs`，SHA-256 为
 `5d408e2c5d80e8ae746c42abbda50012b50617005adfeb397661bec9c9be2676`。
 
-眼镜操作遵循系统约定：前后滑或上下滑切换“主要操作/停止”焦点，单击确认，双击停止
-并退出。建组和群组配置完成后，主要操作自动变成“发送测试消息”；每次单击向 Agent B
-发送一条带序号的预置消息，不需要在眼镜上调用软键盘。
+眼镜操作遵循系统约定：前后滑或上下滑切换主要操作和停止焦点，单击确认，双击停止
+并退出。应用启动后先在后台申请数字身份；用户通过语音派遣机器狗，确认候选后自动建组，
+随后申请算力会话并建立视频回传，最后可通过语音控制机器狗移动。
 
 ```bash
 cd android
-ANDROID_HOME=/opt/android-sdk ./gradlew :example-app:assembleRayneoDebug
-adb install -r example-app/build/outputs/apk/rayneo/debug/example-app-rayneo-debug.apk
+ANDROID_HOME=/opt/android-sdk ./gradlew :example-app:assembleRayneoRelease
+adb install -r example-app/build/outputs/apk/rayneo/release/example-app-rayneo-release.apk
 ```
 
 专用包应用 ID 为 `com.rayneo.agent.example.rayneo`，可与通用 A/B 联调包并存。
-真实用户首次使用时应在眼镜中主动单击“启用 Agent 网络”并确认系统 VPN 授权，正式
-部署不能依赖 ADB 绕过 Android 的首次同意。内部联调或受管设备可使用 Windows 脚本
-一次完成安装、可选 VPN 预授权和启动：
+Windows 安装脚本默认通过 ADB 预授权 VPN；需要保留系统 VPN 授权流程时传入
+`-RequireVpnConsent`：
 
 ```powershell
-# 正常用户授权流程：启动后在眼镜中单击并确认系统请求
+# 默认：安装、ADB VPN 预授权并启动
 powershell -ExecutionPolicy Bypass -File .\install-rayneo-windows.ps1
 
-# 仅内部联调/受管设备：ADB 预授权，启动后单击即直接连接
-powershell -ExecutionPolicy Bypass -File .\install-rayneo-windows.ps1 -PreAuthorizeVpn
+# 使用系统授权页：启动后确认系统请求
+powershell -ExecutionPolicy Bypass -File .\install-rayneo-windows.ps1 -RequireVpnConsent
 ```
 
-脚本默认使用 `C:\Android\platform-tools\adb.exe` 和本仓库构建出的 RayNeo Debug APK；
+脚本默认使用 `C:\Android\platform-tools\adb.exe` 和本仓库构建出的 RayNeo Release APK；
 其他位置可通过 `-AdbPath`、`-ApkPath` 指定。VPN 授权通常在关闭 App、设备重启和
 同包名 `install -r` 更新后继续保留；卸载、清除数据、用户撤销授权或授权另一 VPN
 应用后，需要再次确认。
@@ -629,7 +627,7 @@ pruned_sandbox 的独立 ASR 服务使用 9004 端口，不依赖 C-02 或算力
 
 ```kotlin
 val transcription = sdk.transcribeAudio(
-    asrUrl = "http://101.245.78.174:9004/api/v1/transcribe",
+    asrUrl = "http://100.123.44.87:9004/api/v1/transcribe",
     request = AudioTranscriptionRequest(
         audio = recordedBytes,
         fileName = "speech.m4a",
@@ -705,20 +703,14 @@ RayNeo flavor 现在把 Agent A 作为园区安保负责人佩戴的 AR 眼镜�
 执行业务流程。所有控制面、群组、路由和媒体请求仍由 `AgentSdk` 负责，Activity 只
 编排业务状态并渲染双目 HUD：
 
-1. 启用 Agent 网络后，SDK 完成数字身份申请、网络能力获取和 Agent Card 发布；RayNeo
-   Card 默认声明 `园区管理员` 与 `voice`，页面显示“可信接入已就绪”。
-2. 点击“巡检指令（按住说话）”，录音先通过独立 ASR `:9004` 转写，再调用
-   `recognizeIntent`。意图、区域和 `executor` 会显示在 HUD 中；当前示例命令为
-   “派机器狗巡逻园区内 A 区域”。
-3. SDK 用意图返回的 `executor` 作为 `required_skills` 调用 `discoverAgents`，只保留
-   声明该能力且状态为 `AVAILABLE` 的候选，并按 `distance_meters`（若 Runtime 返回）
-   选择最近者。用户必须点击“确认派遣”后才调用 `createGroup`，创建 Secure Domain。
-4. 群组配置进入 SDK 缓存后，AR 端自动创建正式算力会话并接收处理后视频；Sandbox 地址、
-   WebRTC SDP、媒体连接 ID 和隧道路由不会暴露给 App。
-5. 危险识别结果随处理后视频流回传并显示在眼镜 HUD/视频叠加层中。安保负责人可
-   通过语音或按钮下发“威吓歹徒”对应的 `Scrape`（刨地），或下发“驱逐歹徒”对应的
-   `FrontPounce`（前扑）；后者必须二次确认。动作会通过 A2A 投递给机器狗，并在存在
-   consumer C-02 时镜像提交 Sandbox `createControlAction`。
+1. 应用启动后，SDK 在后台申请或恢复数字身份、网络能力和 Agent Card；用户无需感知
+   该阶段，页面只显示连接状态。
+2. 用户按住语音操作并说“派机器狗巡逻”。SDK 转写并调用 `discoverAgents`，眼镜显示
+   返回的机器狗 ID 和信息；用户说“确认”后调用 `createGroup`，机器狗端自动接受建组。
+3. 群组配置下发完成后，SDK 自动申请算力会话。眼镜显示机器狗正在算力卸载并准备回传
+   视野；机器狗调用 `startVideoUpload`，眼镜调用 `getProcessedVideoStream` 完成视频传输。
+4. 用户可通过语音说“前进”“后退”“左转”“右转”或“停止”，命令经 A2A 下发到机器狗，
+   机器狗端执行并返回动作结果。
 
 当前 SDK/Runtime 不要求 App 实现独立告警接口；视频识别服务负责产生告警叠加，App
 只消费处理后的视频 Track，并把安保负责人的动作指令路由给机器狗。

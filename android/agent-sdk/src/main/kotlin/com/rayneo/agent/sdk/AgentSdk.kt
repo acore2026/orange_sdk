@@ -9,6 +9,9 @@ import com.rayneo.agent.sdk.model.AudioControlActionRequest
 import com.rayneo.agent.sdk.model.AudioTranscriptionRequest
 import com.rayneo.agent.sdk.model.AudioTranscriptionResult
 import com.rayneo.agent.sdk.model.AudioTranscriptionSegment
+import com.rayneo.agent.sdk.model.DiscoveryAudioRequest
+import com.rayneo.agent.sdk.model.DiscoveryAudioIntent
+import com.rayneo.agent.sdk.model.DiscoveryAudioResult
 import com.rayneo.agent.sdk.model.IntentRecognitionResult
 import com.rayneo.agent.sdk.model.AcnContext
 import com.rayneo.agent.sdk.model.AgentLifecycleState
@@ -1528,6 +1531,75 @@ class AgentSdk internal constructor(
             sourceIpv4 = null,
         )
         return parseAudioTranscriptionResponse(response)
+    }
+
+    /** Transcribes the first task utterance and returns its discovery intent in one response. */
+    suspend fun transcribeDiscoveryAudio(
+        asrUrl: String,
+        request: DiscoveryAudioRequest,
+        timeoutSeconds: Double = 120.0,
+    ): DiscoveryAudioResult {
+        validateSandboxTimeout(timeoutSeconds)
+        val endpoint = requireStandaloneHttpUrl(asrUrl, "asrUrl")
+        val requestId = requireComputeString(request.requestId, "requestId")
+        val fileName = validateAudioUpload(request.audio, request.fileName, request.contentType)
+        request.language?.let { requireComputeString(it, "language") }
+        val fields = buildMap {
+            put("request_id", requestId)
+            request.language?.let { put("language", it) }
+        }
+        val response = sandboxTransport.uploadWithStatus(
+            url = endpoint.toASCIIString(),
+            fields = fields,
+            fileFieldName = "file",
+            fileName = fileName,
+            contentType = request.contentType,
+            content = request.audio,
+            timeoutSeconds = timeoutSeconds,
+            sourceIpv4 = null,
+        )
+        if (response.statusCode != 200) {
+            val detail = response.body.stringOrNull("message")
+                ?: (response.body["error"] as? JsonObject)?.stringOrNull("message")
+            throw AgentSdkException(
+                ErrorCode.SANDBOX_REJECTED,
+                detail?.takeIf(String::isNotBlank)
+                    ?: "ASR returned HTTP ${response.statusCode}",
+                retryable = response.statusCode >= 500,
+            )
+        }
+        val body = response.body
+        if (body.stringOrNull("request_id") != requestId) {
+            invalidControlResponse("ASR request_id does not match", "request_id")
+        }
+        val text = body.stringOrNull("text")
+            ?: invalidControlResponse("text must be a string", "text")
+        val intent = body["intent"] as? JsonObject
+            ?: invalidControlResponse("intent must be an object", "intent")
+        val type = intent.stringOrNull("type")?.takeIf(String::isNotBlank)
+            ?: invalidControlResponse("intent.type must be a non-empty string", "intent.type")
+        val parameters = intent["parameters"] as? JsonObject
+            ?: invalidControlResponse("intent.parameters must be an object", "intent.parameters")
+        val slots = parameters.mapValues { (key, value) ->
+            (value as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.content
+                ?: invalidControlResponse("intent.parameters.$key must be a string", "intent.parameters.$key")
+        }
+        val skills = body["required_skills"] as? JsonArray
+            ?: invalidControlResponse("required_skills must be an array", "required_skills")
+        val requiredSkills = skills.mapIndexed { index, value ->
+            (value as? JsonPrimitive)?.takeIf(JsonPrimitive::isString)?.content
+                ?.takeIf(String::isNotBlank)
+                ?: invalidControlResponse(
+                    "required_skills[$index] must be a non-empty string",
+                    "required_skills",
+                )
+        }
+        return DiscoveryAudioResult(
+            requestId = requestId,
+            text = text,
+            intent = DiscoveryAudioIntent(type, slots),
+            requiredSkills = requiredSkills,
+        )
     }
 
     /**

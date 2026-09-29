@@ -25,7 +25,16 @@ android {
             dimension = "deployment"
             applicationIdSuffix = ".rayneo"
             versionNameSuffix = "-rayneo"
-            resValue("string", "app_name", "雷鸟 Agent A")
+            resValue("string", "app_name", "雷鸟巡检")
+        }
+    }
+
+    // Keep the release artifact installable through ADB. Production signing can
+    // replace this repository-local debug keystore configuration.
+    buildTypes {
+        getByName("release") {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 

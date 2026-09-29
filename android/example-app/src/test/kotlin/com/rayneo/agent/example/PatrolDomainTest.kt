@@ -52,4 +52,12 @@ class PatrolDomainTest {
         ).state.phase)
         assertTrue(validatePatrolRequest(PatrolRequest("A区域")).isEmpty())
     }
+
+    @Test
+    fun spokenConfirmationPrioritizesCancellation() {
+        assertEquals(true, parsePatrolConfirmation("确认派遣"))
+        assertEquals(false, parsePatrolConfirmation("取消确认"))
+        assertEquals(false, parsePatrolConfirmation("不要派遣"))
+        assertEquals(null, parsePatrolConfirmation("机器狗在哪里"))
+    }
 }

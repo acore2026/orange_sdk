@@ -5,6 +5,7 @@ import com.rayneo.agent.sdk.model.AgentLifecycleState
 import com.rayneo.agent.sdk.model.AcnContext
 import com.rayneo.agent.sdk.model.AudioControlActionRequest
 import com.rayneo.agent.sdk.model.AudioTranscriptionRequest
+import com.rayneo.agent.sdk.model.DiscoveryAudioRequest
 import com.rayneo.agent.sdk.model.ComputeConstraints
 import com.rayneo.agent.sdk.model.ComputeInputFormat
 import com.rayneo.agent.sdk.model.ComputeRequestType
@@ -91,6 +92,7 @@ class AgentSdkGroupConfigTest {
         assertTrue(publicMethods.any { it.name == "createControlAction" })
         assertTrue(publicMethods.any { it.name == "createAudioControlAction" })
         assertTrue(publicMethods.any { it.name == "transcribeAudio" })
+        assertTrue(publicMethods.any { it.name == "transcribeDiscoveryAudio" })
         assertTrue(publicMethods.any { it.name == "recognizeIntent" })
         assertTrue(publicMethods.any { it.name == "getControlAction" })
         assertEquals(ComputeSessionRequest::class.java, create.parameterTypes[0])
@@ -1029,6 +1031,31 @@ class AgentSdkGroupConfigTest {
         assertEquals("http://sandbox.example:9004/api/v1/transcribe", upload.url)
         assertEquals("voice-session-001", upload.fields["session_id"])
         assertEquals("glasses", upload.fields["source"])
+        assertEquals(null, upload.sourceIpv4)
+    }
+
+    @Test
+    fun `discovery ASR returns transcript intent and required skills before initialization`() = runTest {
+        val result = sdk.transcribeDiscoveryAudio(
+            "http://sandbox.example:9004/api/v1/transcribe",
+            DiscoveryAudioRequest(
+                requestId = "discovery-001",
+                audio = byteArrayOf(1, 2, 3),
+                fileName = "patrol.m4a",
+                contentType = "audio/mp4",
+                language = "zh",
+            ),
+        )
+
+        assertEquals("discovery-001", result.requestId)
+        assertEquals("派机器狗巡逻A区域", result.text)
+        assertEquals("TASK", result.intent.type)
+        assertEquals("A", result.intent.area)
+        assertEquals(listOf("patrol", "camera"), result.requiredSkills)
+        val upload = sandbox.uploads.single()
+        assertEquals("http://sandbox.example:9004/api/v1/transcribe", upload.url)
+        assertEquals("discovery-001", upload.fields["request_id"])
+        assertEquals("zh", upload.fields["language"])
         assertEquals(null, upload.sourceIpv4)
     }
 
@@ -2123,6 +2150,20 @@ class AgentSdkGroupConfigTest {
         ): RuntimeHttpResponse {
             uploads += Upload(url, fields, fileName, sourceIpv4)
             if (url.endsWith("/api/v1/transcribe")) {
+                if (fields.containsKey("request_id")) {
+                    return RuntimeHttpResponse(200, buildJsonObject {
+                        put("request_id", fields.getValue("request_id"))
+                        put("text", "派机器狗巡逻A区域")
+                        put("intent", buildJsonObject {
+                            put("type", "TASK")
+                            put("parameters", buildJsonObject { put("area", "A") })
+                        })
+                        put("required_skills", buildJsonArray {
+                            add(JsonPrimitive("patrol"))
+                            add(JsonPrimitive("camera"))
+                        })
+                    })
+                }
                 return RuntimeHttpResponse(200, buildJsonObject {
                     put("transcriptId", "transcript-001")
                     put("sessionId", fields.getValue("session_id"))
