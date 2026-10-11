@@ -25,7 +25,7 @@ class SdkFeatureCoverageWiringTest {
             "sdk.createControlAction(",
             "sdk.transcribeDiscoveryAudio(",
             "sdk.recognizeIntent(",
-            "sdk.createAudioControlAction(",
+            "sdk.recognizeRuntimeAudio(",
             "sdk.getControlAction(",
         ).forEach { call ->
             assertTrue("Missing example-app coverage for $call", runner.contains(call))

@@ -11,7 +11,7 @@
         android:layout_height="match_parent"
         android:background="#000000">
 
-        <org.webrtc.SurfaceViewRenderer
+        <com.rayneo.agent.example.TextureViewEglRenderer
             android:id="@+id/video_renderer"
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
@@ -40,13 +40,14 @@
 
         <TextView
             android:id="@+id/status_title"
+            android:letterSpacing="0"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:ellipsize="end"
             android:maxLines="1"
-            android:text="正在连接"
-            android:textColor="#F2F6FA"
-            android:textSize="18sp"
+            android:text="NEXT · VOICE COMMAND"
+            android:textColor="#E9FCFF"
+            android:textSize="12sp"
             android:textStyle="bold" />
 
         <TextView
@@ -56,9 +57,9 @@
             android:layout_marginTop="3dp"
             android:ellipsize="end"
             android:maxLines="2"
-            android:text="正在建立安全连接"
-            android:textColor="#C5D0D8"
-            android:textSize="13sp" />
+            android:text="Try saying: Send the robot dog to patrol."
+            android:textColor="#B5D8E5"
+            android:textSize="15sp" />
     </LinearLayout>
 
     <LinearLayout
@@ -81,20 +82,21 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center"
-            android:text="等待任务"
-            android:textColor="#F2F6FA"
-            android:textSize="22sp"
+            android:text="Awaiting task"
+            android:textColor="#E9FCFF"
+            android:textSize="20sp"
             android:textStyle="bold" />
 
         <TextView
             android:id="@+id/patrol_candidate"
+            android:ellipsize="end"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:gravity="center"
             android:maxLines="3"
-            android:text="正在准备数字身份"
-            android:textColor="#C5D0D8"
+            android:text="Preparing digital identity"
+            android:textColor="#B5D8E5"
             android:textSize="15sp" />
 
         <TextView
@@ -128,10 +130,10 @@
             android:layout_height="wrap_content"
             android:focusable="true"
             android:gravity="center_vertical"
-            android:minHeight="36dp"
-            android:text="单击开始说话"
-            android:textColor="#F2F6FA"
-            android:textSize="19sp"
+            android:minHeight="26dp"
+            android:text="Voice recognition"
+            android:textColor="#E9FCFF"
+            android:textSize="15sp"
             android:textStyle="bold" />
 
         <TextView
@@ -141,8 +143,8 @@
             android:layout_marginTop="3dp"
             android:ellipsize="end"
             android:maxLines="2"
-            android:text="等待语音指令"
-            android:textColor="#B8C6D0"
+            android:text="Awaiting voice command"
+            android:textColor="#B5D8E5"
             android:textSize="14sp" />
     </LinearLayout>
 

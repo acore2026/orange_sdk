@@ -20,7 +20,7 @@ agent sends payloads such as::
 ``expel`` is deliberately confirmation-gated because it invokes the
 high-risk Unitree ``FrontPounce`` action.
 
-Unitree's official Python SDK exposes ``SportClient.Hello()`` and
+Unitree's official Python SDK exposes ``SportClient.Content()``, ``SportClient.Hello()`` and
 ``SportClient.FrontPounce()``. The direct adapter below calls those methods;
 the HTTP adapter targets the sibling ``compute_backend/dog-ctrl`` service so
 the same orchestration can be used when DDS control is kept in a separate
@@ -99,6 +99,8 @@ class DogActions(Protocol):
 
     async def right(self) -> Mapping[str, Any]: ...
 
+    async def wave(self) -> Mapping[str, Any]: ...
+
     async def intimidate(self) -> Mapping[str, Any]: ...
 
     async def expel(self) -> Mapping[str, Any]: ...
@@ -133,8 +135,11 @@ class DryRunDogActions:
     async def right(self) -> Mapping[str, Any]:
         return await self._record("right")
 
-    async def intimidate(self) -> Mapping[str, Any]:
+    async def wave(self) -> Mapping[str, Any]:
         return await self._record("Hello")
+
+    async def intimidate(self) -> Mapping[str, Any]:
+        return await self._record("Content")
 
     async def expel(self) -> Mapping[str, Any]:
         return await self._record("FrontPounce")
@@ -219,9 +224,12 @@ class UnitreeGo2Actions:
     async def stand_up(self) -> Mapping[str, Any]:
         return await self._call("StandUp")
 
+    async def wave(self) -> Mapping[str, Any]:
+        return await self._call("Hello")
+
     async def intimidate(self) -> Mapping[str, Any]:
         await self._call("StopMove")
-        result = await self._call("Hello")
+        result = await self._call("Content")
         await asyncio.sleep(self.action_hold_seconds)
         return result
 
@@ -276,8 +284,11 @@ class HttpDogActions:
     async def right(self) -> Mapping[str, Any]:
         return await self._post("/right")
 
-    async def intimidate(self) -> Mapping[str, Any]:
+    async def wave(self) -> Mapping[str, Any]:
         return await self._post("/wave")
+
+    async def intimidate(self) -> Mapping[str, Any]:
+        return await self._post("/content")
 
     async def expel(self) -> Mapping[str, Any]:
         return await self._post("/front-pounce")
@@ -421,6 +432,9 @@ class DogPatrolAgent:
             return
         if self._producer_session_id == session_id and self._producer_upload_task is not None:
             return
+        if self._producer_upload_task is not None and not self._producer_upload_task.done():
+            self._producer_upload_task.cancel()
+            await asyncio.gather(self._producer_upload_task, return_exceptions=True)
         self.controller_agent_id = sender_agent_id
         self._producer_session_id = session_id
         if self.current_task_id is None:
@@ -442,15 +456,17 @@ class DogPatrolAgent:
         session_id: str,
     ) -> None:
         """Start the producer side requested by the RayNeo Agent B flow."""
+        upload = None
         try:
-            self._offload_upload = await self.sdk.start_video_upload(
+            upload = await self.sdk.start_video_upload(
                 session_id,
                 camera_id=self.config.camera_id,
-                width=1280,
-                height=720,
-                fps=30,
-                bitrate_kbps=2500,
+                width=640,
+                height=480,
+                fps=10,
+                bitrate_kbps=250,
             )
+            self._offload_upload = upload
             await self._send_event(
                 group_id,
                 controller_agent_id,
@@ -472,14 +488,16 @@ class DogPatrolAgent:
                 {"type": "video_offload_failed", "reason": str(exc)},
             )
         finally:
-            if self._offload_upload is not None:
+            if upload is not None:
                 with contextlib.suppress(Exception):
-                    await self._offload_upload.stop()
+                    await upload.stop()
+            if self._offload_upload is upload:
                 self._offload_upload = None
-            self._producer_session_id = None
+            if self._producer_session_id == session_id:
+                self._producer_session_id = None
 
     async def _handle_patrol_request(self, group_id: str, sender_agent_id: str, payload: Mapping[str, Any]) -> None:
-        confirmed = bool(payload.get("confirmed", payload.get("user_confirmed", False)))
+        confirmed = payload.get("confirmed", payload.get("user_confirmed", False)) is True
         task_id = str(payload.get("task_id") or uuid.uuid4())
         if not confirmed:
             await self._send_event(group_id, sender_agent_id, {"type": "patrol_confirmation_required", "task_id": task_id})
@@ -544,12 +562,17 @@ class DogPatrolAgent:
             await self._send_event(self.group_id or "", self.controller_agent_id or "", {"type": "patrol_failed", "task_id": task_id, "reason": str(exc)}, task_id=task_id)
 
     async def _handle_dog_command(self, group_id: str, sender_agent_id: str, payload: Mapping[str, Any]) -> None:
-        command = str(payload.get("command") or payload.get("action") or "").strip().lower()
+        command = str(payload.get("command") or payload.get("action") or payload.get("direction") or "").strip().lower()
         aliases = {
+            "forward": "forward", "backward": "back", "back": "back",
+            "left": "left", "right": "right", "stop": "stop",
             "威吓歹徒": "intimidate",
             "威吓": "intimidate",
             "intimidate": "intimidate",
-            "wave": "intimidate",
+            "content": "intimidate",
+            "deter": "intimidate",
+            "happy": "intimidate",
+            "wave": "wave",
             "scrape": "intimidate",
             "驱逐歹徒": "expel",
             "驱逐": "expel",
@@ -565,18 +588,25 @@ class DogPatrolAgent:
             self._seen_commands.add(command_id)
             await self._send_event(group_id, sender_agent_id, {"type": "command_rejected", "command_id": command_id, "reason": "unsupported_command"})
             return
-        confirmed = bool(payload.get("confirmed", payload.get("user_confirmed", False)))
+        confirmed = payload.get("confirmed", payload.get("user_confirmed", False)) is True
         # The RayNeo UI performs a second confirmation before sending the
         # high-risk action and carries that decision as ``risk=high``.
-        if command_kind := str(payload.get("type") or "").strip().lower():
-            if command_kind == "robot_action" and payload.get("risk") in {"medium", "high"}:
-                confirmed = True
         if not confirmed:
             await self._send_event(group_id, sender_agent_id, {"type": "command_confirmation_required", "command_id": command_id, "command": normalized})
             return
         self._seen_commands.add(command_id)
-        await self.stop_patrol(reason=f"command:{normalized}")
-        method = self.actions.intimidate if normalized == "intimidate" else self.actions.expel
+        # Individual voice actions must not tear down the independent video upload.
+        if self._patrol_task is not None and not self._patrol_task.done():
+            self._patrol_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._patrol_task
+        self._patrol_task = None
+        await self.actions.stop()
+        method = {
+            "forward": self.actions.forward, "back": self.actions.back,
+            "left": self.actions.left, "right": self.actions.right, "stop": self.actions.stop,
+            "wave": self.actions.wave, "intimidate": self.actions.intimidate, "expel": self.actions.expel,
+        }[normalized]
         try:
             result = await method()
             self._emit("DOG_ACTION_COMPLETED", command=normalized, command_id=command_id, result=dict(result))
@@ -653,7 +683,7 @@ class DogPatrolAgent:
             self._offload_session_id = session_id
             self._emit("COMPUTING_SESSION_CREATED", task_id=task_id, session_id=session_id)
             await self._send_event(group_id, controller_agent_id, {"type": "video_offload_started", COMPUTE_SESSION_ID_FIELD: session_id, "task_id": task_id}, task_id=task_id)
-            self._offload_upload = await self.sdk.start_video_upload(session_id, camera_id=self.config.camera_id, width=1280, height=720, fps=30, bitrate_kbps=2500)
+            self._offload_upload = await self.sdk.start_video_upload(session_id, camera_id=self.config.camera_id, width=640, height=480, fps=10, bitrate_kbps=250)
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             raise

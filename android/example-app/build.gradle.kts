@@ -11,8 +11,8 @@ android {
         applicationId = "com.rayneo.agent.example"
         minSdk = 26
         targetSdk = 34
-        versionCode = 44
-        versionName = "0.2.42"
+        versionCode = 49
+        versionName = "0.2.47"
     }
 
     flavorDimensions += "deployment"
@@ -50,6 +50,7 @@ android {
 }
 
 dependencies {
+    "rayneoImplementation"(project(":demo-remote"))
     implementation(project(":agent-sdk"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

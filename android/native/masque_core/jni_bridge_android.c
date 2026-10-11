@@ -12,6 +12,7 @@ extern long long MasqueStart(int tun_fd, int udp_fd, char *server_url,
 extern int MasqueReplaceTun(long long handle, int tun_fd);
 extern unsigned long long MasqueGetStat(long long handle, int statistic);
 extern void MasqueStop(long long handle);
+extern int MasqueIsAlive(long long handle);
 
 static int create_bound_socket(const char *local_ip) {
     int family = strchr(local_ip, ':') == NULL ? AF_INET : AF_INET6;
@@ -23,7 +24,17 @@ static int create_bound_socket(const char *local_ip) {
         if (inet_pton(AF_INET, local_ip, &address.sin_addr) != 1 ||
             bind(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
             close(fd);
-            return -1;
+            // The Wi-Fi address may change while the SDK process remains alive.
+            // Fall back to wildcard binding so the kernel selects the current
+            // egress address instead of making MASQUE permanently unavailable.
+            fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+            if (fd < 0) return -1;
+            struct sockaddr_in wildcard = {0};
+            wildcard.sin_family = AF_INET;
+            if (bind(fd, (struct sockaddr *)&wildcard, sizeof(wildcard)) != 0) {
+                close(fd);
+                return -1;
+            }
         }
     } else {
         struct sockaddr_in6 address = {0};
@@ -31,7 +42,14 @@ static int create_bound_socket(const char *local_ip) {
         if (inet_pton(AF_INET6, local_ip, &address.sin6_addr) != 1 ||
             bind(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
             close(fd);
-            return -1;
+            fd = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+            if (fd < 0) return -1;
+            struct sockaddr_in6 wildcard = {0};
+            wildcard.sin6_family = AF_INET6;
+            if (bind(fd, (struct sockaddr *)&wildcard, sizeof(wildcard)) != 0) {
+                close(fd);
+                return -1;
+            }
         }
     }
     return fd;
@@ -98,4 +116,11 @@ Java_com_rayneo_agent_sdk_masque_NativeMasqueBridge_nativeStop(
     (void)env;
     (void)bridge;
     MasqueStop((long long)handle);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_rayneo_agent_sdk_masque_NativeMasqueBridge_nativeIsAlive(
+        JNIEnv *env, jobject bridge, jlong handle) {
+    (void)env; (void)bridge;
+    return MasqueIsAlive((long long)handle) ? JNI_TRUE : JNI_FALSE;
 }

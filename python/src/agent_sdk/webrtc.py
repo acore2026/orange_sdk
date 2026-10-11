@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 import shlex
 import sys
@@ -8,6 +9,111 @@ from typing import Any
 
 from .errors import AgentSdkError, ErrorCode
 from .models import ComputingSession
+from .video_diagnostics import observe_delivery, observe_source
+
+
+# Leave room for RTP extensions, SRTP authentication and UDP/IP headers inside
+# the 1280-byte CONNECT-IP TUN, matching the existing Sandbox packetization.
+VIDEO_RTP_PAYLOAD_BYTES = 1150
+
+
+def limit_video_frame_rate(source: Any, fps: int, *, max_frame_age: float = 0.3) -> Any:
+    """Drain capture independently of the sender, retaining only the newest frame."""
+    from aiortc import MediaStreamTrack
+    from aiortc.mediastreams import MediaStreamError
+
+    if fps <= 0 or max_frame_age <= 0:
+        raise ValueError("fps and max_frame_age must be positive")
+    observe_source(source)
+
+    class LatestVideoTrack(MediaStreamTrack):
+        kind = "video"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._reader: asyncio.Task | None = None
+            self._changed = asyncio.Event()
+            self._latest = None
+            self._error: Exception | None = None
+            self._next_delivery = 0.0
+            self._clock_origin: float | None = None
+            self._previous_pts: float | None = None
+            self._last_report = 0.0
+            self.captured = self.dropped = self.delivered = 0
+            # Drain during signaling too: opening the camera before ICE
+            # connects must not leave old frames waiting in its FIFO.
+            self._reader = asyncio.create_task(self._read(), name="video-latest-frame-reader")
+
+        async def _read(self) -> None:
+            try:
+                while self.readyState == "live":
+                    frame = await source.recv()
+                    now = asyncio.get_running_loop().time()
+                    pts = float(frame.time) if frame.time is not None else None
+                    if pts is not None:
+                        if self._clock_origin is None or (self._previous_pts is not None and pts < self._previous_pts):
+                            self._clock_origin = now - pts
+                        self._previous_pts = pts
+                        captured_at = self._clock_origin + pts
+                    else:
+                        captured_at = now
+                    self.captured += 1
+                    if self._latest is not None:
+                        self.dropped += 1
+                    self._latest = (frame, captured_at)
+                    self._changed.set()
+                    # A buffered source can return immediately. Keep cancellation
+                    # and the sender runnable while draining its accumulated frames.
+                    await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._error = exc
+                logging.getLogger(__name__).warning("video_source_reader_failed source=%s", getattr(source, "id", id(source)), exc_info=True)
+            finally:
+                self._changed.set()
+
+        async def recv(self):
+            if self.readyState != "live":
+                raise MediaStreamError
+            if self._reader is None:
+                self._reader = asyncio.create_task(self._read(), name="video-latest-frame-reader")
+            loop = asyncio.get_running_loop()
+            delay = self._next_delivery - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            while self.readyState == "live":
+                if self._latest is not None:
+                    frame, captured_at = self._latest
+                    self._latest = None
+                    age = max(0.0, loop.time() - captured_at)
+                    if age <= max_frame_age:
+                        self.delivered += 1
+                        self._next_delivery = loop.time() + 1 / fps
+                        if loop.time() - self._last_report >= 5:
+                            self._last_report = loop.time()
+                            logging.getLogger(__name__).info(
+                                "video_source_freshness captured=%s dropped=%s delivered=%s capture_age_ms=%.1f",
+                                self.captured, self.dropped, self.delivered, age * 1000,
+                            )
+                        observe_delivery(source, frame)
+                        return frame
+                    self.dropped += 1
+                if self._error is not None:
+                    raise self._error
+                self._changed.clear()
+                await self._changed.wait()
+            raise MediaStreamError
+
+        def stop(self) -> None:
+            super().stop()
+            if self._reader is not None:
+                self._reader.cancel()
+            self._latest = None
+            self._changed.set()
+            source.stop()
+
+    return LatestVideoTrack()
 
 
 def _media_error(message: str, cause: BaseException | None = None) -> AgentSdkError:
@@ -228,6 +334,10 @@ class AiortcMediaOffloadAdapter:
         loop_video_file: bool = True,
     ) -> None:
         require_aiortc()
+        from aiortc.codecs import h264, vpx
+
+        h264.PACKET_MAX = VIDEO_RTP_PAYLOAD_BYTES
+        vpx.PACKET_MAX = VIDEO_RTP_PAYLOAD_BYTES
         self._peers: set[Any] = set()
         self._video_file_path = (
             Path(video_file_path).expanduser().resolve()
@@ -290,7 +400,9 @@ class AiortcMediaOffloadAdapter:
             raise _media_error(
                 "Python WebRTC support requires the aiortc package", exc
             ) from exc
-        pc = RTCPeerConnection()
+        from .rtc_policy import HighLatencyPeerConnection, limit_sender_bitrate
+
+        pc = HighLatencyPeerConnection()
         self._peers.add(pc)
         track = None
         try:
@@ -304,7 +416,9 @@ class AiortcMediaOffloadAdapter:
             track = player.video
             if track is None:
                 raise _media_error("video source did not provide a video track")
+            track = limit_video_frame_rate(track, fps)
             transceiver = pc.addTransceiver(track, direction="sendonly")
+            limit_sender_bitrate(transceiver.sender, bitrate_kbps * 1000)
             _select_video_codecs(transceiver, session.connection_parameters.video_codec)
             offer = await pc.createOffer()
             from aiortc import RTCSessionDescription
@@ -342,7 +456,9 @@ class AiortcMediaOffloadAdapter:
             raise _media_error(
                 "Python WebRTC support requires the aiortc package", exc
             ) from exc
-        pc = RTCPeerConnection()
+        from .rtc_policy import HighLatencyPeerConnection
+
+        pc = HighLatencyPeerConnection()
         self._peers.add(pc)
         try:
             transceiver = pc.addTransceiver("video", direction="recvonly")

@@ -318,8 +318,11 @@ class AgentSdk internal constructor(
                 ?.trim()
                 ?.takeIf(String::isNotEmpty)
                 ?: withContext(Dispatchers.IO) { localAddressResolver.resolve(uri) }
+            // The standalone ASR endpoint is reachable through the MASQUE server.
+            // Put its host route on the Agent TUN so glasses traffic to 100.123.44.87
+            // is carried first to the 101.245.78.174 CONNECT-IP gateway.
             tunnelController.establish(
-                TunnelConfiguration(this.agentTunCidr, emptySet(), tunMtu)
+                TunnelConfiguration(this.agentTunCidr, setOf(STANDALONE_ASR_ROUTE), tunMtu)
             )
             groupCache = GroupMemberCache(tunnelController)
             localServer = localServerFactory().also { server ->
@@ -343,6 +346,13 @@ class AgentSdk internal constructor(
             )
             tunnelController.setTunFdSwapper(masqueTransport::replaceTunFd)
             tunnelController.setTunReplacedListener(::rebindLocalServerAfterTunReplacement)
+            masqueTransport.setReconnectTun(
+                factory = { tunnelController.recreateTun() },
+                onConnected = ::rebindLocalServerAfterTunReplacement,
+            )
+            masqueTransport.setReconnectSourceAddress {
+                withContext(Dispatchers.IO) { localAddressResolver.resolve(uri) }
+            }
             state = State.READY
             runtime!!.startDownlink(
                 onReconnected = ::recoverComputeStatuses,
@@ -1442,6 +1452,35 @@ class AgentSdk internal constructor(
             requireContext = true,
             requireNormalized = request.inputType == ControlInputType.TEXT,
         )
+    }
+
+    /** Runtime ASR contract: recognition only; never dispatches a robot action. */
+    suspend fun recognizeRuntimeAudio(
+        computeServiceSessionId: String,
+        request: DiscoveryAudioRequest,
+        timeoutSeconds: Double = 120.0,
+    ): com.rayneo.agent.sdk.model.RuntimeAudioResult {
+        validateSandboxTimeout(timeoutSeconds)
+        validateComputeRequestId(request.requestId, "request_id")
+        val fileName = validateAudioUpload(request.audio, request.fileName, request.contentType)
+        request.language?.let { requireComputeString(it, "language") }
+        val session = waitForComputingSession(computeServiceSessionId, timeoutSeconds)
+        requireConsumerSession(session, "recognizeRuntimeAudio")
+        val response = sandboxTransport.uploadWithStatus(
+            url = audioControlActionsUrl(session),
+            fields = buildMap {
+                put("request_id", request.requestId)
+                put("computing_context", mediaContext(session).toString())
+                request.language?.let { put("language", it) }
+            },
+            fileFieldName = "file", fileName = fileName,
+            contentType = request.contentType, content = request.audio,
+            timeoutSeconds = timeoutSeconds, sourceIpv4 = session.networkBinding.ueIpv4,
+        )
+        if (response.statusCode != 200) throw AgentSdkException(
+            ErrorCode.SANDBOX_REJECTED, "Runtime ASR returned HTTP ${response.statusCode}",
+        )
+        return com.rayneo.agent.sdk.model.parseRuntimeAudioResult(response.body, request.requestId)
     }
 
     suspend fun createAudioControlAction(
@@ -3369,14 +3408,14 @@ class AgentSdk internal constructor(
     }
 
     private suspend fun rebindLocalServerAfterTunReplacement() {
-        val previous = localServer ?: return
+        val previous = localServer
         Log.i(
             TAG,
             "Rebinding local ingress after TUN replacement " +
                 "tcp=$agentTunIp:$localTcpPort udp=$agentTunIp:$localUdpPort",
         )
         localServer = null
-        previous.close()
+        previous?.close()
         var lastError: Exception? = null
         for ((attempt, retryDelayMs) in LOCAL_SERVER_REBIND_DELAYS_MS.withIndex()) {
             if (retryDelayMs > 0) delay(retryDelayMs)
@@ -3781,6 +3820,7 @@ class AgentSdk internal constructor(
 
     companion object {
         private const val TAG = "AgentSdk"
+        private const val STANDALONE_ASR_ROUTE = "100.123.44.87/32"
         private const val COMPUTING_SESSION_REQUEST_PATH = "/v1/computing/session-requests"
         private const val COMPUTE_CONNECT_CONFIG = "COMPUTE_CONNECT_CONFIG"
         private const val COMPUTE_SESSION_STATUS = "COMPUTE_SESSION_STATUS"

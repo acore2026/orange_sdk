@@ -11,8 +11,8 @@ class NativeMasqueTransportThreadingTest {
             "src/main/kotlin/com/rayneo/agent/sdk/masque/NativeMasqueBridge.kt",
         ).readText()
 
-        assertTrue(source.contains("withContext(Dispatchers.IO)"))
-        assertTrue(source.contains("withContext(NonCancellable + Dispatchers.IO)"))
+        assertTrue(source.contains("withContext(ioDispatcher)"))
+        assertTrue(source.contains("withContext(NonCancellable + ioDispatcher)"))
         assertTrue(source.contains("bridge.nativeStop(startedHandle)"))
         assertTrue(source.contains("nativeGetStat"))
         assertTrue(source.contains("lastStatistics = bridge.statistics(currentHandle)"))

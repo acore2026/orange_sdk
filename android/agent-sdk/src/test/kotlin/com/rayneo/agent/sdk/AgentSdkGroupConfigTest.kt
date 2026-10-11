@@ -1105,6 +1105,24 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
+    fun `runtime voice uses synchronous contract and automatic language without peer dispatch`() = runTest {
+        initializeSdk()
+        runtime.deliverDownlink("COMPUTE_CONNECT_CONFIG", computeConnectConfig("consumer"))
+        sandbox.runtimeAudioContract = true
+        val result = sdk.recognizeRuntimeAudio("css-001", DiscoveryAudioRequest(
+            requestId = "runtime-001", audio = byteArrayOf(4, 5, 6),
+            fileName = "english.m4a", contentType = "audio/mp4",
+        ))
+        assertEquals("expel", result.direction)
+        assertEquals("Expel the suspect.", result.text)
+        val upload = sandbox.uploads.single()
+        assertEquals("http://8.8.8.9:8788/v1/audio-control-actions", upload.url)
+        assertFalse(upload.fields.containsKey("language"))
+        assertEquals("runtime-001", upload.fields["request_id"])
+        assertTrue(upload.fields.containsKey("computing_context"))
+    }
+
+    @Test
     fun `audio control action uploads transcription through consumer binding`() = runTest {
         initializeSdk()
         runtime.deliverDownlink("COMPUTE_CONNECT_CONFIG", computeConnectConfig("consumer"))
@@ -1548,7 +1566,7 @@ class AgentSdkGroupConfigTest {
         assertEquals("192.168.1.10", result.masqueOuterSourceIp)
         assertEquals("8.8.8.7/32", result.agentTunCidr)
         assertEquals("8.8.8.7/32", tunnel.establishedConfiguration?.agentTunCidr)
-        assertTrue(tunnel.establishedConfiguration?.routes?.isEmpty() == true)
+        assertEquals(setOf("100.123.44.87/32"), tunnel.establishedConfiguration?.routes)
         assertEquals(tunnel.clientIdentityDirectory, masque.configuration?.identityDirectory)
         if (restoreProfile) {
             sdk.restoreLocalProfile(
@@ -2023,6 +2041,7 @@ class AgentSdkGroupConfigTest {
         val uploads = mutableListOf<Upload>()
         var failuresRemaining = 0
         var recognitionTarget: JsonObject? = null
+        var runtimeAudioContract = false
         var controlAction: JsonObject? = null
         var intentResponse = buildJsonObject {
             put("status", "success")
@@ -2149,6 +2168,14 @@ class AgentSdkGroupConfigTest {
             sourceIpv4: String?,
         ): RuntimeHttpResponse {
             uploads += Upload(url, fields, fileName, sourceIpv4)
+            if (runtimeAudioContract) return RuntimeHttpResponse(200, buildJsonObject {
+                put("request_id", fields.getValue("request_id"))
+                put("text", "Expel the suspect.")
+                put("intent", buildJsonObject {
+                    put("executor", "robot dog"); put("type", "movement")
+                    put("direction", "expel"); put("matched", true); put("backend", "qwen")
+                })
+            })
             if (url.endsWith("/api/v1/transcribe")) {
                 if (fields.containsKey("request_id")) {
                     return RuntimeHttpResponse(200, buildJsonObject {

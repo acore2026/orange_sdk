@@ -4,7 +4,7 @@ import asyncio
 import fcntl
 import os
 import struct
-from ipaddress import ip_interface
+from ipaddress import ip_address, ip_interface
 
 from .errors import AgentSdkError, ErrorCode
 
@@ -123,3 +123,47 @@ def validate_ip_packet(packet: bytes, mtu: int) -> tuple[str, str]:
         )
     raise ValueError("unsupported IP version")
 
+
+def _internet_checksum(data: bytes) -> int:
+    if len(data) % 2:
+        data += b"\x00"
+    total = sum(struct.unpack(f"!{len(data) // 2}H", data))
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+    return (~total) & 0xFFFF
+
+
+def packet_too_big_response(packet: bytes, mtu: int) -> bytes | None:
+    """Return bounded PMTU feedback for unicast TCP/UDP, never for ICMP errors."""
+    try:
+        source, destination = validate_ip_packet(packet, 65535)
+    except ValueError:
+        return None
+    if any(ip_address(addr).is_multicast or ip_address(addr).is_unspecified
+           for addr in (source, destination)):
+        return None
+    if packet[0] >> 4 == 4:
+        ihl = (packet[0] & 0x0F) * 4
+        if ihl > len(packet) or packet[9] not in (6, 17):
+            return None
+        if int.from_bytes(packet[6:8], "big") & 0x1FFF:
+            return None
+        # ICMP destination-unreachable / fragmentation-needed, including the
+        # original IP header and transport bytes needed to identify the socket.
+        quoted = packet[:548]
+        icmp = struct.pack("!BBHHH", 3, 4, 0, 0, mtu) + quoted
+        icmp = icmp[:2] + struct.pack("!H", _internet_checksum(icmp)) + icmp[4:]
+        header = struct.pack(
+            "!BBHHHBBH4s4s", 0x45, 0, 20 + len(icmp), 0, 0, 64, 1, 0,
+            packet[16:20], packet[12:16],
+        )
+        header = header[:10] + struct.pack("!H", _internet_checksum(header)) + header[12:]
+        return header + icmp
+    if packet[6] not in (6, 17):
+        return None
+    icmp = struct.pack("!BBHI", 2, 0, 0, mtu) + packet[:1232]
+    source_bytes, destination_bytes = packet[24:40], packet[8:24]
+    pseudo_header = source_bytes + destination_bytes + struct.pack("!I3xB", len(icmp), 58)
+    icmp = icmp[:2] + struct.pack("!H", _internet_checksum(pseudo_header + icmp)) + icmp[4:]
+    header = struct.pack("!IHBB", 6 << 28, len(icmp), 58, 64) + source_bytes + destination_bytes
+    return header + icmp

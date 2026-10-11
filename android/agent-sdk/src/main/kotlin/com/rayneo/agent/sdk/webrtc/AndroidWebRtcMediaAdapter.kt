@@ -69,6 +69,9 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
             // CONNECT-IP route and the native interface enumeration can expose the UE/TUN IP.
             // This is the same network model used by the previously device-verified media path.
             disableNetworkMonitor = true
+            // Filtering only the SDP does not stop unpublished Wi-Fi ports
+            // from answering peer-reflexive ICE checks inside CONNECT-IP.
+            networkIgnoreMask = physicalMediaNetworkIgnoreMask()
         }
         return PeerConnectionFactory.builder()
             .setOptions(options)
@@ -337,6 +340,10 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_ONCE
             disableIPv6OnWifi = true
+            maxIPv6Networks = 0
+            networkPreference = PeerConnection.AdapterType.VPN
+            tcpCandidatePolicy = PeerConnection.TcpCandidatePolicy.DISABLED
+            enableIceGatheringOnAnyAddressPorts = false
         }
         return factory.createPeerConnection(configuration, peerObserver(signals))
             ?.also { peers += it }
@@ -348,6 +355,7 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
             override fun onSignalingChange(state: PeerConnection.SignalingState) = Unit
             override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) = Unit
             override fun onConnectionChange(state: PeerConnection.PeerConnectionState) {
+                Log.i(TAG, "WebRTC connection state=$state")
                 if (
                     state in setOf(
                         PeerConnection.PeerConnectionState.CONNECTED,
@@ -554,6 +562,13 @@ internal fun publishUserPlaneOffer(
 
 internal fun candidateAddress(line: String): String? =
     candidateParts(line).getOrNull(4)
+
+internal fun physicalMediaNetworkIgnoreMask(): Int =
+    PeerConnectionFactory.Options.ADAPTER_TYPE_ETHERNET or
+        PeerConnectionFactory.Options.ADAPTER_TYPE_WIFI or
+        PeerConnectionFactory.Options.ADAPTER_TYPE_CELLULAR or
+        PeerConnectionFactory.Options.ADAPTER_TYPE_LOOPBACK or
+        PeerConnectionFactory.Options.ADAPTER_TYPE_ANY
 
 internal fun candidateType(line: String): String? =
     candidateParts(line).getOrNull(7)

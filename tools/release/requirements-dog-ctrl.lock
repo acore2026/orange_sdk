@@ -1,0 +1,22 @@
+# Captured from the running Jetson Orin NX on 2026-10-11 (CPython 3.12.13, aarch64).
+# agent-connect-sdk and unitree_sdk2py are installed from the source archives in this bundle.
+# CycloneDDS C library 0.10.5 is an external platform prerequisite.
+Pygments==2.19.2
+aiohappyeyeballs==2.6.1
+aiohttp==3.13.3
+aiosignal==1.4.0
+attrs==26.1.0
+click==8.3.1
+cyclonedds==0.10.2
+frozenlist==1.8.0
+idna==3.11
+markdown-it-py==4.0.0
+mdurl==0.1.2
+multidict==6.7.1
+numpy==2.4.3
+opencv-python==4.13.0.92
+propcache==0.4.1
+rich==14.3.3
+rich-click==1.9.7
+typing_extensions==4.15.0
+yarl==1.23.0

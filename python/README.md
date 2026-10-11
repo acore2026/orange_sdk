@@ -8,7 +8,7 @@ SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_
 
 建议向客户交付：
 
-- `agent_connect_sdk-0.17.9-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
+- `agent_connect_sdk-0.17.10-py3-none-any.whl`：只包含端侧 Client 的 SDK wheel。
 - `examples/full_flow_demo.py`：不依赖真实网络的安装和全流程自检。
 - `examples/linux_agent.py`：连接真实 AgentRuntime、TUN 和 MASQUE Proxy 的端侧常驻示例。
 - `examples/interactive_linux_agent.py`：复用真实 Linux 全流程参数，每按一次回车只调用下一个 SDK 接口。
@@ -48,7 +48,7 @@ python -m twine check dist/*.whl
 输出文件为：
 
 ```text
-dist/agent_connect_sdk-0.17.9-py3-none-any.whl
+dist/agent_connect_sdk-0.17.10-py3-none-any.whl
 ```
 
 文件名中的发行名使用下划线是 Python wheel 的标准规范；安装和查询时的项目名仍是 `agent-connect-sdk`。
@@ -60,7 +60,7 @@ dist/agent_connect_sdk-0.17.9-py3-none-any.whl
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install ./agent_connect_sdk-0.17.9-py3-none-any.whl
+python -m pip install ./agent_connect_sdk-0.17.10-py3-none-any.whl
 ```
 
 确认安装结果：
@@ -97,14 +97,14 @@ python -m pip install -e '.[test]'
 
 ```bash
 python -m pip install --no-index --find-links ./wheelhouse \
-  ./agent_connect_sdk-0.17.9-py3-none-any.whl
+  ./agent_connect_sdk-0.17.10-py3-none-any.whl
 ```
 
 发布方可以这样生成离线依赖目录：
 
 ```bash
 python -m pip download --dest wheelhouse \
-  ./dist/agent_connect_sdk-0.17.9-py3-none-any.whl
+  ./dist/agent_connect_sdk-0.17.10-py3-none-any.whl
 ```
 
 ### 2.3 安装后先跑全流程自检
@@ -222,6 +222,28 @@ SDK 初始化时调用
 | `log_level` | 否 | `DEBUG/INFO/WARNING/ERROR/CRITICAL`，默认 `INFO` |
 | `log_max_bytes` | 否 | 单个日志文件最大字节数，默认 10 MiB |
 | `log_backup_count` | 否 | 轮转历史文件数量，默认 5 |
+
+Python CONNECT-IP 为 QUIC 封装保留额外 120 字节的发送空间：默认内层 TUN MTU
+为 1280 时，`max_datagram_size` 为 1400。`max_datagram_frame_size=65536` 是接收
+能力声明，不代表实际发送包长。自定义 TUN MTU 会同步调整 QUIC 发送容量；部署路径
+必须能承载封装后的 UDP 包。超出本地或对端发送容量的 IP 包会在入队前被拒绝，
+对有效的单播 TCP/UDP 返回 ICMP 包长反馈，并记录 `masque_ip_packet_too_large`。
+待发 IP Datagram 队列最多保留 1024 个包，避免一个无法发送的包或拥塞拖垮隧道。
+Python 视频 producer 的 H.264/VP8 RTP payload 同样限制为 1150 字节，给 RTP 扩展、
+SRTP 和 UDP/IP 头留出空间。当前巡检示例使用 640×480@10 FPS、VP8 250 kbps 编码上限，与 Sandbox 输入规格一致。
+采集任务持续读取摄像头，只保留最新的一帧；发送变慢时覆盖旧帧，避免 MediaPlayer FIFO 积压。
+编码前按实际时间限制最大帧率，默认丢弃采集时间超过 300 ms 的帧，并保留原始采集 PTS。
+`video_source_freshness` 每约 5 秒记录采集、丢弃、发送帧数和编码前帧龄；300 ms 不代表端到端延迟保证。
+摄像头在建连期间即持续取帧。VP8 内部编码时间轴将单次间隔限制为 100 ms，
+防止 CBR 因网络停顿扩大下一帧预算；对外 RTP 仍使用真实采集时间戳。
+`rtc_video_encoded` 记录单帧 payload 大小、包数及编码耗时，便于区分编码与发送阻塞。
+
+高时延代理路径采用每连接的 ICE consent 策略：单次响应等待 15 秒，探测间隔独立
+随机为 4–6 秒；以最后一次有效、认证响应计时，30 秒完全失联才关闭 ICE。
+不会改变 aioice 全局 `RETRY_RTO` 或初始 ICE 重传。CONNECT-IP 待发队列中，
+STUN/DTLS/RTCP/TCP 优先于 RTP；视频队列最多 64 包，超过 750 ms 的视频包丢弃。
+`b=AS` 同时落实为实际编码器上限，接收端 REMB 无法将码率提高到该上限之上。
+该适配层已验证 aiortc 1.14/1.15 与 aioice 0.10；升级依赖时须运行保活及编码器测试。
 
 首次建立 MASQUE 连接时，SDK 自动生成 Ed25519 客户端证书和私钥，后续启动
 复用同一身份。Linux 默认保存在
@@ -431,7 +453,7 @@ profile = await sdk.apply_identity(
     owner="customer-a",
     name="Agent A",
     description="RayNeo edge agent",
-    metadata={"region": "CN", "os": "Linux", "version": "0.17.9"},
+    metadata={"region": "CN", "os": "Linux", "version": "0.17.10"},
 )
 
 ability = await sdk.get_network_ability(profile.agent_id)

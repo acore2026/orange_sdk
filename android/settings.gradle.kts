@@ -17,4 +17,6 @@ dependencyResolutionManagement {
 rootProject.name = "agent-connect-sdk"
 include(":agent-sdk")
 include(":example-app")
+include(":demo-remote")
+include(":phone-controller")
 

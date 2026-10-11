@@ -38,8 +38,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.webrtc.RendererCommon
 import org.webrtc.EglBase
-import org.webrtc.SurfaceViewRenderer
 import org.webrtc.VideoSink
+import com.rayneo.demo.remote.DemoRemote
+import com.rayneo.demo.remote.DemoRemoteServer
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -56,8 +60,16 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     private val config by lazy {
         RayNeoX3ProDeployment.agentAConfig(
             masqueToken = intent.getStringExtra("masque_token"),
-        )
+        ).copy(serverIp = DemoSettings.coreHost(this))
     }
+    private var remoteServer: DemoRemoteServer? = null
+    private var remoteBusy = false
+    private var remoteResult = "Ready"
+    private var remoteSubtitle: String? = null
+    private var videoHidden = false
+    private var remoteEnglish = false
+    private val remoteRequests = LinkedHashMap<String, Pair<String, String>>()
+    private val remoteMainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val logLines = ArrayDeque<String>()
     private val diagnosticLogLines = ArrayDeque<String>()
     private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -87,13 +99,34 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     private var voiceActionRunning = false
     private var sdkFeatureState: SdkFeatureState? = null
     private var patrolState: PatrolState = PatrolState()
+    private var displayNotice: String? = null
     private var dangerousActionArmed = false
+    private var runtimeExpelPending = false
+    private var runtimeExpelExpiresAt = 0L
     private var patrolActionRunning = false
-    private val videoRenderers = CopyOnWriteArraySet<SurfaceViewRenderer>()
+    private val videoRenderers = CopyOnWriteArraySet<TextureViewEglRenderer>()
     @Volatile
     private var videoEglBase: EglBase? = null
     private var videoPreviewHasFrame = false
     private var videoPreviewResolution = ""
+    private val videoHealthHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var videoStarved = false
+    private val videoHealthCheck = object : Runnable {
+        override fun run() {
+            val age = videoRenderers.mapNotNull { it.statisticsSnapshot().lastFrameAgeMillis }.minOrNull()
+            if (videoPreviewHasFrame && age != null && age >= 8000 && !videoStarved) {
+                videoStarved = true
+                setStatus("视频回传中断", "8 秒未收到新帧；显示最后一帧")
+                appendLog(LabLogLevel.WARNING, "VIDEO STALLED", "last_frame_age_ms=$age")
+            } else if (videoStarved && age != null && age < 3000) {
+                videoStarved = false
+                renderProcessedVideoLiveStatus()
+                renderPatrolHud()
+                appendLog(LabLogLevel.SUCCESS, "VIDEO RECOVERED", "视频帧已恢复")
+            }
+            videoHealthHandler.postDelayed(this, 1000)
+        }
+    }
 
     private val vpnPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -154,14 +187,145 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         )
         setPrimaryAction(PrimaryMode.BUSY, "正在连接…")
         window.decorView.post { beginConnection() }
+        remoteServer = DemoRemoteServer(::handleRemoteLine) { error ->
+            Log.w(APP_LOG_TAG, "PHONE REMOTE: ${error.message}")
+        }.also { it.start() }
+        appendLog(LabLogLevel.INFO, "PHONE REMOTE", "TCP control listening on ${DemoRemote.PORT}")
+    }
+
+    private fun handleRemoteLine(line: String): String {
+        val envelope = line.split(' ', limit = 3)
+        if (envelope.size != 3 || envelope[0] != "AUTH" ||
+            !DemoRemote.authorized(DemoSettings.pin(this), envelope[1])) return "ERR UNAUTHORIZED"
+        val task = FutureTask { executeRemoteCommand(JSONObject(envelope[2])) }
+        remoteMainHandler.post(task)
+        return try { task.get(2500, TimeUnit.MILLISECONDS) }
+        catch (e: Exception) { task.cancel(false); "ERR REQUEST_REJECTED" }
+    }
+
+    /** Enqueue once on Main. A lost reply must never replay a movement. */
+    private fun executeRemoteCommand(request: JSONObject): String {
+        if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return "ERR NOT_FOREGROUND"
+        val command = request.optString("command")
+        if (command !in DemoRemote.commands) return "ERR UNKNOWN_COMMAND"
+        if (command == "STATUS") return "OK " + JSONObject().apply {
+            put("phase", patrolState.phase.name)
+            put("recording", voiceRecordingMode != null)
+            put("busy", remoteBusy || voiceActionRunning || patrolActionRunning)
+            put("ready", sdkFeatureState?.agentReady == true)
+            put("connected", messageSession != null)
+            put("video", sdkFeatureState?.processedVideoState != null)
+            put("stalled", videoStarved)
+            put("pending_expel", runtimeExpelPending && android.os.SystemClock.elapsedRealtime() <= runtimeExpelExpiresAt)
+            put("core_host", config.serverIp)
+            put("saved_core_host", DemoSettings.coreHost(this@RayNeoMainActivity))
+            put("result", remoteResult)
+            put("transcript", sdkFeatureState?.lastTranscription.orEmpty())
+        }.toString()
+        val id = request.optString("request_id")
+        if (id.length !in 8..80) return "ERR INVALID_REQUEST_ID"
+        val fingerprint = request.toString()
+        remoteRequests[id]?.let { return if (it.first == fingerprint) it.second else "ERR REQUEST_ID_CONFLICT" }
+        if (remoteBusy || voiceActionRunning || patrolActionRunning) return "ERR BUSY"
+        if (voiceRecordingMode != null && command != "VOICE_STOP") return "ERR RECORDING"
+        if (command !in setOf("CONFIG_CORE", "VIDEO_SHOW", "VIDEO_HIDE") && sdkFeatureState?.agentReady != true) return "ERR NOT_READY"
+        if (command == "PATROL" && (messageSession != null || patrolState.phase !in setOf(PatrolPhase.IDLE, PatrolPhase.LISTENING, PatrolPhase.COMPLETED, PatrolPhase.ABORTED))) return "ERR INVALID_PHASE"
+        if (command == "CONFIRM" && patrolState.phase != PatrolPhase.DISPATCHING) return "ERR NO_CANDIDATE"
+        if (command in setOf("DETER", "EXPEL", "CONFIRM_EXPEL", "RTC_RECONNECT") && messageSession == null) return "ERR NO_GROUP"
+        if (command == "VOICE_STOP" && voiceRecordingMode == null) return "ERR NOT_RECORDING"
+        if (command == "CONFIRM_EXPEL" && (!runtimeExpelPending || android.os.SystemClock.elapsedRealtime() > runtimeExpelExpiresAt)) {
+            runtimeExpelPending = false
+            renderTopPrompt()
+            return "ERR CONFIRMATION_EXPIRED"
+        }
+        if (command == "CANCEL" && !runtimeExpelPending && patrolState.phase != PatrolPhase.DISPATCHING) return "ERR NOTHING_TO_CANCEL"
+        val coreHost = if (command == "CONFIG_CORE") runCatching { DemoRemote.coreHost(request.getString("host")) }.getOrNull()
+            ?: return "ERR INVALID_HOST" else null
+        val area = request.optString("area", "A区域").trim()
+        if (command == "PATROL" && area.length !in 1..80) return "ERR INVALID_AREA"
+        val response = "OK ACCEPTED $id"
+        // Retain for this Activity's entire lifetime. At the limit require restart, never evict IDs.
+        if (remoteRequests.size >= 4096) return "ERR REQUEST_LIMIT_RESTART_APP"
+        remoteRequests[id] = fingerprint to response
+        remoteEnglish = request.optString("language", "zh") == "en"
+        remoteResult = "Accepted: $command"
+        when (command) {
+            "CONFIG_CORE" -> {
+                DemoSettings.saveCore(this, coreHost!!)
+                remoteResult = "Saved; restart glasses app to apply"
+            }
+            "VIDEO_SHOW", "VIDEO_HIDE" -> {
+                videoHidden = command == "VIDEO_HIDE"
+                mBindingPair.updateView { videoPreviewPanel.visibility = if (videoHidden) View.INVISIBLE else View.VISIBLE }
+                renderPatrolHud()
+            }
+            "VOICE_START" -> toggleVoiceRecording(when {
+                runtimeExpelPending || patrolState.phase == PatrolPhase.DISPATCHING -> VoiceMode.CONFIRMATION
+                sdkFeatureState?.processedVideoState != null -> VoiceMode.CONTROL_ACTION
+                else -> VoiceMode.PATROL_COMMAND
+            })
+            "VOICE_STOP" -> voiceRecordingMode?.let(::stopAndSubmitVoice)
+            "EXPEL" -> {
+                runtimeExpelPending = true
+                runtimeExpelExpiresAt = android.os.SystemClock.elapsedRealtime() + 30_000
+                remoteResult = "Confirm expel within 30 seconds"
+                remoteSubtitle = "Expel the suspect"
+                refreshVoiceActions()
+            }
+            else -> {
+                val active = runner ?: return "ERR NOT_READY"
+                remoteBusy = true
+                if (command == "CONFIRM_EXPEL") runtimeExpelPending = false
+                lifecycleScope.launch {
+                    try {
+                        when (command) {
+                            "PATROL" -> {
+                                remoteSubtitle = "Send the robot dog to patrol $area"
+                                active.startManualPatrol(area, remoteEnglish)
+                            }
+                            "CONFIRM" -> {
+                                remoteSubtitle = "Confirm dispatch"
+                                active.confirmInteractivePatrol()
+                            }
+                            "CANCEL" -> {
+                                if (runtimeExpelPending) runtimeExpelPending = false else active.rejectInteractivePatrol()
+                                remoteSubtitle = "Cancel"
+                            }
+                            "DETER" -> {
+                                remoteSubtitle = "Deter the suspect"
+                                active.sendRobotAction(RobotAction.SCRAPE)
+                            }
+                            "CONFIRM_EXPEL" -> {
+                                remoteSubtitle = "Confirm expel"
+                                active.sendRobotAction(RobotAction.FRONT_POUNCE)
+                            }
+                            "RTC_RECONNECT" -> {
+                                runtimeExpelPending = false
+                                active.stopComputingSession()
+                                active.startVideoOffload()
+                            }
+                        }
+                        remoteResult = "Completed: $command"
+                    } catch (error: CancellationException) { throw error }
+                    catch (error: Exception) {
+                        remoteResult = "Failed: $command"
+                        appendLog(LabLogLevel.ERROR, "PHONE REMOTE", remoteResult)
+                        displayNotice = "Command incomplete · Check phone"
+                    } finally {
+                        remoteBusy = false
+                        renderPatrolHud()
+                        refreshVoiceActions()
+                    }
+                }
+            }
+        }
+        return response
     }
 
     private fun renderDeployment() {
         mBindingPair.updateView {
-            deploymentLabel.text = "雷鸟眼镜"
-            statusTitle.text = "正在连接"
-            statusDetail.text = "正在建立安全连接"
-            primaryAction.text = "自动启动中…"
+            deploymentLabel.text = "RayNeo AR Glasses"
+            primaryAction.text = "Starting automatically..."
         }
         renderPatrolHud()
     }
@@ -243,12 +407,19 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private fun handleVoiceInputAction() {
+        if (remoteBusy || voiceActionRunning) return
         voiceRecordingMode?.let { toggleVoiceRecording(it); return }
         if (runner == null) {
             if (primaryMode == PrimaryMode.RETRY) handlePrimaryAction()
             return
         }
+        if (patrolState.phase == PatrolPhase.INSPECTING && patrolState.failureReason != null &&
+            sdkFeatureState?.processedVideoState == null) {
+            confirmPatrolCandidate()
+            return
+        }
         val mode = when {
+            runtimeExpelPending -> VoiceMode.CONFIRMATION
             patrolState.phase == PatrolPhase.DISPATCHING -> VoiceMode.CONFIRMATION
             sdkFeatureState?.processedVideoState != null -> VoiceMode.CONTROL_ACTION
             else -> VoiceMode.PATROL_COMMAND
@@ -407,53 +578,32 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private fun renderPatrolHud() {
+        renderTopPrompt()
         val state = patrolState
-        val candidate = state.selectedAgent ?: state.candidates.firstOrNull()
         val videoReady = sdkFeatureState?.processedVideoState != null
         val actionReady = videoReady && state.phase in setOf(
             PatrolPhase.INSPECTING,
             PatrolPhase.HAZARD_RESPONSE,
         )
         mBindingPair.updateView {
-            patrolPhase.text = when {
-                messageSession != null && !videoReady -> "机器狗正在算力卸载"
-                videoReady && !videoPreviewHasFrame -> "正在连接机器狗视野"
-                state.phase == PatrolPhase.IDLE && sdkFeatureState?.agentReady != true ->
-                    "正在准备连接"
-                state.phase == PatrolPhase.IDLE -> "等待语音派遣"
-                else -> when (state.phase) {
-                    PatrolPhase.IDLE -> "等待语音派遣"
-                    PatrolPhase.LISTENING -> "等待语音指令"
-                    PatrolPhase.PLANNING -> "正在理解指令"
-                    PatrolPhase.DISPATCHING -> "等待确认派遣"
-                    PatrolPhase.NAVIGATING -> "正在安全组网"
-                    PatrolPhase.INSPECTING -> "机器狗巡逻中"
-                    PatrolPhase.HAZARD_RESPONSE -> "收到现场告警"
-                    PatrolPhase.REPORTING -> "正在回传结果"
-                    PatrolPhase.COMPLETED -> "任务已完成"
-                    PatrolPhase.ABORTED -> "任务已取消"
-                }
-            }
-            patrolCandidate.text = when {
-                messageSession != null && !videoReady -> "准备回传视野"
-                videoReady && !videoPreviewHasFrame -> "等待视频首帧"
-                sdkFeatureState?.agentReady == true && candidate == null ->
-                    "数字身份已就绪"
-                candidate != null && state.phase == PatrolPhase.DISPATCHING ->
-                    "${candidate.name} · ID ${candidate.id}\n${state.request?.zoneId ?: "目标区域"}，请说确认或取消"
-                candidate != null -> "机器狗 ${candidate.name} · ID ${candidate.id}"
-                messageSession != null -> "机器狗已加入安全组网"
-                else -> "正在准备数字身份"
-            }
-            patrolAlert.text = if (videoReady) "视野回传已连接" else ""
-            patrolAlert.visibility = if (videoReady) View.VISIBLE else View.GONE
-            patrolHud.visibility = if (videoPreviewHasFrame && state.phase == PatrolPhase.INSPECTING) {
+            val presentation = patrolPresentation(state, sdkFeatureState?.agentReady == true,
+                messageSession != null, videoReady, videoPreviewHasFrame, videoStarved)
+            patrolPhase.text = presentation.title
+            patrolCandidate.text = presentation.summary
+            patrolAlert.text = if (videoStarved) "Video interrupted · Awaiting recovery" else displayNotice
+                ?: if (videoPreviewHasFrame) "● LIVE · Field view" else ""
+            patrolAlert.visibility = if (patrolAlert.text.isNotBlank()) View.VISIBLE else View.GONE
+            // Keep the live WebRTC view unobstructed. Show the stage card again
+            // when there is no frame yet or the stream has stalled.
+            patrolHud.visibility = if (videoReady && videoPreviewHasFrame && !videoStarved && !videoHidden) {
                 View.GONE
             } else {
                 View.VISIBLE
             }
-            patrolConfirmAction.isEnabled = state.phase == PatrolPhase.DISPATCHING &&
-                state.candidates.isNotEmpty() && !patrolActionRunning
+            val retryVideo = state.phase == PatrolPhase.INSPECTING && state.failureReason != null && !videoReady
+            patrolConfirmAction.text = if (retryVideo) "Retry video" else "Confirm dispatch"
+            patrolConfirmAction.isEnabled = ((state.phase == PatrolPhase.DISPATCHING &&
+                state.candidates.isNotEmpty()) || retryVideo) && !patrolActionRunning
             patrolRejectAction.isEnabled = state.phase == PatrolPhase.DISPATCHING && !patrolActionRunning
             patrolThreatenAction.isEnabled = actionReady && messageSession != null && !patrolActionRunning
             patrolEvictAction.isEnabled = actionReady && messageSession != null && !patrolActionRunning
@@ -468,19 +618,24 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
 
     private fun confirmPatrolCandidate() {
         val activeRunner = runner ?: return
-        if (patrolActionRunning || patrolState.phase != PatrolPhase.DISPATCHING) return
+        val retryVideo = patrolState.phase == PatrolPhase.INSPECTING && patrolState.failureReason != null
+        if (patrolActionRunning || (patrolState.phase != PatrolPhase.DISPATCHING && !retryVideo)) return
         patrolActionRunning = true
         setStatus("正在组网", "等待机器狗加入并建立专用通道")
         lifecycleScope.launch {
             try {
-                val groupId = withContext(Dispatchers.IO) { activeRunner.confirmInteractivePatrol() }
-                appendLog(LabLogLevel.SUCCESS, "AR PATROL", "已确认派遣；Secure Domain=$groupId")
+                withContext(Dispatchers.IO) {
+                    if (retryVideo) activeRunner.startVideoOffload()
+                    else activeRunner.confirmInteractivePatrol()
+                }
+                appendLog(LabLogLevel.SUCCESS, "AR PATROL", if (retryVideo) "视频连接已恢复" else "已确认派遣")
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
                 val detail = error.message ?: error::class.java.simpleName
-                appendLog(LabLogLevel.ERROR, "AR PATROL", "建组失败：$detail")
-                setStatus("建组失败", detail)
+                val title = (error as? PatrolSetupFailure)?.stage?.failureTitle ?: "巡检准备失败"
+                appendLog(LabLogLevel.ERROR, "AR PATROL", "$title：$detail")
+                setStatus(title, detail)
             } finally {
                 patrolActionRunning = false
                 renderPatrolHud()
@@ -530,7 +685,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                     RobotAction.LEFT -> "左转"
                     RobotAction.RIGHT -> "右转"
                     RobotAction.STOP -> "停止"
-                    RobotAction.SCRAPE -> "Scrape（刨地）"
+                    RobotAction.WAVE -> "Wave（挥手）"
+                    RobotAction.SCRAPE -> "Content（威吓）"
                     RobotAction.FRONT_POUNCE -> "FrontPounce（前扑）"
                 }
                 setStatus("动作已下发", "$label · ${receipt.messageId.take(8)}")
@@ -548,9 +704,10 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private fun refreshVoiceActions() {
+        renderTopPrompt()
         val directReady = runner != null
         val controlReady = sdkFeatureState?.processedVideoState != null
-        val busy = voiceActionRunning || voiceRecordingMode != null
+        val busy = remoteBusy || voiceActionRunning || voiceRecordingMode != null
         mBindingPair.updateView {
             asrAction.isEnabled = directReady && !busy
             patrolCommandAction.isEnabled = (directReady || primaryMode == PrimaryMode.RETRY) && !busy
@@ -558,43 +715,41 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             asrAction.alpha = if (asrAction.isEnabled) 1f else 0.45f
             patrolCommandAction.alpha = if (patrolCommandAction.isEnabled) 1f else 0.45f
             voiceControlAction.alpha = if (voiceControlAction.isEnabled) 1f else 0.45f
-            asrAction.text = "语音转文字"
+            asrAction.text = "Speech to text"
             patrolCommandAction.text = when {
-                patrolState.phase == PatrolPhase.DISPATCHING -> "单击说确认或取消"
-                controlReady -> "单击说移动指令"
-                directReady -> "单击说巡逻指令"
-                primaryMode == PrimaryMode.RETRY -> "单击重新连接"
-                else -> "正在连接…"
+                voiceRecordingMode != null -> "● Recording"
+                voiceActionRunning -> "◌ Recognizing"
+                else -> "Voice recognition"
             }
-            voiceControlAction.text = "语音控制"
+            voiceControlAction.text = "Voice control"
             when (voiceRecordingMode) {
                 VoiceMode.TRANSCRIBE -> {
                     asrAction.isEnabled = true
                     asrAction.alpha = 1f
-                    asrAction.text = "停止并转写"
+                    asrAction.text = "Stop and transcribe"
                 }
                 VoiceMode.CONTROL_ACTION -> {
                     voiceControlAction.isEnabled = true
                     voiceControlAction.alpha = 1f
-                    voiceControlAction.text = "停止并执行"
+                    voiceControlAction.text = "Stop and execute"
                 }
                 VoiceMode.PATROL_COMMAND -> {
                     patrolCommandAction.isEnabled = true
                     patrolCommandAction.alpha = 1f
-                    patrolCommandAction.text = "单击结束语音"
+                    patrolCommandAction.text = "● Recording"
                 }
                 VoiceMode.CONFIRMATION -> {
                     patrolCommandAction.isEnabled = true
                     patrolCommandAction.alpha = 1f
-                    patrolCommandAction.text = "单击结束语音"
+                    patrolCommandAction.text = "● Recording"
                 }
                 null -> Unit
             }
             voiceResult.text = when {
-                voiceRecordingMode != null -> "正在听取指令…"
-                voiceActionRunning -> "正在执行语音指令…"
-                else -> sdkFeatureState?.lastTranscription?.takeIf(String::isNotBlank)
-                    ?: "等待语音指令"
+                voiceRecordingMode != null -> "Listening..."
+                voiceActionRunning -> "Recognizing speech..."
+                else -> remoteSubtitle ?: sdkFeatureState?.lastTranscription?.takeIf(String::isNotBlank)
+                    ?: "Awaiting voice command"
             }
         }
     }
@@ -622,6 +777,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private fun startVoiceRecording(mode: VoiceMode) {
+        remoteSubtitle = null
         try {
             voiceRecorder.start()
             voiceRecordingMode = mode
@@ -681,7 +837,10 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                         audio,
                         recording.fileName,
                         recording.contentType,
-                    )
+                    ).also {
+                        runtimeExpelPending = activeRunner.runtimeExpelConfirmationRequired
+                        runtimeExpelExpiresAt = android.os.SystemClock.elapsedRealtime() + 30_000
+                    }
                     VoiceMode.PATROL_COMMAND -> {
                         activeRunner.transcribePatrolCommand(
                             audio,
@@ -697,7 +856,24 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                             recording.fileName,
                             recording.contentType,
                         )
-                        when (parsePatrolConfirmation(spoken)) {
+                        if (runtimeExpelPending) {
+                            when {
+                                android.os.SystemClock.elapsedRealtime() > runtimeExpelExpiresAt -> {
+                                    runtimeExpelPending = false
+                                    "确认已过期，请重新说驱逐 / Confirmation expired"
+                                }
+                                parsePatrolConfirmation(spoken) == false -> {
+                                    runtimeExpelPending = false
+                                    "已取消驱逐 / Expel cancelled"
+                                }
+                                parsePatrolConfirmation(spoken) == true -> {
+                                    runtimeExpelPending = false
+                                    activeRunner.sendRobotAction(RobotAction.FRONT_POUNCE)
+                                    "驱逐指令已送达 / Expel command delivered"
+                                }
+                                else -> "请说确认或取消 / Say confirm or cancel"
+                            }
+                        } else when (parsePatrolConfirmation(spoken)) {
                             false -> {
                                 withContext(Dispatchers.Main) { rejectPatrolCandidate() }
                                 "已取消派遣"
@@ -713,9 +889,9 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 setStatus(
                     when (mode) {
                         VoiceMode.TRANSCRIBE -> "语音转文字成功"
-                        VoiceMode.CONTROL_ACTION -> "语音动作已创建"
+                        VoiceMode.CONTROL_ACTION -> if (runtimeExpelPending) "确认驱逐 / Confirm expel" else "语音意图已处理"
                         VoiceMode.PATROL_COMMAND -> "巡检意图已解析"
-                        VoiceMode.CONFIRMATION -> "派遣确认"
+                        VoiceMode.CONFIRMATION -> "确认结果 / Confirmation result"
                     },
                     detail.take(300),
                 )
@@ -743,7 +919,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                     appendLog(
                         LabLogLevel.SUCCESS,
                         "VIDEO DISPLAY",
-                        "SurfaceViewRenderer 已绘制处理流首帧",
+                        "TextureView 已绘制视频帧（包含可能的占位帧）",
                     )
                 }
             }
@@ -761,13 +937,12 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         }
         val eglBase = videoEglBase ?: EglBase.create().also { videoEglBase = it }
         mBindingPair.updateView {
-            videoRenderer.setBackgroundColor(android.graphics.Color.BLACK)
             videoRenderer.init(eglBase.eglBaseContext, events)
-            videoRenderer.setEnableHardwareScaler(false)
             videoRenderer.setMirror(false)
             videoRenderer.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
             videoRenderers += videoRenderer
         }
+        videoHealthHandler.postDelayed(videoHealthCheck, 1000)
     }
 
     private fun processedVideoRenderSinks(): List<VideoSink> = videoRenderers.toList()
@@ -777,7 +952,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             videoPreviewHasFrame = false
             mBindingPair.updateView {
                 videoRenderer.clearImage()
-                videoStatus.text = "$title\n$detail"
+                videoStatus.text = "Connecting live video..."
                 videoStatus.setTextColor(android.graphics.Color.rgb(183, 203, 212))
                 videoStatus.textSize = 14f
                 videoStatus.gravity = Gravity.CENTER
@@ -795,7 +970,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     private fun renderProcessedVideoLiveStatus() {
         mBindingPair.updateView {
             videoStatus.text =
-                "● LIVE · 识别${videoPreviewResolution.takeIf(String::isNotBlank)?.let { "  $it" }.orEmpty()}"
+                "● LIVE · Detection${videoPreviewResolution.takeIf(String::isNotBlank)?.let { "  $it" }.orEmpty()}"
             videoStatus.setTextColor(android.graphics.Color.rgb(94, 234, 212))
             videoStatus.textSize = 13f
             videoStatus.setBackgroundResource(R.drawable.rayneo_video_status_live)
@@ -811,6 +986,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private fun detachVideoPreviews(): EglBase? {
+        videoHealthHandler.removeCallbacks(videoHealthCheck)
         videoRenderers.forEach { renderer -> runCatching { renderer.release() } }
         videoRenderers.clear()
         val eglBase = videoEglBase
@@ -828,9 +1004,9 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 resetAction.isEnabled = available && !resetInProgress
                 resetAction.alpha = if (resetAction.isEnabled) 1f else 0.45f
                 resetAction.text = when {
-                    resetInProgress -> "正在重置…"
-                    resetArmed -> "再次单击确认"
-                    else -> "重置到状态1"
+                    resetInProgress -> "Resetting..."
+                    resetArmed -> "Tap again to confirm"
+                    else -> "Reset identity"
                 }
                 resetAction.setBackgroundResource(
                     if (resetArmed) {
@@ -899,7 +1075,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 closeResources()
                 resetInProgress = false
                 mBindingPair.updateView {
-                    resetAction.text = "已重置为状态1"
+                    resetAction.text = "Identity reset"
                     resetAction.isEnabled = false
                     resetAction.alpha = 0.55f
                 }
@@ -996,17 +1172,58 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         }
     }
 
-    private fun setStatus(title: String, detail: String) {
-        mBindingPair.updateView {
-            statusTitle.text = title
-            statusDetail.text = detail
+    private fun renderTopPrompt() {
+        val prompt = when {
+            runtimeExpelPending -> "Try saying: Confirm, or cancel."
+            patrolState.phase == PatrolPhase.DISPATCHING -> "Try saying: Confirm, or cancel."
+            sdkFeatureState?.processedVideoState != null -> "Try saying: Deter the suspect."
+            else -> "Try saying: Send the robot dog to patrol."
         }
+        mBindingPair.updateView {
+            statusTitle.text = "NEXT · VOICE COMMAND"
+            statusDetail.text = prompt
+        }
+    }
+
+    private fun setStatus(title: String, detail: String) {
+        appendLog(LabLogLevel.INFO, "UI STATUS", "$title：$detail")
+        displayNotice = when {
+            title.contains("语音接口失败") -> "Voice unavailable · Try again later"
+            title.contains("录音") && title.contains("失败") -> "Recording failed · Record again"
+            title.contains("失败") || title.contains("未就绪") || title.contains("异常") -> "Connection or task incomplete · Retry"
+            title.contains("授权") -> "Network permission required · Retry after approval"
+            title.contains("断开") -> "Network disconnected · Retry connection"
+            title.contains("确认结果") -> when {
+                detail.contains("过期") -> "Confirmation expired · Request again"
+                detail.contains("取消") && !detail.contains("请说") && !detail.contains("未识别") -> "Command cancelled"
+                detail.contains("未识别") || detail.contains("请说") -> "Say confirm or cancel again"
+                else -> "Confirmation received"
+            }
+            title.contains("语音意图已处理") -> "Voice command processed"
+            else -> null
+        }
+        if (title.contains("语音") || title.contains("录音") || title.contains("确认结果")) {
+            remoteResult = displayNotice ?: when {
+                title.contains("确认驱逐") -> "Confirm expel within 30 seconds"
+                title.contains("录音") -> "Recording"
+                title.contains("上传") -> "Recognizing speech"
+                else -> "Voice command processed"
+            }
+        }
+        renderPatrolHud()
     }
 
     private fun setPrimaryAction(mode: PrimaryMode, label: String) {
         primaryMode = mode
         mBindingPair.updateView {
-            primaryAction.text = label
+            primaryAction.text = when (mode) {
+                PrimaryMode.BUSY -> "Processing..."
+                PrimaryMode.RETRY -> "Retry connection"
+                PrimaryMode.PATROL_CONFIRM -> "Confirm dispatch"
+                PrimaryMode.PATROL_ALERT -> "Patrol controls"
+                PrimaryMode.COMPUTE -> "Connect video"
+                PrimaryMode.SEND -> "Send message"
+            }
             primaryAction.alpha = if (mode == PrimaryMode.BUSY) 0.55f else 1f
         }
         refreshVoiceActions()
@@ -1055,7 +1272,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                             "agent_id=${activeSdk?.localProfile?.agentId ?: "<none>"}",
                     localTcpEndpoint = activeRunner?.diagnosticLocalTcpEndpoint(),
                     videoPreviewSummary = videoRenderers.firstOrNull()?.let {
-                        "renderer=SurfaceViewRenderer first_frame_displayed=$videoPreviewHasFrame " +
+                        "renderer=TextureView/EglRenderer first_frame_displayed=$videoPreviewHasFrame " +
                             "last_frame=$videoPreviewResolution"
                     } ?: "renderer=<unavailable>",
                 )
@@ -1073,7 +1290,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 )
                 Toast.makeText(
                     this@RayNeoMainActivity,
-                    "诊断日志生成失败",
+                    "Could not export diagnostic logs",
                     Toast.LENGTH_LONG,
                 ).show()
             }
@@ -1145,6 +1362,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     override fun onDestroy() {
+        remoteServer?.close()
+        remoteServer = null
         voiceRecorder.cancel()
         val activeJob = runnerJob
         val activeSdk = sdk

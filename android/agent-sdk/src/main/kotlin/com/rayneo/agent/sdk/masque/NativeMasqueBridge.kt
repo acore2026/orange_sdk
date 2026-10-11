@@ -11,10 +11,27 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import android.os.ParcelFileDescriptor
+
+interface MasqueNativeCore {
+    fun start(tunFd: Int, serverUrl: String, authorization: String?, localVlanIp: String,
+              agentTunCidr: String, mtu: Int, identityDirectory: String): Long
+    fun nativeReplaceTunFd(handle: Long, tunFd: Int): Boolean
+    fun nativeStop(handle: Long)
+    fun nativeIsAlive(handle: Long): Boolean
+    fun statistics(handle: Long): MasqueTransportStatistics
+}
 
 class NativeMasqueBridge(
     private val vpnService: AgentVpnService,
-) {
+) : MasqueNativeCore {
     companion object {
         private val libraryLoadError = runCatching {
             System.loadLibrary("masque_core")
@@ -36,11 +53,12 @@ class NativeMasqueBridge(
         identityDirectory: String,
     ): Long
 
-    external fun nativeReplaceTunFd(handle: Long, tunFd: Int): Boolean
+    external override fun nativeReplaceTunFd(handle: Long, tunFd: Int): Boolean
     external fun nativeGetStat(handle: Long, statistic: Int): Long
-    external fun nativeStop(handle: Long)
+    external override fun nativeStop(handle: Long)
+    external override fun nativeIsAlive(handle: Long): Boolean
 
-    fun start(
+    override fun start(
         tunFd: Int,
         serverUrl: String,
         authorization: String?,
@@ -70,7 +88,7 @@ class NativeMasqueBridge(
     @Keep
     fun protectQuicSocket(socketFd: Int): Boolean = vpnService.protectQuicSocket(socketFd)
 
-    fun statistics(handle: Long): MasqueTransportStatistics = MasqueTransportStatistics(
+    override fun statistics(handle: Long): MasqueTransportStatistics = MasqueTransportStatistics(
         downlinkPackets = nativeGetStat(handle, STAT_DOWNLINK_PACKETS),
         downlinkPacketsOverTunMtu = nativeGetStat(handle, STAT_DOWNLINK_PACKETS_OVER_TUN_MTU),
         downlinkReadBufferTooSmall = nativeGetStat(handle, STAT_DOWNLINK_READ_BUFFER_TOO_SMALL),
@@ -81,20 +99,70 @@ class NativeMasqueBridge(
 }
 
 class NativeMasqueTransport(
-    private val bridge: NativeMasqueBridge,
+    private val bridge: MasqueNativeCore,
+    private val reconnectScope: CoroutineScope = CoroutineScope(Dispatchers.IO),
+    private val ioDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO,
+    private val closePendingFd: (Int) -> Unit = { ParcelFileDescriptor.adoptFd(it).close() },
 ) : MasqueTransport {
     @Volatile
     private var handle: Long = 0
     @Volatile
     private var lastStatistics = MasqueTransportStatistics()
+    private var reconnectTun: (suspend () -> Int)? = null
+    private var reconnectSourceAddress: (suspend () -> String)? = null
+    private var reconnectJob: Job? = null
+    private var onReconnected: suspend () -> Unit = {}
+    private val lifecycle = Mutex()
+    @Volatile
     override var connected: Boolean = false
         private set
 
-    override suspend fun start(tunFd: Int, configuration: MasqueConfiguration) {
+    override suspend fun start(tunFd: Int, configuration: MasqueConfiguration) = lifecycle.withLock {
+        check(handle == 0L) { "MASQUE transport is already started" }
+        startNative(tunFd, configuration, ownsPendingFd = false)
+        reconnectJob = reconnectScope.launch {
+            var retryDelay = 1_000L
+            while (isActive) {
+                delay(if (connected) 5_000L else retryDelay)
+                try {
+                    lifecycle.withLock {
+                        if (handle != 0L && bridge.nativeIsAlive(handle) && connected) return@withLock
+                        connected = false
+                        val factory = reconnectTun ?: return@withLock
+                        if (handle != 0L) {
+                            bridge.nativeStop(handle)
+                            handle = 0L
+                        }
+                        val newFd = factory()
+                        val currentConfiguration = configuration.copy(
+                            localVlanIp = reconnectSourceAddress?.invoke() ?: configuration.localVlanIp,
+                        )
+                        startNative(newFd, currentConfiguration, ownsPendingFd = true)
+                        try {
+                            onReconnected()
+                        } catch (error: Exception) {
+                            connected = false
+                            throw error
+                        }
+                        retryDelay = 1_000L
+                        android.util.Log.i("AgentSdkVpn", "MASQUE reconnect succeeded; local listeners restored")
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    connected = false
+                    android.util.Log.w("AgentSdkVpn", "MASQUE reconnect failed; retry in ${retryDelay}ms", error)
+                    retryDelay = (retryDelay * 2).coerceAtMost(15_000L)
+                }
+            }
+        }
+    }
+
+    private suspend fun startNative(tunFd: Int, configuration: MasqueConfiguration, ownsPendingFd: Boolean) {
         lastStatistics = MasqueTransportStatistics()
         var startedHandle = 0L
         try {
-            withContext(Dispatchers.IO) {
+            withContext(ioDispatcher) {
                 startedHandle = bridge.start(
                     tunFd = tunFd,
                     serverUrl = configuration.serverUrl,
@@ -110,11 +178,15 @@ class NativeMasqueTransport(
             // completed just as the caller was cancelled, close the returned handle explicitly
             // instead of leaking a live tunnel whose result can no longer be delivered.
             if (startedHandle != 0L) {
-                withContext(NonCancellable + Dispatchers.IO) {
+                withContext(NonCancellable + ioDispatcher) {
                     bridge.nativeStop(startedHandle)
                 }
             }
             throw error
+        } finally {
+            if (ownsPendingFd && startedHandle == 0L) {
+                closePendingFd(tunFd)
+            }
         }
         if (startedHandle == 0L) {
             throw AgentSdkException(
@@ -126,9 +198,18 @@ class NativeMasqueTransport(
         connected = true
     }
 
-    override suspend fun replaceTunFd(tunFd: Int) {
+    override fun setReconnectTun(factory: suspend () -> Int, onConnected: suspend () -> Unit) {
+        reconnectTun = factory
+        onReconnected = onConnected
+    }
+
+    override fun setReconnectSourceAddress(factory: suspend () -> String) {
+        reconnectSourceAddress = factory
+    }
+
+    override suspend fun replaceTunFd(tunFd: Int) = lifecycle.withLock {
         val currentHandle = handle
-        val replaced = currentHandle != 0L && withContext(NonCancellable + Dispatchers.IO) {
+        val replaced = currentHandle != 0L && withContext(NonCancellable + ioDispatcher) {
             bridge.nativeReplaceTunFd(currentHandle, tunFd)
         }
         if (!replaced) {
@@ -146,15 +227,19 @@ class NativeMasqueTransport(
     }
 
     override suspend fun close() {
-        val currentHandle = handle
-        if (currentHandle != 0L) {
-            lastStatistics = bridge.statistics(currentHandle)
-        }
-        handle = 0
-        connected = false
-        if (currentHandle != 0L) {
-            withContext(NonCancellable + Dispatchers.IO) {
-                bridge.nativeStop(currentHandle)
+        reconnectJob?.cancel()
+        lifecycle.withLock {
+            reconnectJob?.cancel(); reconnectJob = null
+            val currentHandle = handle
+            if (currentHandle != 0L) {
+                lastStatistics = bridge.statistics(currentHandle)
+            }
+            handle = 0
+            connected = false
+            if (currentHandle != 0L) {
+                withContext(NonCancellable + ioDispatcher) {
+                    bridge.nativeStop(currentHandle)
+                }
             }
         }
     }

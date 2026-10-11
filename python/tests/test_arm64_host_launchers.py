@@ -25,7 +25,7 @@ def test_host_launcher_recreates_service_and_preserves_registration_semantics(
     fake_bin.mkdir()
     call_log = tmp_path / "docker-calls.log"
     env_file = tmp_path / ".env"
-    env_file.write_text("AGENT_IMAGE=agent-connect-sdk:0.17.9-arm64\n")
+    env_file.write_text("AGENT_IMAGE=agent-connect-sdk:0.17.10-arm64\n")
     docker = fake_bin / "docker"
     docker.write_text(
         """#!/bin/sh
@@ -33,11 +33,11 @@ set -eu
 printf '%s|%s\\n' "${AGENT_REGISTRATION_MODE:-unset}" "$*" >>"${FAKE_DOCKER_LOG}"
 case "$*" in
   "compose version") exit 0 ;;
-  *" config --images") printf '%s\\n' 'agent-connect-sdk:0.17.9-arm64' ;;
-  "image inspect --format {{.Os}}/{{.Architecture}} agent-connect-sdk:0.17.9-arm64")
+  *" config --images") printf '%s\\n' 'agent-connect-sdk:0.17.10-arm64' ;;
+  "image inspect --format {{.Os}}/{{.Architecture}} agent-connect-sdk:0.17.10-arm64")
     printf '%s\\n' 'linux/arm64'
     ;;
-  "image inspect agent-connect-sdk:0.17.9-arm64") exit 0 ;;
+  "image inspect agent-connect-sdk:0.17.10-arm64") exit 0 ;;
   *" ps -aq "*) printf '%s\\n' 'old-container' ;;
   *" ps -q "*) printf '%s\\n' 'new-container' ;;
   "logs new-container") printf '{\"event\": \"%s\"}\\n' "${FAKE_READY_EVENT}" ;;

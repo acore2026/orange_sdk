@@ -369,6 +369,7 @@ class AgentSdk:
                 server_url=config.masque_server_url,
                 authorization=config.masque_authorization,
                 logger=self._logger,
+                ip_packet_mtu=config.tun_mtu,
             )
         )
         self._runtime_factory = runtime_factory or (

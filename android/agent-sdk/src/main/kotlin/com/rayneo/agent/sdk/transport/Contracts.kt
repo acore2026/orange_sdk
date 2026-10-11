@@ -85,6 +85,7 @@ interface TunnelController {
     val tunFd: Int
     val clientIdentityDirectory: String
     suspend fun establish(configuration: TunnelConfiguration)
+    suspend fun recreateTun(): Int = tunFd
     suspend fun replaceGroupPeers(groupId: String, peerIps: Set<String>)
     fun currentAllowedPeerIps(): Set<String>
     fun setTunFdSwapper(swapper: suspend (Int) -> Unit)
@@ -108,6 +109,8 @@ fun interface LocalAddressResolver {
 interface MasqueTransport {
     val connected: Boolean
     suspend fun start(tunFd: Int, configuration: MasqueConfiguration)
+    fun setReconnectTun(factory: suspend () -> Int, onConnected: suspend () -> Unit = {}) = Unit
+    fun setReconnectSourceAddress(factory: suspend () -> String) = Unit
     suspend fun replaceTunFd(tunFd: Int)
     fun statistics(): MasqueTransportStatistics = MasqueTransportStatistics()
     suspend fun close()

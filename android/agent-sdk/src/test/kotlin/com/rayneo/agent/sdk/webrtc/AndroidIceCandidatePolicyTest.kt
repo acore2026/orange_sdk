@@ -7,8 +7,17 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.webrtc.PeerConnection
+import org.webrtc.PeerConnectionFactory
 
 class AndroidIceCandidatePolicyTest {
+    @Test
+    fun nativeAllocatorIgnoresPhysicalAndWildcardPortsButRetainsTun() {
+        val mask = physicalMediaNetworkIgnoreMask()
+        assertTrue(mask and PeerConnectionFactory.Options.ADAPTER_TYPE_WIFI != 0)
+        assertTrue(mask and PeerConnectionFactory.Options.ADAPTER_TYPE_ETHERNET != 0)
+        assertTrue(mask and PeerConnectionFactory.Options.ADAPTER_TYPE_ANY != 0)
+        assertEquals(0, mask and PeerConnectionFactory.Options.ADAPTER_TYPE_VPN)
+    }
     @Test
     fun publishesOnlyCandidateWithC02UeAddress() {
         val wifi = "candidate:1 1 UDP 1 100.101.21.11 40000 typ host"

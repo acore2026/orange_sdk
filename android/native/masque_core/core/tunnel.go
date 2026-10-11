@@ -128,7 +128,13 @@ func Start(tunFD, udpFD int, cfg Configuration) (*Tunnel, error) {
 		packet,
 		remote,
 		tlsConfig,
-		&quic.Config{EnableDatagrams: true, MaxIncomingStreams: -1},
+		&quic.Config{
+			EnableDatagrams:    true,
+			MaxIncomingStreams: -1,
+			// Voice input can start long after initialization. Keep the tunnel
+			// alive while the user is idle so its TUN routes remain available.
+			KeepAlivePeriod: 15 * time.Second,
+		},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dial MASQUE QUIC: %w", err)
@@ -240,6 +246,12 @@ func (t *Tunnel) Statistics() Statistics {
 		UplinkDatagramTooLarge:     t.uplinkDatagramTooLarge.Load(),
 		MaxDownlinkPacketBytes:     t.maxDownlinkPacketBytes.Load(),
 	}
+}
+
+func (t *Tunnel) Alive() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return !t.closed
 }
 
 func (t *Tunnel) uplink(source *os.File) {

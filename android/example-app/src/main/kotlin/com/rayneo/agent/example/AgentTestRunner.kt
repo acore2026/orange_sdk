@@ -30,6 +30,7 @@ import com.rayneo.agent.sdk.transport.VideoTrack
 import com.rayneo.agent.sdk.transport.VideoUploadHandle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -193,6 +194,7 @@ class AgentTestRunner(
     @Volatile private var patrolState: PatrolState = PatrolState()
     @Volatile private var patrolIntentResult: IntentRecognitionResult? = null
     @Volatile private var pendingPatrolAgent: DiscoveredAgent? = null
+    @Volatile private var pendingPatrolGroupId: String? = null
     @Volatile private var lastRobotAction: RobotAction? = null
     private val receivedVideoSinks = mutableListOf<Pair<VideoTrack, VideoSink>>()
 
@@ -359,6 +361,18 @@ class AgentTestRunner(
         return startInteractivePatrol(transcribeDiscoveryAudio(audio, fileName, contentType))
     }
 
+    /** Explicit phone preset bypasses ASR, but reuses real discovery and confirmation. */
+    suspend fun startManualPatrol(area: String, english: Boolean): PatrolAgentCandidate {
+        val zone = area.trim().also { require(it.length in 1..80) { "Invalid patrol area" } }
+        val text = if (english) "Send the robot dog to patrol $zone" else "派机器狗巡逻$zone"
+        onLog(LabLogLevel.INFO, "PHONE COMMAND", "Manual patrol preset: $text")
+        return startInteractivePatrol(DiscoveryAudioResult(
+            requestId = UUID.randomUUID().toString(), text = text,
+            intent = com.rayneo.agent.sdk.model.DiscoveryAudioIntent("TASK", mapOf("area" to zone)),
+            requiredSkills = listOf("patrol"),
+        ))
+    }
+
     /**
      * Recognizes the spoken command, discovers an eligible robot dog, and leaves the
      * candidate in a pending state.  Group creation is intentionally *not* performed
@@ -420,6 +434,7 @@ class AgentTestRunner(
             check(listed.accepted) { listed.reason ?: "候选智能体状态无效" }
             // Keep the selected candidate separate from the state until confirmation.
             pendingPatrolAgent = discovered.first { it.agentId == selected.id }
+            pendingPatrolGroupId = null
             publishPatrolState(listed.state.copy(selectedAgent = null))
             onLog(
                 LabLogLevel.SUCCESS,
@@ -437,59 +452,91 @@ class AgentTestRunner(
             selected
         }
 
-    /** Confirms the pending candidate, creates the Secure Domain, and starts compute offload. */
-    suspend fun confirmInteractivePatrol(): String = operationMutex.withLock {
+    /** Establishes the confirmed candidate's group without dispatching any robot task. */
+    suspend fun prepareInteractivePatrolGroup(): String = operationMutex.withLock {
+        prepareInteractivePatrolGroupLocked()
+    }
+
+    private suspend fun prepareInteractivePatrolGroupLocked(): String {
         ensureResetNotRequested()
         val candidateWire = checkNotNull(pendingPatrolAgent) { "当前没有待确认的机器狗" }
         val candidate = patrolState.candidates.firstOrNull { it.id == candidateWire.agentId }
             ?: candidateWire.toPatrolCandidate(discoverySkill ?: DEFAULT_EXECUTOR_SKILL)
         val selected = transitionPatrol(patrolState, PatrolEvent.AgentSelected(candidate))
         check(selected.accepted) { selected.reason ?: "候选智能体不可用" }
-        publishPatrolState(selected.state)
         val profile = checkNotNull(sdk.localProfile) { "本端数字身份尚未就绪" }
-        val area = patrolState.request?.zoneId ?: recognizedArea ?: "A区域"
         onStatus(RunnerStatus("正在创建 Secure Domain", "AR 眼镜 ↔ ${candidate.name}"))
-        val group = sdk.createGroup(
-            agentId = profile.agentId,
-            targetAgentIds = listOf(candidate.id),
-            groupName = config.groupName,
-            dnn = config.dnn,
-            maxMembers = 2,
-        )
+        publishPatrolState(patrolState.copy(failureReason = null))
+        val groupId = pendingPatrolGroupId ?: patrolSetupStep(PatrolSetupStage.GROUP_CREATE) {
+            sdk.createGroup(
+                agentId = profile.agentId,
+                targetAgentIds = listOf(candidate.id),
+                groupName = config.groupName,
+                dnn = config.dnn,
+                maxMembers = 2,
+            ).groupId.also { pendingPatrolGroupId = it }
+        }
         onLog(
             LabLogLevel.SUCCESS,
             "SECURE DOMAIN",
-            "group_id=${group.groupId}，members=[${profile.agentId}, ${candidate.id}]",
+            "group_id=$groupId，members=[${profile.agentId}, ${candidate.id}]",
         )
-        retryableStep("GROUP CONFIG", "等待 Secure Domain 配置", serialized = false) {
+        patrolSetupStep(PatrolSetupStage.GROUP_CONFIG) {
             withTimeout(120_000) {
-                while (sdk.getGroupSnapshot(group.groupId) == null) delay(500)
+                while (sdk.getGroupSnapshot(groupId) == null) delay(500)
             }
         }
-        activateManualMessaging(group.groupId)
+        patrolSetupStep(PatrolSetupStage.MESSAGING) {
+            activateManualMessaging(groupId)
+            check(manualMessageSession?.groupId == groupId) { "群组对端消息路由尚未就绪" }
+        }
+        return groupId
+    }
+
+    /** Confirms the pending candidate, creates the Secure Domain, and starts compute offload. */
+    suspend fun confirmInteractivePatrol(): String = operationMutex.withLock {
+        val groupId = prepareInteractivePatrolGroupLocked()
+        val candidate = checkNotNull(pendingPatrolAgent)
+        val beforeDispatch = patrolState
+        val selected = transitionPatrol(
+            patrolState,
+            PatrolEvent.AgentSelected(patrolState.candidates.firstOrNull { it.id == candidate.agentId }
+                ?: candidate.toPatrolCandidate(discoverySkill ?: DEFAULT_EXECUTOR_SKILL)),
+        )
+        check(selected.accepted) { selected.reason ?: "候选智能体不可用" }
+        publishPatrolState(selected.state.copy(failureReason = null))
+        val area = patrolState.request?.zoneId ?: recognizedArea ?: "A区域"
         // Establish the patrol context on the dog before opening the compute stream.
         // The dog agent deliberately waits for explicit A2A motion/action commands;
         // without this message the Secure Domain exists but the dog has no task.
-        val patrolReceipt = sdk.sendMessage(
-            groupId = group.groupId,
-            targetAgentId = candidate.id,
-            jsonMessage = buildJsonObject {
-                put("type", "patrol_request")
-                put("zone", area)
-                put("confirmed", true)
-                put("task_id", "patrol-${group.groupId}")
-            },
-            messageType = "patrol_request",
-            taskId = "patrol-${group.groupId}",
-            timeoutSeconds = 10.0,
-        )
-        check(patrolReceipt.delivered) { "机器狗未确认巡检任务" }
+        try {
+            patrolSetupStep(PatrolSetupStage.DISPATCH) {
+                val patrolReceipt = sdk.sendMessage(
+                    groupId = groupId,
+                    targetAgentId = candidate.agentId,
+                    jsonMessage = buildJsonObject {
+                        put("type", "patrol_request")
+                        put("zone", area)
+                        put("confirmed", true)
+                        put("task_id", "patrol-$groupId")
+                    },
+                    messageType = "patrol_request",
+                    taskId = "patrol-$groupId",
+                    timeoutSeconds = 10.0,
+                )
+                check(patrolReceipt.delivered) { "机器狗未确认巡检任务" }
+            }
+        } catch (error: Exception) {
+            publishPatrolState(beforeDispatch.copy(failureReason = error.message))
+            throw error
+        }
         onLog(
             LabLogLevel.SUCCESS,
             "PATROL DISPATCH",
-            "已向 ${candidate.name} 下发巡检任务，zone=$area",
+            "已向 ${candidate.agentName} 下发巡检任务，zone=$area",
         )
         pendingPatrolAgent = null
+        pendingPatrolGroupId = null
         val inspecting = transitionPatrol(
             patrolState,
             PatrolEvent.NavigationStarted,
@@ -497,20 +544,21 @@ class AgentTestRunner(
         publishPatrolState(
             if (inspecting.accepted) inspecting.state else patrolState.copy(phase = PatrolPhase.INSPECTING),
         )
-        onStatus(RunnerStatus("机器狗已派遣", "Secure Domain=${group.groupId} · 正在巡逻 $area"))
+        onStatus(RunnerStatus("机器狗已派遣", "Secure Domain=$groupId · 正在巡逻 $area"))
         // A is the consumer.  The SDK handles C-01/C-02, routes, SDP and the processed stream.
         if (config.role == TestRole.A && processedVideoStream == null) {
             onComputeActionAvailability(false)
-            createAndReceiveProcessedVideo()
+            patrolSetupStep(PatrolSetupStage.VIDEO) { createAndReceiveProcessedVideo() }
         }
         publishPatrolState(patrolState.copy(phase = PatrolPhase.INSPECTING))
         onStatus(RunnerStatus("巡逻进行中", "实时视频与危险识别通道已建立 · $area"))
-        group.groupId
+        groupId
     }
 
     suspend fun rejectInteractivePatrol() = operationMutex.withLock {
         ensureResetNotRequested()
         pendingPatrolAgent = null
+        pendingPatrolGroupId = null
         publishPatrolState(PatrolState(phase = PatrolPhase.LISTENING))
         onStatus(RunnerStatus("已取消派遣", "可以重新说出园区巡检指令"))
     }
@@ -522,7 +570,7 @@ class AgentTestRunner(
 
     private suspend fun sendRobotActionLocked(
         action: RobotAction,
-        mirrorSandbox: Boolean = true,
+        mirrorSandbox: Boolean = false,
     ): MessageReceipt {
         ensureResetNotRequested()
         val route = checkNotNull(manualMessageSession) { "Secure Domain 尚未就绪" }
@@ -533,16 +581,24 @@ class AgentTestRunner(
             RobotAction.LEFT -> Triple("left", "左转", "medium")
             RobotAction.RIGHT -> Triple("right", "右转", "medium")
             RobotAction.STOP -> Triple("stop", "停止", "low")
-            RobotAction.SCRAPE -> Triple("Scrape", "威吓歹徒", "medium")
+            RobotAction.WAVE -> Triple("wave", "挥手", "medium")
+            RobotAction.SCRAPE -> Triple("content", "威吓歹徒", "medium")
             RobotAction.FRONT_POUNCE -> Triple("FrontPounce", "驱逐歹徒", "high")
         }
+        val commandId = UUID.randomUUID().toString()
         val receipt = sdk.sendMessage(
             groupId = route.groupId,
             targetAgentId = route.targetAgentId,
             jsonMessage = buildJsonObject {
                 put("type", "robot_action")
                 put("action", wireAction)
-                put("command", spokenText)
+                put("command", when (action) {
+                    RobotAction.FRONT_POUNCE -> "expel"
+                    RobotAction.SCRAPE -> "content"
+                    else -> wireAction
+                })
+                put("command_id", commandId)
+                put("confirmed", true)
                 put("zone", area)
                 put("risk", risk)
                 put("task_id", "patrol-${route.groupId}")
@@ -558,7 +614,7 @@ class AgentTestRunner(
             RobotAction.FRONT_POUNCE ->
                 PatrolAction.FrontPounce(area, patrolState.alerts.lastOrNull()?.id, spokenText)
             RobotAction.FORWARD, RobotAction.BACKWARD, RobotAction.LEFT, RobotAction.RIGHT,
-            RobotAction.STOP -> null
+            RobotAction.STOP, RobotAction.WAVE -> null
         }
         patrolState = patrolState.copy(
             phase = if (patrolAction == null) {
@@ -632,6 +688,7 @@ class AgentTestRunner(
         onManualMessageSession(null)
         pendingPatrolAgent = null
         patrolIntentResult = null
+        pendingPatrolGroupId = null
         patrolState = PatrolState()
         lastRobotAction = null
         onPatrolStateChanged(patrolState)
@@ -958,7 +1015,7 @@ class AgentTestRunner(
                 audio = audio,
                 fileName = fileName,
                 contentType = contentType,
-                language = "zh",
+                language = null,
             ),
         )
         lastTranscription = result.text
@@ -972,58 +1029,33 @@ class AgentTestRunner(
         return result
     }
 
+    var runtimeExpelConfirmationRequired: Boolean = false
+        private set
+
     suspend fun createAudioControlAction(
         audio: ByteArray,
         fileName: String,
         contentType: String,
     ): String = operationMutex.withLock {
         ensureResetNotRequested()
-        val action = sdk.createAudioControlAction(
+        runtimeExpelConfirmationRequired = false
+        val result = sdk.recognizeRuntimeAudio(
             computeServiceSessionId = requireConsumerSessionId(),
-            request = AudioControlActionRequest(
-                requestId = UUID.randomUUID().toString(),
-                audio = audio,
-                fileName = fileName,
-                contentType = contentType,
-                language = "zh",
+            request = DiscoveryAudioRequest(
+                requestId = UUID.randomUUID().toString(), audio = audio,
+                fileName = fileName, contentType = contentType,
             ),
         )
-        lastControlActionId = action.actionId
-        lastTranscription = action.transcription?.text
-        val spokenCommand = action.transcription?.text.orEmpty()
-        val normalizedCommand = spokenCommand.trim().lowercase()
-        val robotAction = when {
-            normalizedCommand.contains("前进") || normalizedCommand.contains("向前") ||
-                normalizedCommand.contains("forward") -> RobotAction.FORWARD
-            normalizedCommand.contains("后退") || normalizedCommand.contains("向后") ||
-                normalizedCommand.contains("back") -> RobotAction.BACKWARD
-            normalizedCommand.contains("左转") || normalizedCommand.contains("向左") ||
-                normalizedCommand.contains("left") -> RobotAction.LEFT
-            normalizedCommand.contains("右转") || normalizedCommand.contains("向右") ||
-                normalizedCommand.contains("right") -> RobotAction.RIGHT
-            normalizedCommand.contains("停止") || normalizedCommand.contains("停下") ||
-                normalizedCommand == "stop" -> RobotAction.STOP
-            normalizedCommand.contains("驱逐") || normalizedCommand.contains("前扑") ||
-                normalizedCommand.contains("frontpounce") -> RobotAction.FRONT_POUNCE
-            normalizedCommand.contains("威吓") || normalizedCommand.contains("刨地") ||
-                normalizedCommand.contains("scrape") -> RobotAction.SCRAPE
-            else -> null
+        lastTranscription = result.text
+        emitFeatureState()
+        val mapped = runtimeRobotAction(result)
+            ?: return@withLock "text=${result.text}；未匹配可执行动作 / No supported action"
+        if (mapped == RobotAction.FRONT_POUNCE) {
+            runtimeExpelConfirmationRequired = true
+            return@withLock "text=${result.text}；请说确认或取消 / Say confirm or cancel to expel"
         }
-        robotAction?.let { mapped ->
-            // The Sandbox result is derived from the offloaded video/control path; once it
-            // normalizes the spoken action, forward the concrete robot command over A2A.
-            runCatching { sendRobotActionLocked(mapped, mirrorSandbox = false) }
-                .onFailure { error ->
-                    onLog(
-                        LabLogLevel.WARNING,
-                        "ROBOT ACTION",
-                        "语音动作已由 Sandbox 接收，但 A2A 下发失败：${error.message ?: "未知错误"}",
-                    )
-                }
-        }
-        val summary = "text=${action.transcription?.text ?: "<none>"}，" +
-            "action_id=${action.actionId}，status=${action.status}，" +
-            "normalized_action=${action.normalizedAction ?: "<none>"}"
+        sendRobotActionLocked(mapped, mirrorSandbox = false)
+        val summary = "text=${result.text}，direction=${result.direction}，A2A delivered"
         onLog(LabLogLevel.SUCCESS, "VOICE CONTROL", summary)
         emitFeatureState()
         summary
@@ -1044,8 +1076,11 @@ class AgentTestRunner(
         ensureResetNotRequested()
         onComputeActionAvailability(false)
         try {
-            if (config.role == TestRole.A) createAndReceiveProcessedVideo()
-            else startProducerVideoUpload()
+            patrolSetupStep(PatrolSetupStage.VIDEO) {
+                if (config.role == TestRole.A) createAndReceiveProcessedVideo()
+                else startProducerVideoUpload()
+            }
+            publishPatrolState(patrolState.copy(failureReason = null))
         } catch (error: Throwable) {
             onComputeActionAvailability(true)
             throw error
@@ -1102,6 +1137,18 @@ class AgentTestRunner(
             "只向 ${route.targetAgentName} 发送 compute_service_session_id；等待本端 consumer C-02",
         )
         connectProcessedVideo(sessionId)
+    }
+
+    private suspend fun <T> patrolSetupStep(stage: PatrolSetupStage, call: suspend () -> T): T {
+        try {
+            return call()
+        } catch (error: Exception) {
+            if (error is CancellationException && error !is TimeoutCancellationException) throw error
+            val failure = PatrolSetupFailure(stage, error)
+            publishPatrolState(patrolState.copy(failureReason = failure.message))
+            onLog(LabLogLevel.ERROR, stage.name, failure.message.orEmpty())
+            throw failure
+        }
     }
 
     private suspend fun startProducerVideoUpload() {
@@ -1164,7 +1211,20 @@ class AgentTestRunner(
                     "A2A RECEIVE",
                     "group_id=$groupId，from=$senderAgentId，payload=${compact(payload)}",
                 )
-                if (payload.containsKey(COMPUTE_SESSION_ID_FIELD)) {
+                val event = payload["type"]?.jsonPrimitive?.contentOrNull
+                val route = manualMessageSession
+                if (event in setOf("dog_action_failed", "dog_motion_failed", "command_rejected",
+                        "command_confirmation_required", "dog_action_completed", "dog_motion_completed") &&
+                    route?.groupId == groupId && route.targetAgentId == senderAgentId) {
+                    val failed = event in setOf("dog_action_failed", "dog_motion_failed", "command_rejected")
+                    val detail = payload["reason"]?.jsonPrimitive?.contentOrNull
+                        ?: payload["command"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    onStatus(RunnerStatus(
+                        if (failed) "动作执行失败 / Action failed"
+                        else if (event == "command_confirmation_required") "需要确认 / Confirmation required"
+                        else "动作执行完成 / Action completed", detail,
+                    ))
+                } else if (payload.containsKey(COMPUTE_SESSION_ID_FIELD)) {
                     receiveComputeSessionId(groupId, senderAgentId, payload)
                 } else {
                     onStatus(RunnerStatus("已收到 A2A 消息", "链路验证成功，SDK 继续运行"))

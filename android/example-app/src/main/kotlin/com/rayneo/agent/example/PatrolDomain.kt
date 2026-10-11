@@ -59,6 +59,7 @@ enum class PatrolActionType { SCRAPE, FRONT_POUNCE }
 
 /** Stable action names shared by the voice UI and the robot A2A transport. */
 enum class RobotAction {
+    WAVE,
     FORWARD,
     BACKWARD,
     LEFT,
@@ -185,8 +186,10 @@ fun chooseCandidate(candidates: List<CandidateAgent>, required: Set<AgentCapabil
         .firstOrNull()
 
 fun parsePatrolConfirmation(spoken: String): Boolean? {
-    val command = spoken.trim()
+    val command = spoken.trim().lowercase().trimEnd('.', '!', '?')
     return when {
+        command in setOf("cancel", "no", "do not confirm", "do not dispatch") -> false
+        command in setOf("confirm", "yes", "confirm dispatch", "dispatch", "proceed") -> true
         listOf("取消", "不确认", "不用", "不要派遣").any(command::contains) -> false
         listOf("确认", "同意", "派遣").any(command::contains) -> true
         else -> null

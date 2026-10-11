@@ -114,6 +114,18 @@ class VpnTunnelController(
         nativeOwnsTunFd = false
     }
 
+    override suspend fun recreateTun(): Int {
+        check(::baseConfiguration.isInitialized) { "Tunnel has not been established" }
+        val routes = aggregateTunnelRoutes(baseConfiguration.routes, groupPeers)
+        val newFd = service.establishTun(baseConfiguration.copy(routes = routes))
+        if (tunFd >= 0 && !nativeOwnsTunFd) ParcelFileDescriptor.adoptFd(tunFd).close()
+        tunFd = newFd
+        nativeOwnsTunFd = false
+        // NativeMasqueTransport adopts a duplicate of this descriptor. Retain the controller
+        // copy until the next replacement/close so a failed handshake can be cleaned up.
+        return ParcelFileDescriptor.fromFd(newFd).detachFd()
+    }
+
     override suspend fun replaceGroupPeers(groupId: String, peerIps: Set<String>) {
         check(::baseConfiguration.isInitialized) { "Tunnel has not been established" }
         val previous = groupPeers[groupId]
@@ -149,6 +161,7 @@ class VpnTunnelController(
                     ErrorCode.ROUTE_CONFIG_FAILED,
                     "MASQUE TUN swapper is not registered",
                 )
+            if (tunFd >= 0 && !nativeOwnsTunFd) ParcelFileDescriptor.adoptFd(tunFd).close()
             tunFd = newFd
             nativeOwnsTunFd = true
             Log.i(TAG, "TUN route rebuild complete key=$groupId new_fd=$newFd")

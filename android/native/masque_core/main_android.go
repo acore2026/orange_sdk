@@ -102,4 +102,18 @@ func MasqueStop(handle C.longlong) {
 	}
 }
 
+//export MasqueIsAlive
+func MasqueIsAlive(handle C.longlong) C.int {
+	handlesMu.Lock()
+	tunnel := handles[int64(handle)]
+	handlesMu.Unlock()
+	if tunnel == nil {
+		return 0
+	}
+	if tunnel.Alive() {
+		return 1
+	}
+	return 0
+}
+
 func main() {}

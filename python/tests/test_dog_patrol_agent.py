@@ -106,7 +106,7 @@ def test_confirmed_story_runs_patrol_alert_and_unitree_mappings() -> None:
             "glasses-1",
             {"type": "dog_command", "command": "驱逐歹徒", "confirmed": True, "command_id": "pounce-1"},
         )
-        assert actions.calls == ["StandUp", "forward", "left", "StopMove", "Hello", "StopMove", "FrontPounce"]
+        assert actions.calls == ["StandUp", "forward", "left", "StopMove", "Content", "StopMove", "FrontPounce"]
         payload_types = [item["payload"]["type"] for item in sdk.sent]
         assert "danger_alert" in payload_types
         assert "dog_action_completed" in payload_types

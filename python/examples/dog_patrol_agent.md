@@ -43,7 +43,7 @@ python python/examples/dog_patrol_agent.py --dry-run
 {"type":"robot_action","action":"FrontPounce","command":"驱逐歹徒","risk":"high","task_id":"patrol-g-1"}
 ```
 
-`intimidate` 调用 `Hello()`，`expel` 调用 `FrontPounce()`。程序要求这两个动作都带用户确认，其中前扑动作额外保持幂等的 `command_id`，避免 A2A 重试重复触发。
+Sandbox 的 `deter` 由眼镜转换为 A2A `content`；机器狗的 `content`（兼容 `deter`、`happy`、`intimidate`）通过 `/content` 调用 `Content()`。`wave` 独立调用 `/wave` → `Hello()`；`expel` 调用 `/front-pounce` → `FrontPounce()`。程序要求这两个动作都带用户确认，其中前扑动作额外保持幂等的 `command_id`，避免 A2A 重试重复触发。
 
 视觉算力卸载有两种兼容路径：收到 RayNeo/Android 发来的
 `compute_service_session_id` 时作为 producer 调用 `start_video_upload()`；也可以通过巡逻请求中的 `compute_agent_id` 由机器狗主动创建正式 `dog-vision` 会话。视觉服务产生的 `danger_detected`/`vision_alert` 事件会被转成 `danger_alert` 发回眼镜。

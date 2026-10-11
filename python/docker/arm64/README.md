@@ -14,17 +14,17 @@ cd /root/lpx/sdk/python
 默认生成：
 
 ```text
-镜像：agent-connect-sdk:0.17.9-arm64
-归档：dist/arm64/agent-connect-sdk-0.17.9-linux-arm64.tar.gz
-校验：dist/arm64/agent-connect-sdk-0.17.9-linux-arm64.tar.gz.sha256
+镜像：agent-connect-sdk:0.17.10-arm64
+归档：dist/arm64/agent-connect-sdk-0.17.10-linux-arm64.tar.gz
+校验：dist/arm64/agent-connect-sdk-0.17.10-linux-arm64.tar.gz.sha256
 ```
 
 ARM64 目标机导入：
 
 ```bash
-sha256sum -c agent-connect-sdk-0.17.9-linux-arm64.tar.gz.sha256
-gzip -dc agent-connect-sdk-0.17.9-linux-arm64.tar.gz | docker load
-docker image inspect --format '{{.Os}}/{{.Architecture}}' agent-connect-sdk:0.17.9-arm64
+sha256sum -c agent-connect-sdk-0.17.10-linux-arm64.tar.gz.sha256
+gzip -dc agent-connect-sdk-0.17.10-linux-arm64.tar.gz | docker load
+docker image inspect --format '{{.Os}}/{{.Architecture}}' agent-connect-sdk:0.17.10-arm64
 ```
 
 ## 同一宿主机运行 A 和 B
@@ -163,7 +163,7 @@ A 的身份 Reset 探针会先恢复临时 Profile 再执行网侧注销，不�
 docker compose --env-file .env -f docker-compose.same-host.yml down
 ```
 
-## 升级到 0.17.9
+## 升级到 0.17.10
 
 升级前保留 `agent-a-state` 和 `agent-b-state` 卷，让新版容器第一次启动时可以读取旧
 Agent ID 并注销网侧遗留身份。不要使用 `docker compose down -v`。
@@ -173,13 +173,13 @@ docker compose --env-file .env -f docker-compose.same-host.yml \
   down --remove-orphans
 docker image rm agent-connect-sdk:0.17.8-arm64
 
-sha256sum -c agent-connect-sdk-0.17.9-linux-arm64.tar.gz.sha256
-gzip -dc agent-connect-sdk-0.17.9-linux-arm64.tar.gz | docker load
+sha256sum -c agent-connect-sdk-0.17.10-linux-arm64.tar.gz.sha256
+gzip -dc agent-connect-sdk-0.17.10-linux-arm64.tar.gz | docker load
 docker image inspect --format '{{.Os}}/{{.Architecture}}' \
-  agent-connect-sdk:0.17.9-arm64
+  agent-connect-sdk:0.17.10-arm64
 ```
 
-将 `.env` 中的 `AGENT_IMAGE` 更新为 `agent-connect-sdk:0.17.9-arm64`，并使用本版本
+将 `.env` 中的 `AGENT_IMAGE` 更新为 `agent-connect-sdk:0.17.10-arm64`，并使用本版本
 随附的 Compose 文件和宿主机启动脚本。随后直接重启两个服务：
 
 ```bash
