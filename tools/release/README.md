@@ -24,6 +24,10 @@ python3 tools/release/build_demo_bundle.py /home/huawei/orange/releases/orange-d
   --phone-apk android/phone-controller/build/outputs/apk/debug/phone-controller-debug.apk
 ```
 
+If GitHub is intermittently unavailable, download the pinned Unitree source
+archive once and pass `--unitree-archive PATH`. Its SHA256 is checked before it
+is included, so repeated builds do not depend on the network response.
+
 The archive contains the four committed source trees, pinned Python dependency
 lists, configuration templates and source-built SDK wheel/Android APKs. On a
 new Go2 Jetson, install the wheel from `artifacts/`, install each service's

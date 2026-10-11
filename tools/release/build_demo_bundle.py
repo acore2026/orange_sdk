@@ -50,7 +50,8 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def build(output: Path, *, wheel: Path, rayneo_apk: Path | None, phone_apk: Path | None) -> None:
+def build(output: Path, *, wheel: Path, rayneo_apk: Path | None, phone_apk: Path | None,
+          unitree_archive: Path | None) -> None:
     source_archives = {}
     commits = {}
     for name, repo in REPOSITORIES.items():
@@ -74,8 +75,11 @@ def build(output: Path, *, wheel: Path, rayneo_apk: Path | None, phone_apk: Path
                 raise SystemExit(f"APK missing: {candidate}")
             binary_inputs["artifacts/" + name] = candidate.read_bytes()
 
-    with urllib.request.urlopen(UNITREE_ARCHIVE, timeout=40) as response:
-        unitree_source = response.read()
+    if unitree_archive is None:
+        with urllib.request.urlopen(UNITREE_ARCHIVE, timeout=40) as response:
+            unitree_source = response.read()
+    else:
+        unitree_source = unitree_archive.read_bytes()
     if sha256(unitree_source) != UNITREE_ARCHIVE_SHA256:
         raise SystemExit("Unitree source archive checksum changed; refusing to package")
     binary_inputs["vendor/unitree_sdk2_python.tar.gz"] = unitree_source
@@ -111,8 +115,11 @@ def main() -> None:
     parser.add_argument("--wheel", type=Path, required=True)
     parser.add_argument("--rayneo-apk", type=Path)
     parser.add_argument("--phone-apk", type=Path)
+    parser.add_argument("--unitree-archive", type=Path,
+                        help="Cached archive of the pinned Unitree commit; SHA256 is checked")
     args = parser.parse_args()
-    build(args.output, wheel=args.wheel, rayneo_apk=args.rayneo_apk, phone_apk=args.phone_apk)
+    build(args.output, wheel=args.wheel, rayneo_apk=args.rayneo_apk,
+          phone_apk=args.phone_apk, unitree_archive=args.unitree_archive)
 
 
 if __name__ == "__main__":
