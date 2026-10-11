@@ -36,7 +36,9 @@ install the bundled Unitree source at the recorded commit. Keep the vendor
 `dog-init.service` as the sole startup path and point `dog_init.json` at the
 installed `dog/start_dog_services.sh`. Review `core.env.example`,
 `dog-init.service.example`, `dog_init.json.example` and
-`video-diagnostics.conf` for the new machine. The archived `watch.py` is the
+`video-diagnostics.conf` for the new machine. `ros-logging.conf` sets a
+writable ROS log directory for nav within the original `dog-init.service`.
+The archived `watch.py` is the
 current video-capture diagnostic source. Do not copy another robot's
 `/root/.local/state/agent-sdk` identity or private keys.
 
