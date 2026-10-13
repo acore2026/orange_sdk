@@ -20,17 +20,17 @@ class TestConfigTest {
         val config = RayNeoX3ProDeployment.agentAConfig()
 
         assertEquals(TestRole.A, config.role)
-        assertEquals("101.245.78.174", config.serverIp)
+        assertEquals("192.168.1.13", config.serverIp)
         assertEquals(8088, config.runtimePort)
         assertEquals(8443, config.masquePort)
         assertEquals("dog-vision", config.capability)
         assertEquals("", config.intentServiceUrl)
         assertEquals(
-            "http://100.123.44.87:9004/api/v1/transcribe",
+            "http://192.168.2.150:9004/api/v1/transcribe",
             config.resolvedAsrServiceUrl,
         )
         assertEquals(
-            "https://101.245.78.174:8443/.well-known/masque/ip",
+            "https://192.168.1.13:8443/.well-known/masque/ip",
             config.masqueServerUrl,
         )
         assertTrue(config.validate().isEmpty())
@@ -46,7 +46,7 @@ class TestConfigTest {
 
     @Test
     fun customAsrEndpointMustBeAbsolute() {
-        val config = validConfig().copy(asrServiceUrl = "100.123.44.87:9004")
+        val config = validConfig().copy(asrServiceUrl = "192.168.1.13:9004")
 
         assertTrue(config.validate().any { it.contains("语音转写地址") })
     }

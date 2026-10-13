@@ -167,6 +167,7 @@ class AgentTestRunner(
     private val onFeatureStateChanged: (SdkFeatureState) -> Unit = {},
     /** Enables the AR workflow: voice command → candidate confirmation → secure domain. */
     private val interactivePatrol: Boolean = config.interactivePatrol,
+    private val failFast: Boolean = false,
     private val onPatrolStateChanged: (PatrolState) -> Unit = {},
 ) {
     private val retrySignal = Channel<Unit>(Channel.CONFLATED)
@@ -198,6 +199,8 @@ class AgentTestRunner(
     @Volatile private var lastRobotAction: RobotAction? = null
     private val receivedVideoSinks = mutableListOf<Pair<VideoTrack, VideoSink>>()
 
+    fun isInitialized(): Boolean = initResult != null
+
     fun retryCurrentStep() {
         retrySignal.trySend(Unit)
     }
@@ -223,6 +226,7 @@ class AgentTestRunner(
                 localUdpPort = config.localUdpPort,
                 masqueServerUrl = config.masqueServerUrl,
                 masqueAuthorization = config.masqueToken?.let { "Bearer $it" },
+                standaloneAsrHost = java.net.URI(config.resolvedAsrServiceUrl).host,
             )
         }
         initResult = initialized
@@ -507,8 +511,8 @@ class AgentTestRunner(
         publishPatrolState(selected.state.copy(failureReason = null))
         val area = patrolState.request?.zoneId ?: recognizedArea ?: "A区域"
         // Establish the patrol context on the dog before opening the compute stream.
-        // The dog agent deliberately waits for explicit A2A motion/action commands;
-        // without this message the Secure Domain exists but the dog has no task.
+        // A confirmed patrol starts the dog entry motion independently of video.
+        // Without this message the Secure Domain exists but the dog has no task.
         try {
             patrolSetupStep(PatrolSetupStage.DISPATCH) {
                 val patrolReceipt = sdk.sendMessage(
@@ -522,7 +526,7 @@ class AgentTestRunner(
                     },
                     messageType = "patrol_request",
                     taskId = "patrol-$groupId",
-                    timeoutSeconds = 10.0,
+                    timeoutSeconds = 20.0,
                 )
                 check(patrolReceipt.delivered) { "机器狗未确认巡检任务" }
             }
@@ -605,7 +609,7 @@ class AgentTestRunner(
             },
             messageType = "robot_action",
             taskId = "patrol-action-${UUID.randomUUID()}",
-            timeoutSeconds = 10.0,
+            timeoutSeconds = 20.0,
         )
         check(receipt.delivered) { "机器狗未确认 $wireAction 指令" }
         lastRobotAction = action
@@ -814,7 +818,7 @@ class AgentTestRunner(
                     },
                     messageType = "text",
                     taskId = "android-ab-manual-message",
-                    timeoutSeconds = 10.0,
+                    timeoutSeconds = 20.0,
                 ).also { receipt ->
                     check(receipt.delivered) { "对端未返回 status=OK" }
                     onLog(LabLogLevel.SUCCESS, "A2A SEND", "message_id=${receipt.messageId}，投递成功")
@@ -1039,6 +1043,8 @@ class AgentTestRunner(
     ): String = operationMutex.withLock {
         ensureResetNotRequested()
         runtimeExpelConfirmationRequired = false
+        lastTranscription = null
+        emitFeatureState()
         val result = sdk.recognizeRuntimeAudio(
             computeServiceSessionId = requireConsumerSessionId(),
             request = DiscoveryAudioRequest(
@@ -1128,7 +1134,7 @@ class AgentTestRunner(
             jsonMessage = buildJsonObject { put(COMPUTE_SESSION_ID_FIELD, sessionId) },
             messageType = COMPUTE_SESSION_MESSAGE_TYPE,
             taskId = "computing:$sessionId",
-            timeoutSeconds = 10.0,
+            timeoutSeconds = 20.0,
         )
         check(delivery.delivered) { "compute_service_session_id 未送达 ${route.targetAgentName}" }
         onLog(
@@ -1630,6 +1636,7 @@ class AgentTestRunner(
                     "写接口超时不代表网侧一定失败；联调前请先核对服务端状态，再重试",
                 )
                 onStatus(RunnerStatus("$title 失败", detail, canRetry = true))
+                if (failFast) throw error
                 retrySignal.receive()
                 attempt += 1
             }

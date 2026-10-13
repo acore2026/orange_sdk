@@ -19,7 +19,7 @@ Build after all four repositories are committed and tested:
 ```bash
 cd /home/huawei/orange/sdk
 python3 tools/release/build_demo_bundle.py /home/huawei/orange/releases/orange-demo.tar.gz \
-  --wheel python/dist/agent_connect_sdk-0.17.10-py3-none-any.whl \
+  --wheel python/dist/agent_connect_sdk-0.17.11-py3-none-any.whl \
   --rayneo-apk android/example-app/build/outputs/apk/rayneo/debug/example-app-rayneo-debug.apk \
   --phone-apk android/phone-controller/build/outputs/apk/debug/phone-controller-debug.apk
 ```

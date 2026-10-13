@@ -273,6 +273,7 @@ class AgentSdk internal constructor(
         masqueServerUrl: String,
         masqueAuthorization: String? = null,
         tunMtu: Int = 1280,
+        standaloneAsrHost: String? = null,
     ): SdkInitResult {
         if (state != State.NEW && state != State.CLOSED) {
             throw AgentSdkException(ErrorCode.INVALID_ARGUMENT, "SDK is already initialized")
@@ -318,11 +319,18 @@ class AgentSdk internal constructor(
                 ?.trim()
                 ?.takeIf(String::isNotEmpty)
                 ?: withContext(Dispatchers.IO) { localAddressResolver.resolve(uri) }
-            // The standalone ASR endpoint is reachable through the MASQUE server.
-            // Put its host route on the Agent TUN so glasses traffic to 100.123.44.87
-            // is carried first to the 101.245.78.174 CONNECT-IP gateway.
+            // Resolve the configured ASR destination before creating the VPN.
+            // Never capture the outer gateway or Runtime when ASR shares that host.
+            val asrRoutes = if (standaloneAsrHost == null) emptySet() else withContext(Dispatchers.IO) {
+                val bypass = (InetAddress.getAllByName(agentRuntimeIp).toList() +
+                    InetAddress.getAllByName(uri.host).toList()).map { it.hostAddress }.toSet()
+                val addresses = InetAddress.getAllByName(standaloneAsrHost)
+                    .filter { it.address.size == 4 }.mapNotNull { it.hostAddress }.toSet()
+                require(addresses.isNotEmpty()) { "ASR host has no IPv4 address" }
+                (addresses - bypass).map { "$it/32" }.toSet()
+            }
             tunnelController.establish(
-                TunnelConfiguration(this.agentTunCidr, setOf(STANDALONE_ASR_ROUTE), tunMtu)
+                TunnelConfiguration(this.agentTunCidr, asrRoutes, tunMtu)
             )
             groupCache = GroupMemberCache(tunnelController)
             localServer = localServerFactory().also { server ->
@@ -551,13 +559,13 @@ class AgentSdk internal constructor(
         jsonMessage: JsonObject,
         messageType: String,
         taskId: String,
-        timeoutSeconds: Double = 5.0,
+        timeoutSeconds: Double = MIN_API_TIMEOUT_SECONDS,
     ): MessageReceipt {
         requireReady()
-        if (timeoutSeconds <= 0.0) {
+        if (timeoutSeconds < MIN_API_TIMEOUT_SECONDS) {
             throw AgentSdkException(
                 ErrorCode.INVALID_ARGUMENT,
-                "timeoutSeconds must be greater than zero",
+                "timeoutSeconds must be at least 20 seconds",
                 "timeoutSeconds",
             )
         }
@@ -1090,8 +1098,8 @@ class AgentSdk internal constructor(
     ) {
         requireReady()
         requireComputeString(computeServiceSessionId, "compute_service_session_id")
-        if (timeoutSeconds <= 0.0) {
-            invalidCompute("timeoutSeconds must be greater than zero", "timeoutSeconds")
+        if (timeoutSeconds < MIN_API_TIMEOUT_SECONDS) {
+            invalidCompute("timeoutSeconds must be at least 20 seconds", "timeoutSeconds")
         }
         val waiter = computingMutex.withLock {
             if (computeServiceSessionId !in activeComputingSessionIds()) return
@@ -1127,10 +1135,10 @@ class AgentSdk internal constructor(
         bitrateKbps: Int = 4000,
         timeoutSeconds: Double = 120.0,
     ): VideoUploadHandle {
-        if (timeoutSeconds <= 0.0) {
+        if (timeoutSeconds < MIN_API_TIMEOUT_SECONDS) {
             throw AgentSdkException(
                 ErrorCode.INVALID_ARGUMENT,
-                "timeoutSeconds must be greater than zero",
+                "timeoutSeconds must be at least 20 seconds",
                 "timeoutSeconds",
             )
         }
@@ -1252,10 +1260,10 @@ class AgentSdk internal constructor(
         computeServiceSessionId: String,
         timeoutSeconds: Double = 120.0,
     ): ProcessedVideoStream {
-        if (timeoutSeconds <= 0.0) {
+        if (timeoutSeconds < MIN_API_TIMEOUT_SECONDS) {
             throw AgentSdkException(
                 ErrorCode.INVALID_ARGUMENT,
-                "timeoutSeconds must be greater than zero",
+                "timeoutSeconds must be at least 20 seconds",
                 "timeoutSeconds",
             )
         }
@@ -1364,7 +1372,7 @@ class AgentSdk internal constructor(
         requestId: String,
         text: String,
         language: String? = null,
-        timeoutSeconds: Double = 15.0,
+        timeoutSeconds: Double = MIN_API_TIMEOUT_SECONDS,
     ): RecognitionTargetStatus {
         validateSandboxTimeout(timeoutSeconds)
         validateComputeRequestId(requestId, "request_id")
@@ -1394,7 +1402,7 @@ class AgentSdk internal constructor(
 
     suspend fun getRecognitionTarget(
         computeServiceSessionId: String,
-        timeoutSeconds: Double = 15.0,
+        timeoutSeconds: Double = MIN_API_TIMEOUT_SECONDS,
     ): RecognitionTargetStatus {
         validateSandboxTimeout(timeoutSeconds)
         val session = waitForComputingSession(computeServiceSessionId, timeoutSeconds)
@@ -1412,7 +1420,7 @@ class AgentSdk internal constructor(
     suspend fun createControlAction(
         computeServiceSessionId: String,
         request: ControlActionRequest,
-        timeoutSeconds: Double = 15.0,
+        timeoutSeconds: Double = MIN_API_TIMEOUT_SECONDS,
     ): ControlActionStatus {
         validateSandboxTimeout(timeoutSeconds)
         validateControlActionRequest(request)
@@ -1652,7 +1660,7 @@ class AgentSdk internal constructor(
     suspend fun recognizeIntent(
         intentUrl: String,
         text: String,
-        timeoutSeconds: Double = 15.0,
+        timeoutSeconds: Double = MIN_API_TIMEOUT_SECONDS,
     ): IntentRecognitionResult {
         validateSandboxTimeout(timeoutSeconds)
         val endpoint = requireStandaloneHttpUrl(intentUrl, "intentUrl")
@@ -1670,7 +1678,7 @@ class AgentSdk internal constructor(
     suspend fun getControlAction(
         computeServiceSessionId: String,
         actionId: String,
-        timeoutSeconds: Double = 15.0,
+        timeoutSeconds: Double = MIN_API_TIMEOUT_SECONDS,
     ): ControlActionStatus {
         validateSandboxTimeout(timeoutSeconds)
         val normalizedActionId = requireComputeString(actionId, "action_id")
@@ -2058,10 +2066,10 @@ class AgentSdk internal constructor(
         throw AgentSdkException(ErrorCode.SANDBOX_REJECTED, message, field)
 
     private fun validateSandboxTimeout(timeoutSeconds: Double) {
-        if (timeoutSeconds <= 0.0) {
+        if (timeoutSeconds < MIN_API_TIMEOUT_SECONDS) {
             throw AgentSdkException(
                 ErrorCode.INVALID_ARGUMENT,
-                "timeoutSeconds must be greater than zero",
+                "timeoutSeconds must be at least 20 seconds",
                 "timeoutSeconds",
             )
         }
@@ -2473,19 +2481,8 @@ class AgentSdk internal constructor(
                 "No active IPv4 PDU Session is available (pdu-session-required)",
             )
         }
-        val accesses = snapshot["data_plane_accesses"] as? JsonArray
-        if (accesses == null || accesses.none { element ->
-                val item = element as? JsonObject
-                item?.stringOrNull("access_type") == "HTTP3_CONNECT_IP" &&
-                    item.stringOrNull("session_selection") == "EXACT_PDU_SESSION_ID"
-            }
-        ) {
-            throw AgentSdkException(
-                ErrorCode.RUNTIME_REJECTED,
-                "Runtime provides no exact HTTP3 CONNECT-IP data-plane access " +
-                    "(data-plane-access-unsupported)",
-            )
-        }
+        // 不再要求 Runtime 上报 data_plane_accesses/advertisedEndpoint；数据面
+        // 可达性由既有 CONNECT-IP 隧道状态保证（见 C-02 绑定校验）。
         ueInfo = snapshot
     }
 
@@ -2493,8 +2490,8 @@ class AgentSdk internal constructor(
         request: ComputeSessionRequest,
         timeoutSeconds: Double,
     ): ComputeSessionStatus {
-        if (timeoutSeconds <= 0.0) {
-            invalidCompute("timeoutSeconds must be greater than zero", "timeoutSeconds")
+        if (timeoutSeconds < MIN_API_TIMEOUT_SECONDS) {
+            invalidCompute("timeoutSeconds must be at least 20 seconds", "timeoutSeconds")
         }
         val body = computeJson.encodeToJsonElement(request).jsonObject
         computingControlMutex.withLock {
@@ -2961,12 +2958,6 @@ class AgentSdk internal constructor(
             throw ComputeBindingException("binding-mismatch")
         }
         val binding = session.networkBinding
-        if (
-            binding.runtimeDataPlane.accessType != "HTTP3_CONNECT_IP" ||
-            binding.runtimeDataPlane.sessionSelection != "EXACT_PDU_SESSION_ID"
-        ) {
-            throw ComputeBindingException("data-plane-access-unsupported")
-        }
         val snapshot = ueInfo ?: checkNotNull(runtime).getUeInfo().also { ueInfo = it }
         val sessions = snapshot["pdu_sessions"] as? JsonArray
         val matching = sessions.orEmpty().mapNotNull { it as? JsonObject }.filter {
@@ -2990,26 +2981,9 @@ class AgentSdk internal constructor(
         ) {
             throw ComputeBindingException("network-binding-mismatch")
         }
-        val accesses = snapshot["data_plane_accesses"] as? JsonArray
-        val matchingAccesses = accesses.orEmpty().mapNotNull { it as? JsonObject }.filter {
-            it.stringOrNull("access_type") == binding.runtimeDataPlane.accessType &&
-                it.stringOrNull("session_selection") == binding.runtimeDataPlane.sessionSelection
-        }
-        if (matchingAccesses.size != 1) {
-            throw ComputeBindingException("data-plane-access-unsupported")
-        }
-        val template = matchingAccesses.single().stringOrNull("endpoint_template")
-        if (template == null || template.windowed("{pdu_session_id}".length)
-                .count { it == "{pdu_session_id}" } != 1
-        ) {
-            throw ComputeBindingException("data-plane-access-unsupported")
-        }
-        val expanded = template.replace("{pdu_session_id}", binding.pduSessionId.toString())
-        val accessUri = runCatching { URI(expanded) }.getOrNull()
-        if (
-            accessUri?.scheme != "https" || accessUri.host.isNullOrBlank() ||
-            !masqueTransport.connected
-        ) {
+        // Runtime 的 data_plane_accesses 声明（advertisedEndpoint）仅作为信息，
+        // 不再强制校验；只要求既有 CONNECT-IP 隧道处于连接状态。
+        if (!masqueTransport.connected) {
             throw ComputeBindingException("data-plane-access-unsupported")
         }
         installComputeRoute(session)
@@ -3820,7 +3794,7 @@ class AgentSdk internal constructor(
 
     companion object {
         private const val TAG = "AgentSdk"
-        private const val STANDALONE_ASR_ROUTE = "100.123.44.87/32"
+        private const val MIN_API_TIMEOUT_SECONDS = 20.0
         private const val COMPUTING_SESSION_REQUEST_PATH = "/v1/computing/session-requests"
         private const val COMPUTE_CONNECT_CONFIG = "COMPUTE_CONNECT_CONFIG"
         private const val COMPUTE_SESSION_STATUS = "COMPUTE_SESSION_STATUS"
@@ -3861,6 +3835,13 @@ class AgentSdk internal constructor(
             "NOT_FOUND",
         )
         private val LOCAL_SERVER_REBIND_DELAYS_MS = longArrayOf(0, 25, 100, 250)
+
+        /** Offline recovery after the owning SDK has been closed. Clears only this
+         * Runtime's Profile/Card; device signing keys and network identities remain. */
+        fun clearLocalIdentity(context: android.content.Context, runtimeHost: String, runtimePort: Int) {
+            FileAgentStateStore(File(context.noBackupFilesDir, "agent-sdk/agents"))
+                .clear(runtimeHost, runtimePort)
+        }
 
         fun create(
             vpnService: AgentVpnService,

@@ -9,8 +9,8 @@ android {
         applicationId = "com.rayneo.demo.controller"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 6
+        versionName = "1.2.0"
     }
     buildTypes { getByName("release") { signingConfig = signingConfigs.getByName("debug") } }
     compileOptions {

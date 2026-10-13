@@ -878,3 +878,65 @@ async def test_c02_rejects_network_binding_mismatch(sdk_fixture):
 
     assert response["accepted"] is False
     assert response["cause"] == "network-binding-mismatch"
+
+
+def _strip_data_plane_accesses(runtime):
+    """Runtime 未配置 advertisedEndpoint 时 /v1/ue/info 不含 data_plane_accesses。"""
+    original = runtime.get_ue_info
+
+    async def stripped():
+        info = dict(await original())
+        info.pop("data_plane_accesses", None)
+        return info
+
+    runtime.get_ue_info = stripped
+
+
+async def test_create_preflight_allows_runtime_without_data_plane_accesses(
+    sdk_fixture,
+):
+    sdk = sdk_fixture["sdk"]
+    runtime = sdk_fixture["runtime"]
+    await runtime.deliver_group_config(group_payload())
+    _strip_data_plane_accesses(runtime)
+
+    status = await sdk.create_computing_session(create_request())
+
+    assert isinstance(status, ComputeSessionStatus)
+    assert status.compute_service_session_id == "css-001"
+
+
+async def test_c02_is_accepted_without_data_plane_accesses(sdk_fixture):
+    runtime = sdk_fixture["runtime"]
+    _strip_data_plane_accesses(runtime)
+
+    response = await runtime.deliver_downlink(
+        "COMPUTE_CONNECT_CONFIG", connect_config(), 51
+    )
+
+    assert response["accepted"] is True
+    assert response["cause"] == ""
+    assert "8.8.8.9/32" in sdk_fixture["backend"].routes
+
+
+async def test_c02_rejects_disconnected_tunnel_without_declaration(sdk_fixture):
+    runtime = sdk_fixture["runtime"]
+    _strip_data_plane_accesses(runtime)
+    sdk_fixture["sdk"]._masque.connected = False
+    response = await runtime.deliver_downlink("COMPUTE_CONNECT_CONFIG", connect_config(), 51)
+    assert response["accepted"] is False
+    assert response["cause"] == "data-plane-access-unsupported"
+
+
+async def test_compute_rejects_timeout_below_twenty_seconds(sdk_fixture):
+    await sdk_fixture["runtime"].deliver_group_config(group_payload())
+    with pytest.raises(AgentSdkError) as error:
+        await sdk_fixture["sdk"].create_computing_session(create_request(), timeout_seconds=19.0)
+    assert error.value.code == ErrorCode.INVALID_ARGUMENT
+
+
+@pytest.mark.parametrize("timeout", [0.0, 19.0])
+def test_runtime_rejects_timeout_below_twenty_seconds(timeout):
+    from agent_sdk.runtime import HttpRuntimeTransport
+    with pytest.raises(ValueError, match="at least 20 seconds"):
+        HttpRuntimeTransport("127.0.0.1", 8088, timeout=timeout)

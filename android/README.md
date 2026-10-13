@@ -440,8 +440,11 @@ POST http://{agentRuntimeIp}:{agentRuntimePort}/v1/computing/session-requests
 ```
 
 Before each operation, the SDK checks `/v1/acn/status` and `/v1/ue/info` for
-NAS readiness, an active IPv4 PDU session, and an
-`HTTP3_CONNECT_IP + EXACT_PDU_SESSION_ID` access. CREATE also requires the
+NAS readiness and an active IPv4 PDU session. `data_plane_accesses` and
+`advertisedEndpoint` are optional; C-02 binding validation requires the existing
+CONNECT-IP tunnel to be connected and retains PDU/network binding checks.
+Message, computing, media and Sandbox API timeouts must be at least 20 seconds;
+A2A attempts use 20 seconds. CREATE also requires the
 referenced local group to be `ACTIVE`, the requester to match the local Agent,
 and the target Agent to be a member.
 

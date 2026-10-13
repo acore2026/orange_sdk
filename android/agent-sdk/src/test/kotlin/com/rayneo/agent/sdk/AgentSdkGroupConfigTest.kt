@@ -78,6 +78,37 @@ class AgentSdkGroupConfigTest {
     private val runtimeTargets = mutableListOf<Pair<String, Int>>()
 
     @Test
+    fun `compute permits absent data plane declaration`() = runTest {
+        runtime.advertiseDataPlane = false
+        initializeSdk()
+        runtime.deliverGroupConfig(groupConfig())
+        val status = sdk.createComputingSession(createComputeRequest())
+        assertNotNull(status.computeServiceSessionId)
+        val accepted = runtime.deliverDownlink("COMPUTE_CONNECT_CONFIG", computeConnectConfig("consumer"))
+        assertEquals(JsonPrimitive(true), accepted?.get("accepted"))
+    }
+
+    @Test
+    fun `compute rejects disconnected tunnel without data plane declaration`() = runTest {
+        runtime.advertiseDataPlane = false
+        initializeSdk()
+        masque.connected = false
+        val rejected = runtime.deliverDownlink("COMPUTE_CONNECT_CONFIG", computeConnectConfig("producer"))
+        assertEquals(JsonPrimitive(false), rejected?.get("accepted"))
+        assertEquals(JsonPrimitive("data-plane-access-unsupported"), rejected?.get("cause"))
+    }
+
+    @Test
+    fun `compute timeout below twenty seconds is rejected`() = runTest {
+        initializeSdk()
+        runtime.deliverGroupConfig(groupConfig())
+        val error = runCatching {
+            sdk.createComputingSession(createComputeRequest(), timeoutSeconds = 19.0)
+        }.exceptionOrNull() as AgentSdkException
+        assertEquals(ErrorCode.INVALID_ARGUMENT, error.code)
+    }
+
+    @Test
     fun `computing API replaces legacy offloading API`() {
         val publicMethods = AgentSdk::class.java.methods
         assertFalse(publicMethods.any { it.name == "createOffloadingSession" })
@@ -520,7 +551,7 @@ class AgentSdkGroupConfigTest {
             CompletableDeferred<RuntimeHttpResponse>().await()
         }
 
-        val status = sdk.createComputingSession(createComputeRequest(), timeoutSeconds = 2.0)
+        val status = sdk.createComputingSession(createComputeRequest(), timeoutSeconds = 20.0)
 
         assertEquals("css-async-001", status.computeServiceSessionId)
         assertEquals("ACTIVE", status.status)
@@ -1561,12 +1592,13 @@ class AgentSdkGroupConfigTest {
             localTcpPort = 4001,
             localUdpPort = 28443,
             masqueServerUrl = "https://192.168.3.10:4433",
+            standaloneAsrHost = "192.168.2.150",
         )
         assertEquals("8.8.8.7:4001", result.agentTcpEndpoint)
         assertEquals("192.168.1.10", result.masqueOuterSourceIp)
         assertEquals("8.8.8.7/32", result.agentTunCidr)
         assertEquals("8.8.8.7/32", tunnel.establishedConfiguration?.agentTunCidr)
-        assertEquals(setOf("100.123.44.87/32"), tunnel.establishedConfiguration?.routes)
+        assertEquals(setOf("192.168.2.150/32"), tunnel.establishedConfiguration?.routes)
         assertEquals(tunnel.clientIdentityDirectory, masque.configuration?.identityDirectory)
         if (restoreProfile) {
             sdk.restoreLocalProfile(
@@ -1762,6 +1794,7 @@ class AgentSdkGroupConfigTest {
         val paths = mutableListOf<String>()
         val bodies = mutableMapOf<String, JsonObject>()
         var ueInfoRequests = 0
+        var advertiseDataPlane = true
         var computeRequestHandler: (suspend (JsonObject) -> RuntimeHttpResponse)? = null
         var downlinkHandler: (suspend (String, Int, JsonObject) -> JsonObject?)? = null
 
@@ -1788,7 +1821,7 @@ class AgentSdkGroupConfigTest {
                         put("default_route", true)
                     })
                 })
-                put("data_plane_accesses", buildJsonArray {
+                if (advertiseDataPlane) put("data_plane_accesses", buildJsonArray {
                     add(buildJsonObject {
                         put("access_type", "HTTP3_CONNECT_IP")
                         put(

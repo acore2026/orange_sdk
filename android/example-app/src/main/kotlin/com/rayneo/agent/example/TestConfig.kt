@@ -89,11 +89,12 @@ data class TestConfig(
 }
 
 object RayNeoX3ProDeployment {
-    const val SERVER_IP = "101.245.78.174"
+    const val SERVER_IP = "192.168.1.13"
     const val RUNTIME_PORT = 8088
     const val MASQUE_PORT = 8443
     const val MASQUE_PATH = "/.well-known/masque/ip"
-    const val ASR_SERVICE_URL = "http://100.123.44.87:9004/api/v1/transcribe"
+    const val SANDBOX_HOST = "192.168.2.150"
+    const val ASR_SERVICE_URL = "http://$SANDBOX_HOST:9004/api/v1/transcribe"
     const val PARK_ADMIN_CAPABILITY = "园区管理员"
     const val PATROL_CAPABILITY = "巡逻"
     const val CAMERA_CAPABILITY = "相机"

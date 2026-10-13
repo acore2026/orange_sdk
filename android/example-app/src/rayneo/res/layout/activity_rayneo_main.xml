@@ -148,6 +148,68 @@
             android:textSize="14sp" />
     </LinearLayout>
 
+    <!-- Both eyes show the same warning; it does not take voice control focus. -->
+    <LinearLayout
+        android:id="@+id/expel_warning"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:layout_marginStart="42dp"
+        android:layout_marginEnd="42dp"
+        android:background="@drawable/rayneo_expel_warning"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="16dp"
+        android:accessibilityLiveRegion="assertive"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:text="WARNING · DANGEROUS ACTION"
+            android:textColor="#FFCB75"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center"
+            android:text="Expel: robot lunges forward. Keep people clear."
+            android:textColor="#FFF0DC"
+            android:textSize="14sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:gravity="center"
+            android:text="Second confirmation required"
+            android:textColor="#FFF0DC"
+            android:textSize="14sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center"
+            android:text="Please say Confirm to proceed"
+            android:textColor="#FFFFFF"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:gravity="center"
+            android:text="Say Cancel to dismiss · Expires after 30 seconds"
+            android:textColor="#FFCB75"
+            android:textSize="13sp" />
+    </LinearLayout>
+
     <LinearLayout
         android:layout_width="0dp"
         android:layout_height="0dp"

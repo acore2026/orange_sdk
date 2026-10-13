@@ -88,9 +88,10 @@ def test_aiortc_adapter_selects_and_loops_the_configured_file() -> None:
     player_factory.assert_called_once_with(str(VIDEO_PATH.resolve()), loop=True)
 
 
-def test_aiortc_adapter_keeps_v4l2_camera_mode() -> None:
+def test_aiortc_adapter_keeps_v4l2_camera_mode(monkeypatch) -> None:
     player_factory = Mock(return_value=object())
     adapter = AiortcMediaOffloadAdapter()
+    monkeypatch.setattr("agent_sdk.camera.DetachedCameraPlayer", player_factory)
 
     adapter._open_video_player(
         player_factory,
@@ -102,7 +103,6 @@ def test_aiortc_adapter_keeps_v4l2_camera_mode() -> None:
 
     player_factory.assert_called_once_with(
         "/dev/video2",
-        format="v4l2",
         options={"video_size": "640x480", "framerate": "15"},
     )
 

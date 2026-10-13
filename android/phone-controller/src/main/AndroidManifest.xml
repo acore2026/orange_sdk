@@ -1,6 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
-    <application android:label="巡检演示遥控" android:theme="@style/DemoTheme" android:allowBackup="false">
+    <application android:usesCleartextTraffic="true" android:label="巡检演示遥控" android:theme="@style/DemoTheme" android:allowBackup="false">
         <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="portrait">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

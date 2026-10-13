@@ -6,7 +6,7 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URI
-import java.security.MessageDigest
+import java.net.HttpURLConnection
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -14,8 +14,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 object DemoRemote {
     const val PORT = 8791
     const val MAX_LINE = 8192
-    val commands = setOf("STATUS", "PATROL", "CONFIRM", "CANCEL", "DETER", "EXPEL",
-        "CONFIRM_EXPEL", "VOICE_START", "VOICE_STOP", "RTC_RECONNECT", "VIDEO_SHOW", "VIDEO_HIDE", "CONFIG_CORE")
+    val commands = setOf("STATUS", "PATROL", "CONFIRM", "CANCEL", "DETER", "EXPEL", "DEREGISTER_GLASSES",
+        "CONFIRM_EXPEL", "VOICE_START", "VOICE_STOP", "RTC_RECONNECT", "VIDEO_SHOW", "VIDEO_HIDE", "CONFIG_CORE", "CONFIG_SANDBOX", "FORWARD", "BACK", "LEFT", "RIGHT", "STOP")
     fun coreHost(raw: String): String {
         val host = raw.trim().lowercase()
         require(host.length in 1..253 && host.matches(Regex("[a-z0-9][a-z0-9.-]*[a-z0-9]|[a-z0-9]"))) { "Enter an IPv4 address or DNS hostname, without scheme or port" }
@@ -41,11 +41,11 @@ object DemoRemote {
         }
         return bytes.toByteArray().toString(Charsets.UTF_8).trimEnd('\r')
     }
-    fun authorized(expected: String, actual: String): Boolean = expected.isNotBlank() && MessageDigest.isEqual(expected.toByteArray(), actual.toByteArray())
-    fun envelope(pin: String, command: String): String {
-        require(pin.matches(Regex("[0-9]{8}"))) { "Enter the eight-digit pairing code" }
+    /** Direct LAN protocol: one JSON object per line, no pairing envelope. */
+    fun envelope(command: String): String {
         require(command.isNotBlank() && !command.contains('\n') && !command.contains('\r'))
-        return "AUTH $pin $command"
+        require(command.toByteArray(Charsets.UTF_8).size <= MAX_LINE)
+        return command
     }
     fun exchange(endpoint: String, request: String): String = Socket().use { socket ->
         require(!request.contains('\n') && request.toByteArray().size <= MAX_LINE)
@@ -55,6 +55,59 @@ object DemoRemote {
         socket.getOutputStream().flush()
         readLine(socket.getInputStream())
     }
+
+    fun dogAdmin(endpoint: String, host: String? = null): String {
+        val address = endpoint(endpoint)
+        val port = if (URI("tcp://${endpoint.trim()}").port == -1) 8081 else address.port
+        val path = if (host == null) "/health" else "/config/core"
+        val connection = URI("http://${address.hostString}:$port$path").toURL().openConnection() as HttpURLConnection
+        return try {
+            connection.connectTimeout = 4000
+            connection.readTimeout = 8000
+            connection.instanceFollowRedirects = false
+            if (host != null) {
+                val safeHost = coreHost(host)
+                connection.requestMethod = "POST"
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.outputStream.use { it.write(("{\"host\":\"$safeHost\"}").toByteArray()) }
+            }
+            val code = connection.responseCode
+            val body = (if (code in 200..299) connection.inputStream else connection.errorStream)
+                ?.bufferedReader()?.use { it.readText() }.orEmpty()
+            check(code in 200..299) { "Dog HTTP $code: $body" }
+            body
+        } finally { connection.disconnect() }
+    }
+
+    /** POST once; subsequent requests only retrieve this operation's result. */
+    fun dogIdentity(endpoint: String, requestId: String, submit: Boolean): String {
+        require(requestId.matches(Regex("[a-zA-Z0-9_-]{8,80}")))
+        val uri = URI("http://${endpoint.trim()}")
+        require(uri.userInfo == null && uri.path.orEmpty().isEmpty() && uri.query == null && uri.fragment == null && uri.host != null)
+        val host = coreHost(uri.host)
+        val port = if (uri.port == -1) 8081 else uri.port
+        require(port in 1..65535)
+        val path = if (submit) "/identity/deregister" else "/identity/status?request_id=$requestId"
+        val connection = URI("http://$host:$port$path").toURL().openConnection() as HttpURLConnection
+        return try {
+            connection.connectTimeout = 4000
+            connection.readTimeout = 8000
+            connection.instanceFollowRedirects = false
+            if (submit) {
+                connection.requestMethod = "POST"
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.outputStream.use { it.write(("{\"request_id\":\"$requestId\"}").toByteArray(Charsets.UTF_8)) }
+            }
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            check(code in 200..299) { "Dog identity HTTP $code: $body" }
+            body
+        } finally { connection.disconnect() }
+    }
+
 }
 
 /** Sequential accept loop keeps command order; each handler must only enqueue work. */

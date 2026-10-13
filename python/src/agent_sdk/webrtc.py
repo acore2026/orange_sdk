@@ -364,9 +364,10 @@ class AiortcMediaOffloadAdapter:
                 str(self._video_file_path),
                 loop=self._loop_video_file,
             )
-        return media_player_type(
+        from .camera import DetachedCameraPlayer
+
+        return DetachedCameraPlayer(
             f"/dev/video{camera_id}",
-            format="v4l2",
             options={"video_size": f"{width}x{height}", "framerate": str(fps)},
         )
 

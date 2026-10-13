@@ -1,6 +1,18 @@
+# 0.17.11 (2026-10-13)
+
+- Package camera lifetime fixes, optional group configuration, 20-second negotiation waits, and 1 Mbps video pacing.
+- Refresh RayNeo/phone controls and add Nano offline installation and diagnostics tooling.
+
 # 修改记录
 
 本文件以一次 Git commit 为一个记录单元。每次代码或交付文档修改都必须在同一 commit 中补充对应条目，说明修改原因、实现方式和验证结果；具体提交哈希以 Git 历史为准。
+
+## 2026-10-12 — 同步 Release1.0 数据面兼容与超时规则
+
+- Android/Python SDK 不再强制要求 Runtime 的 data_plane_accesses/advertisedEndpoint 声明；C-02 使用既有 CONNECT-IP 连接状态，保留 PDU、地址、DNN、切片及接收方绑定校验。
+- 同步相关公开 API 至少 20 秒的超时约束；Android A2A 单次尝试 20 秒，Runtime HTTP 默认请求 30 秒；Python Runtime 默认 30 秒且拒绝小于 20 秒的配置。眼镜现有显式 10 秒调用同步为 20 秒。
+- 保留 main 的语音接口、巡检业务、视频修复、隧道重连及本地现场改动；未整体合并 Release1.0。
+- 验证：Android SDK 95 项、眼镜应用 68 项单测通过，Rayneo debug APK 构建成功；Python 算力/超时回归 37 项通过，覆盖无声明可用、隧道断开拒绝、低于 20 秒拒绝。git diff --check 通过。未安装到设备。
 
 ## 2026-10-11 — 原 dog-init 的 ROS 日志目录
 

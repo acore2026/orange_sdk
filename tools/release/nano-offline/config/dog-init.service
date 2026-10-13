@@ -1,0 +1,13 @@
+[Unit]
+Description=Dog startup USB tethering monitor
+After=network.target
+[Service]
+Type=simple
+WorkingDirectory=/home/unitree/xpd/script
+Environment=HOME=/root
+Environment=ROS_HOME=/root/.ros
+ExecStart=/bin/sh /home/unitree/xpd/script/dog_init.sh --config /home/unitree/xpd/script/dog_init.json
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=multi-user.target

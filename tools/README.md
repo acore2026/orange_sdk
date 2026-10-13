@@ -35,7 +35,7 @@ wsl -d Ubuntu --cd /home/huawei/orange python3 sdk/tools/set_core_address.py dog
 ## 其他用法
 
 ```powershell
-# 查询眼镜地址、配对码和 Wi-Fi IP，不写配置
+# 查询眼镜地址和 Wi-Fi IP，不写配置
 wsl -d Ubuntu --cd /home/huawei/orange python3 sdk/tools/set_core_address.py glasses
 
 # 眼镜只保存，暂不重启

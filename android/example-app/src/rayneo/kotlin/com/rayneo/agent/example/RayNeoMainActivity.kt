@@ -34,6 +34,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.webrtc.RendererCommon
@@ -60,10 +61,17 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     private val config by lazy {
         RayNeoX3ProDeployment.agentAConfig(
             masqueToken = intent.getStringExtra("masque_token"),
-        ).copy(serverIp = DemoSettings.coreHost(this))
+        ).copy(
+            serverIp = DemoSettings.coreHost(this),
+            asrServiceUrl = "http://${DemoSettings.sandboxHost(this)}:9004/api/v1/transcribe",
+        )
     }
     private var remoteServer: DemoRemoteServer? = null
     private var remoteBusy = false
+    private var identityRequestId = ""
+    private var identityState = "IDLE"
+    private var identityResult = ""
+    private var identityRecovery: kotlinx.coroutines.CompletableDeferred<Unit>? = null
     private var remoteResult = "Ready"
     private var remoteSubtitle: String? = null
     private var videoHidden = false
@@ -103,6 +111,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     private var dangerousActionArmed = false
     private var runtimeExpelPending = false
     private var runtimeExpelExpiresAt = 0L
+    private var expelTimeoutJob: Job? = null
+    private var voiceExpelDeadline: Long? = null
     private var patrolActionRunning = false
     private val videoRenderers = CopyOnWriteArraySet<TextureViewEglRenderer>()
     @Volatile
@@ -194,10 +204,9 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private fun handleRemoteLine(line: String): String {
-        val envelope = line.split(' ', limit = 3)
-        if (envelope.size != 3 || envelope[0] != "AUTH" ||
-            !DemoRemote.authorized(DemoSettings.pin(this), envelope[1])) return "ERR UNAUTHORIZED"
-        val task = FutureTask { executeRemoteCommand(JSONObject(envelope[2])) }
+        val request = try { JSONObject(DemoRemote.envelope(line)) }
+        catch (_: Exception) { return "ERR INVALID_REQUEST" }
+        val task = FutureTask { executeRemoteCommand(request) }
         remoteMainHandler.post(task)
         return try { task.get(2500, TimeUnit.MILLISECONDS) }
         catch (e: Exception) { task.cancel(false); "ERR REQUEST_REJECTED" }
@@ -209,6 +218,9 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         val command = request.optString("command")
         if (command !in DemoRemote.commands) return "ERR UNKNOWN_COMMAND"
         if (command == "STATUS") return "OK " + JSONObject().apply {
+            put("identity_request_id", identityRequestId)
+            put("identity_state", identityState)
+            put("identity_result", identityResult)
             put("phase", patrolState.phase.name)
             put("recording", voiceRecordingMode != null)
             put("busy", remoteBusy || voiceActionRunning || patrolActionRunning)
@@ -218,6 +230,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             put("stalled", videoStarved)
             put("pending_expel", runtimeExpelPending && android.os.SystemClock.elapsedRealtime() <= runtimeExpelExpiresAt)
             put("core_host", config.serverIp)
+            put("sandbox_host", java.net.URI(config.resolvedAsrServiceUrl).host)
+            put("saved_sandbox_host", DemoSettings.sandboxHost(this@RayNeoMainActivity))
             put("saved_core_host", DemoSettings.coreHost(this@RayNeoMainActivity))
             put("result", remoteResult)
             put("transcript", sdkFeatureState?.lastTranscription.orEmpty())
@@ -226,20 +240,19 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         if (id.length !in 8..80) return "ERR INVALID_REQUEST_ID"
         val fingerprint = request.toString()
         remoteRequests[id]?.let { return if (it.first == fingerprint) it.second else "ERR REQUEST_ID_CONFLICT" }
-        if (remoteBusy || voiceActionRunning || patrolActionRunning) return "ERR BUSY"
+        if (remoteBusy || resetInProgress || stopInProgress || computeStarting || voiceActionRunning || patrolActionRunning) return "ERR BUSY"
         if (voiceRecordingMode != null && command != "VOICE_STOP") return "ERR RECORDING"
-        if (command !in setOf("CONFIG_CORE", "VIDEO_SHOW", "VIDEO_HIDE") && sdkFeatureState?.agentReady != true) return "ERR NOT_READY"
+        if (command !in setOf("CONFIG_CORE", "CONFIG_SANDBOX", "DEREGISTER_GLASSES", "VIDEO_SHOW", "VIDEO_HIDE") && sdkFeatureState?.agentReady != true) return "ERR NOT_READY"
         if (command == "PATROL" && (messageSession != null || patrolState.phase !in setOf(PatrolPhase.IDLE, PatrolPhase.LISTENING, PatrolPhase.COMPLETED, PatrolPhase.ABORTED))) return "ERR INVALID_PHASE"
         if (command == "CONFIRM" && patrolState.phase != PatrolPhase.DISPATCHING) return "ERR NO_CANDIDATE"
-        if (command in setOf("DETER", "EXPEL", "CONFIRM_EXPEL", "RTC_RECONNECT") && messageSession == null) return "ERR NO_GROUP"
+        if (command in setOf("DETER", "EXPEL", "CONFIRM_EXPEL", "RTC_RECONNECT", "FORWARD", "BACK", "LEFT", "RIGHT", "STOP") && messageSession == null) return "ERR NO_GROUP"
         if (command == "VOICE_STOP" && voiceRecordingMode == null) return "ERR NOT_RECORDING"
         if (command == "CONFIRM_EXPEL" && (!runtimeExpelPending || android.os.SystemClock.elapsedRealtime() > runtimeExpelExpiresAt)) {
-            runtimeExpelPending = false
-            renderTopPrompt()
+            setRuntimeExpelPending(false, "expired")
             return "ERR CONFIRMATION_EXPIRED"
         }
         if (command == "CANCEL" && !runtimeExpelPending && patrolState.phase != PatrolPhase.DISPATCHING) return "ERR NOTHING_TO_CANCEL"
-        val coreHost = if (command == "CONFIG_CORE") runCatching { DemoRemote.coreHost(request.getString("host")) }.getOrNull()
+        val coreHost = if (command in setOf("CONFIG_CORE", "CONFIG_SANDBOX")) runCatching { DemoRemote.coreHost(request.getString("host")) }.getOrNull()
             ?: return "ERR INVALID_HOST" else null
         val area = request.optString("area", "A区域").trim()
         if (command == "PATROL" && area.length !in 1..80) return "ERR INVALID_AREA"
@@ -254,6 +267,11 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 DemoSettings.saveCore(this, coreHost!!)
                 remoteResult = "Saved; restart glasses app to apply"
             }
+            "CONFIG_SANDBOX" -> {
+                DemoSettings.saveSandbox(this, coreHost!!)
+                remoteResult = "Sandbox saved; restart glasses app to apply"
+            }
+            "DEREGISTER_GLASSES" -> deregisterFromPhone(id)
             "VIDEO_SHOW", "VIDEO_HIDE" -> {
                 videoHidden = command == "VIDEO_HIDE"
                 mBindingPair.updateView { videoPreviewPanel.visibility = if (videoHidden) View.INVISIBLE else View.VISIBLE }
@@ -266,8 +284,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             })
             "VOICE_STOP" -> voiceRecordingMode?.let(::stopAndSubmitVoice)
             "EXPEL" -> {
-                runtimeExpelPending = true
-                runtimeExpelExpiresAt = android.os.SystemClock.elapsedRealtime() + 30_000
+                setRuntimeExpelPending(true, "phone request")
                 remoteResult = "Confirm expel within 30 seconds"
                 remoteSubtitle = "Expel the suspect"
                 refreshVoiceActions()
@@ -275,7 +292,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             else -> {
                 val active = runner ?: return "ERR NOT_READY"
                 remoteBusy = true
-                if (command == "CONFIRM_EXPEL") runtimeExpelPending = false
+                if (command == "CONFIRM_EXPEL") setRuntimeExpelPending(false, "confirmed by phone")
                 lifecycleScope.launch {
                     try {
                         when (command) {
@@ -288,8 +305,19 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                                 active.confirmInteractivePatrol()
                             }
                             "CANCEL" -> {
-                                if (runtimeExpelPending) runtimeExpelPending = false else active.rejectInteractivePatrol()
+                                if (runtimeExpelPending) setRuntimeExpelPending(false, "cancelled by phone") else active.rejectInteractivePatrol()
                                 remoteSubtitle = "Cancel"
+                            }
+                            "FORWARD", "BACK", "LEFT", "RIGHT", "STOP" -> {
+                                val action = when (command) {
+                                    "FORWARD" -> RobotAction.FORWARD
+                                    "BACK" -> RobotAction.BACKWARD
+                                    "LEFT" -> RobotAction.LEFT
+                                    "RIGHT" -> RobotAction.RIGHT
+                                    else -> RobotAction.STOP
+                                }
+                                remoteSubtitle = command.lowercase()
+                                active.sendRobotAction(action)
                             }
                             "DETER" -> {
                                 remoteSubtitle = "Deter the suspect"
@@ -300,7 +328,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                                 active.sendRobotAction(RobotAction.FRONT_POUNCE)
                             }
                             "RTC_RECONNECT" -> {
-                                runtimeExpelPending = false
+                                setRuntimeExpelPending(false, "video reconnect")
                                 active.stopComputingSession()
                                 active.startVideoOffload()
                             }
@@ -427,6 +455,81 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         toggleVoiceRecording(mode)
     }
 
+    private fun deregisterFromPhone(id: String) {
+        if (identityState == "NO_IDENTITY" && sdk == null) {
+            identityRequestId = id
+            identityResult = "Glasses already have no local identity"
+            remoteResult = identityResult
+            return
+        }
+        remoteBusy = true
+        resetInProgress = true
+        setRuntimeExpelPending(false, "identity deregistration")
+        setPrimaryAction(PrimaryMode.BUSY, "Processing identity")
+        identityRequestId = id
+        identityState = "RUNNING"
+        identityResult = "Deregistering glasses identity"
+        lifecycleScope.launch {
+            try {
+                check(runner?.isInitialized() == true) { "SDK initialization failed" }
+                val activeSdk = sdk ?: error("SDK is not initialized")
+                val job = runnerJob
+                runnerJob = null
+                job?.cancelAndJoin()
+                val finished = kotlinx.coroutines.withTimeoutOrNull(30_000) {
+                    runner?.stopComputingSession()
+                    withContext(Dispatchers.IO) {
+                        activeSdk.localProfile?.let { profile ->
+                            val result = activeSdk.deregisterIdentity(profile.agentId, "user_request")
+                            check(result.success) { result.message.ifBlank { "Deregistration rejected" } }
+                        }
+                    }
+                    true
+                }
+                check(finished == true) { "Deregistration timed out" }
+                closeResources()
+                identityState = "NO_IDENTITY"
+                identityResult = "Glasses identity deregistered"
+                setPrimaryAction(PrimaryMode.RETRY, "Reconnect")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                identityResult = "Deregistration failed; clearing local identity and registering again"
+                try {
+                    // resetAgent is the SDK's normal local reset. If initialization or
+                    // session release failed, close first and use its offline state API.
+                    runCatching { withContext(Dispatchers.IO) { sdk?.resetAgent() } }
+                    closeResources()
+                    withContext(Dispatchers.IO) {
+                        AgentSdk.clearLocalIdentity(this@RayNeoMainActivity, config.serverIp, config.runtimePort)
+                    }
+                    val completion = kotlinx.coroutines.CompletableDeferred<Unit>()
+                    identityRecovery = completion
+                    beginConnection()
+                    kotlinx.coroutines.withTimeout(90_000) { completion.await() }
+                    identityState = "REREGISTERED"
+                    identityResult = "Deregistration failed; local identity cleared and registered again"
+                } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
+                    closeResources()
+                    identityState = "FAILED"
+                    identityResult = "Local identity cleared; re-registration timed out"
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (recovery: Exception) {
+                    closeResources()
+                    identityState = "FAILED"
+                    identityResult = "Re-registration failed: ${recovery.message}"
+                }
+            } finally {
+                identityRecovery = null
+                resetInProgress = false
+                remoteBusy = false
+                remoteResult = identityResult
+                refreshVoiceActions()
+            }
+        }
+    }
+
     private fun beginConnection() {
         if (flowStarted || runnerJob?.isActive == true) return
         flowStarted = true
@@ -488,6 +591,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                     onProcessedVideoStatus = ::setProcessedVideoStatus,
                     onFeatureStateChanged = ::setSdkFeatureState,
                     interactivePatrol = true,
+                    failFast = identityRecovery != null,
                     onPatrolStateChanged = ::setPatrolState,
                 )
                 sdk = sdkValue
@@ -496,6 +600,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             } catch (_: CancellationException) {
                 appendLog(LabLogLevel.INFO, "APP", "Agent A 流程已停止")
             } catch (error: Exception) {
+                identityRecovery?.completeExceptionally(error)
                 flowStarted = false
                 val detail = error.message ?: error::class.java.simpleName
                 appendLog(LabLogLevel.ERROR, "APP", "流程异常：$detail；SDK 未自动关闭")
@@ -530,6 +635,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
 
     private fun setManualMessageSession(session: ManualMessageSession?) {
         runOnUiThread {
+            if (messageSession != session) setRuntimeExpelPending(false, "group changed")
             messageSession = session
             renderPatrolHud()
             if (session == null) {
@@ -554,6 +660,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private fun setSdkFeatureState(state: SdkFeatureState) {
+        if (state.agentReady) identityRecovery?.complete(Unit)
         runOnUiThread {
             sdkFeatureState = state
             patrolState = stateToPatrolState(state, patrolState)
@@ -595,7 +702,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             patrolAlert.visibility = if (patrolAlert.text.isNotBlank()) View.VISIBLE else View.GONE
             // Keep the live WebRTC view unobstructed. Show the stage card again
             // when there is no frame yet or the stream has stalled.
-            patrolHud.visibility = if (videoReady && videoPreviewHasFrame && !videoStarved && !videoHidden) {
+            patrolHud.visibility = if (runtimeExpelPending || (videoReady && videoPreviewHasFrame && !videoStarved && !videoHidden)) {
                 View.GONE
             } else {
                 View.VISIBLE
@@ -703,6 +810,28 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         }
     }
 
+    private fun setRuntimeExpelPending(pending: Boolean, reason: String) {
+        val wasPending = runtimeExpelPending
+        expelTimeoutJob?.cancel()
+        expelTimeoutJob = null
+        runtimeExpelPending = pending
+        runtimeExpelExpiresAt = if (pending) android.os.SystemClock.elapsedRealtime() + 30_000 else 0L
+        if (pending || wasPending) {
+            appendLog(LabLogLevel.WARNING, "EXPEL CONFIRM", "pending=$pending reason=$reason")
+        }
+        if (pending) {
+            expelTimeoutJob = lifecycleScope.launch {
+                delay(30_000)
+                expelTimeoutJob = null
+                setRuntimeExpelPending(false, "30 second timeout")
+                remoteResult = "Expel confirmation expired; request again"
+                setStatus("确认结果 / Confirmation result", "确认已过期，请重新说驱逐 / Confirmation expired")
+            }
+        }
+        renderPatrolHud()
+        refreshVoiceActions()
+    }
+
     private fun refreshVoiceActions() {
         renderTopPrompt()
         val directReady = runner != null
@@ -747,7 +876,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             }
             voiceResult.text = when {
                 voiceRecordingMode != null -> "Listening..."
-                voiceActionRunning -> "Recognizing speech..."
+                voiceActionRunning -> sdkFeatureState?.lastTranscription?.takeIf(String::isNotBlank)
+                    ?: "Recognizing speech..."
                 else -> remoteSubtitle ?: sdkFeatureState?.lastTranscription?.takeIf(String::isNotBlank)
                     ?: "Awaiting voice command"
             }
@@ -780,6 +910,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         remoteSubtitle = null
         try {
             voiceRecorder.start()
+            // Keep the confirmation target if it expires during recording or ASR.
+            voiceExpelDeadline = if (mode == VoiceMode.CONFIRMATION && runtimeExpelPending) runtimeExpelExpiresAt else null
             voiceRecordingMode = mode
             appendLog(
                 LabLogLevel.INFO,
@@ -802,6 +934,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
 
     private fun stopAndSubmitVoice(mode: VoiceMode) {
         val activeRunner = runner ?: return
+        val expelDeadline = voiceExpelDeadline
+        voiceExpelDeadline = null
         val recording = try {
             voiceRecorder.stop()
         } catch (error: Exception) {
@@ -838,8 +972,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                         recording.fileName,
                         recording.contentType,
                     ).also {
-                        runtimeExpelPending = activeRunner.runtimeExpelConfirmationRequired
-                        runtimeExpelExpiresAt = android.os.SystemClock.elapsedRealtime() + 30_000
+                        setRuntimeExpelPending(activeRunner.runtimeExpelConfirmationRequired, "voice intent")
                     }
                     VoiceMode.PATROL_COMMAND -> {
                         activeRunner.transcribePatrolCommand(
@@ -856,18 +989,19 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                             recording.fileName,
                             recording.contentType,
                         )
-                        if (runtimeExpelPending) {
+                        if (expelDeadline != null) {
                             when {
-                                android.os.SystemClock.elapsedRealtime() > runtimeExpelExpiresAt -> {
-                                    runtimeExpelPending = false
+                                !runtimeExpelPending || runtimeExpelExpiresAt != expelDeadline ||
+                                    android.os.SystemClock.elapsedRealtime() >= expelDeadline -> {
+                                    setRuntimeExpelPending(false, "expired voice confirmation")
                                     "确认已过期，请重新说驱逐 / Confirmation expired"
                                 }
                                 parsePatrolConfirmation(spoken) == false -> {
-                                    runtimeExpelPending = false
+                                    setRuntimeExpelPending(false, "cancelled by voice")
                                     "已取消驱逐 / Expel cancelled"
                                 }
                                 parsePatrolConfirmation(spoken) == true -> {
-                                    runtimeExpelPending = false
+                                    setRuntimeExpelPending(false, "confirmed by voice")
                                     activeRunner.sendRobotAction(RobotAction.FRONT_POUNCE)
                                     "驱逐指令已送达 / Expel command delivered"
                                 }
@@ -1035,6 +1169,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private fun performAgentReset() {
+        setRuntimeExpelPending(false, "identity reset")
         voiceRecorder.cancel()
         voiceRecordingMode = null
         pendingVoicePermissionMode = null
@@ -1180,6 +1315,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             else -> "Try saying: Send the robot dog to patrol."
         }
         mBindingPair.updateView {
+            expelWarning.visibility = if (runtimeExpelPending) View.VISIBLE else View.GONE
             statusTitle.text = "NEXT · VOICE COMMAND"
             statusDetail.text = prompt
         }
@@ -1299,6 +1435,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
 
     private fun stopAndFinish() {
         if (isFinishing || stopInProgress) return
+        setRuntimeExpelPending(false, "app stopping")
         voiceRecorder.cancel()
         voiceRecordingMode = null
         stopInProgress = true
@@ -1315,6 +1452,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private suspend fun closeResources(deregisterIdentity: Boolean = false) {
+        withContext(Dispatchers.Main) { setRuntimeExpelPending(false, "resources closing") }
         voiceRecorder.cancel()
         voiceRecordingMode = null
         val activeJob = runnerJob
@@ -1362,6 +1500,10 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     override fun onDestroy() {
+        expelTimeoutJob?.cancel()
+        expelTimeoutJob = null
+        runtimeExpelPending = false
+        runtimeExpelExpiresAt = 0L
         remoteServer?.close()
         remoteServer = null
         voiceRecorder.cancel()

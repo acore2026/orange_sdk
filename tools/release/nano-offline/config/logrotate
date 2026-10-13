@@ -1,0 +1,10 @@
+/home/aicor/compute_network/sandbox-demo/.dog-services/logs/*.log /var/lib/orange-video-capture/dog-init-watch.log /tmp/start_dog_services.log {
+    daily
+    maxsize 20M
+    rotate 3
+    missingok
+    notifempty
+    compress
+    copytruncate
+    su root root
+}
