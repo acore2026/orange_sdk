@@ -8,7 +8,9 @@ curl --fail --max-time 5 http://127.0.0.1:8080/health || status=1
 printf '\n'
 curl --fail --max-time 5 http://127.0.0.1:8080/status || status=1
 printf '\n'
-ss -lnt | awk 'NR==1 || /:8080 |:10088 |:18892 /'
+curl --fail --max-time 5 http://127.0.0.1:8081/health || status=1
+printf '\n'
+ss -lnt | awk 'NR==1 || /:8080 |:8081 |:10088 |:18892 /'
 find /dev -maxdepth 1 -name 'video*' -ls
 if [[ -f /home/aicor/compute_network/sandbox-demo/.dog-services/orange-dog.ready ]]; then
   stat /home/aicor/compute_network/sandbox-demo/.dog-services/orange-dog.ready

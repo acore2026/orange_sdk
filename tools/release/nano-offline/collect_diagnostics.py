@@ -85,6 +85,7 @@ def main():
         ('tun',['ls','-l','/dev/net/tun']),
         ('processes',['ps','-eo','pid,ppid,stat,etimes,%cpu,%mem,rss,comm']),
         ('health',['curl','--fail','--max-time','5','http://127.0.0.1:8080/health']),
+        ('agent-health',['curl','--fail','--max-time','5','http://127.0.0.1:8081/health']),
         ('control-status',['curl','--fail','--max-time','5','http://127.0.0.1:8080/status']),
     ]
     print('Collecting local evidence; no motion or service restart.',flush=True)
