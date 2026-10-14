@@ -1698,7 +1698,7 @@ class AgentSdk:
         width: int = 1920,
         height: int = 1080,
         fps: int = 30,
-        bitrate_kbps: int = 4000,
+        bitrate_kbps: int = 0,
         timeout_seconds: float = 120.0,
     ) -> VideoUploadHandle:
         if timeout_seconds < _MIN_API_TIMEOUT_SECONDS:
@@ -1725,10 +1725,10 @@ class AgentSdk:
             ("fps", fps),
             ("bitrate_kbps", bitrate_kbps),
         ):
-            if value <= 0:
+            if value < 0 or (value == 0 and field != "bitrate_kbps"):
                 raise AgentSdkError(
                     ErrorCode.INVALID_ARGUMENT,
-                    f"{field} must be greater than zero",
+                    f"{field} must be positive (bitrate_kbps=0 enables native adaptation)",
                     field=field,
                 )
         lock = self._computing_media_locks.setdefault(

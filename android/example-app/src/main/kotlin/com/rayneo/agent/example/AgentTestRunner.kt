@@ -29,6 +29,8 @@ import com.rayneo.agent.sdk.transport.ProcessedVideoStream
 import com.rayneo.agent.sdk.transport.VideoTrack
 import com.rayneo.agent.sdk.transport.VideoUploadHandle
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
@@ -196,6 +198,7 @@ class AgentTestRunner(
     @Volatile private var patrolIntentResult: IntentRecognitionResult? = null
     @Volatile private var pendingPatrolAgent: DiscoveredAgent? = null
     @Volatile private var pendingPatrolGroupId: String? = null
+    @Volatile private var patrolDispatch: PatrolDispatch? = null
     @Volatile private var lastRobotAction: RobotAction? = null
     private val receivedVideoSinks = mutableListOf<Pair<VideoTrack, VideoSink>>()
 
@@ -439,6 +442,8 @@ class AgentTestRunner(
             // Keep the selected candidate separate from the state until confirmation.
             pendingPatrolAgent = discovered.first { it.agentId == selected.id }
             pendingPatrolGroupId = null
+            patrolDispatch?.close()
+            patrolDispatch = null
             publishPatrolState(listed.state.copy(selectedAgent = null))
             onLog(
                 LabLogLevel.SUCCESS,
@@ -510,25 +515,33 @@ class AgentTestRunner(
         check(selected.accepted) { selected.reason ?: "候选智能体不可用" }
         publishPatrolState(selected.state.copy(failureReason = null))
         val area = patrolState.request?.zoneId ?: recognizedArea ?: "A区域"
+        val dispatch = patrolDispatch ?: PatrolDispatch(groupId, candidate.agentId).also { patrolDispatch = it }
+        check(dispatch.groupId == groupId && dispatch.agentId == candidate.agentId) {
+            "巡逻目标已改变，请重新发起巡逻"
+        }
         // Establish the patrol context on the dog before opening the compute stream.
         // A confirmed patrol starts the dog entry motion independently of video.
         // Without this message the Secure Domain exists but the dog has no task.
         try {
             patrolSetupStep(PatrolSetupStage.DISPATCH) {
-                val patrolReceipt = sdk.sendMessage(
+                if (!dispatch.acceptance.isCompleted) {
+                    val patrolReceipt = sdk.sendMessage(
                     groupId = groupId,
                     targetAgentId = candidate.agentId,
                     jsonMessage = buildJsonObject {
                         put("type", "patrol_request")
                         put("zone", area)
                         put("confirmed", true)
-                        put("task_id", "patrol-$groupId")
+                        put("task_id", dispatch.taskId)
                     },
                     messageType = "patrol_request",
-                    taskId = "patrol-$groupId",
+                    taskId = dispatch.taskId,
                     timeoutSeconds = 20.0,
                 )
-                check(patrolReceipt.delivered) { "机器狗未确认巡检任务" }
+                    check(patrolReceipt.delivered) { "巡检消息未送达；重试将保留同一任务 ID" }
+                }
+                val rejection = withTimeout(20_000) { dispatch.acceptance.await() }
+                check(rejection == null) { rejection.orEmpty() }
             }
         } catch (error: Exception) {
             publishPatrolState(beforeDispatch.copy(failureReason = error.message))
@@ -537,22 +550,30 @@ class AgentTestRunner(
         onLog(
             LabLogLevel.SUCCESS,
             "PATROL DISPATCH",
-            "已向 ${candidate.agentName} 下发巡检任务，zone=$area",
+            "机器狗已接受巡检任务，zone=$area，task_id=${dispatch.taskId}；等待起立与前进结果",
         )
         pendingPatrolAgent = null
         pendingPatrolGroupId = null
-        val inspecting = transitionPatrol(
-            patrolState,
-            PatrolEvent.NavigationStarted,
-        )
-        publishPatrolState(
-            if (inspecting.accepted) inspecting.state else patrolState.copy(phase = PatrolPhase.INSPECTING),
-        )
-        onStatus(RunnerStatus("机器狗已派遣", "Secure Domain=$groupId · 正在巡逻 $area"))
-        // A is the consumer.  The SDK handles C-01/C-02, routes, SDP and the processed stream.
-        if (config.role == TestRole.A && processedVideoStream == null) {
-            onComputeActionAvailability(false)
-            patrolSetupStep(PatrolSetupStage.VIDEO) { createAndReceiveProcessedVideo() }
+        onStatus(RunnerStatus("机器狗已接受任务", "正在起立与前进，等待动作结果 · $area"))
+        // Video setup remains concurrent with entry motion. A delivered message or
+        // a connected video alone must not announce a completed patrol entry.
+        supervisorScope {
+            val video = async {
+                if (config.role == TestRole.A && processedVideoStream == null) {
+                    onComputeActionAvailability(false)
+                    patrolSetupStep(PatrolSetupStage.VIDEO) { createAndReceiveProcessedVideo() }
+                }
+            }
+            try {
+                patrolSetupStep(PatrolSetupStage.ENTRY) {
+                    val failure = withTimeout(60_000) { dispatch.entryCompletion.await() }
+                    check(failure == null) { failure.orEmpty() }
+                }
+                publishPatrolState(patrolState.copy(phase = PatrolPhase.INSPECTING))
+                video.await()
+            } finally {
+                video.cancel()
+            }
         }
         publishPatrolState(patrolState.copy(phase = PatrolPhase.INSPECTING))
         onStatus(RunnerStatus("巡逻进行中", "实时视频与危险识别通道已建立 · $area"))
@@ -563,6 +584,8 @@ class AgentTestRunner(
         ensureResetNotRequested()
         pendingPatrolAgent = null
         pendingPatrolGroupId = null
+        patrolDispatch?.close()
+        patrolDispatch = null
         publishPatrolState(PatrolState(phase = PatrolPhase.LISTENING))
         onStatus(RunnerStatus("已取消派遣", "可以重新说出园区巡检指令"))
     }
@@ -605,7 +628,7 @@ class AgentTestRunner(
                 put("confirmed", true)
                 put("zone", area)
                 put("risk", risk)
-                put("task_id", "patrol-${route.groupId}")
+                put("task_id", patrolDispatch?.taskId ?: "manual-$commandId")
             },
             messageType = "robot_action",
             taskId = "patrol-action-${UUID.randomUUID()}",
@@ -693,6 +716,8 @@ class AgentTestRunner(
         pendingPatrolAgent = null
         patrolIntentResult = null
         pendingPatrolGroupId = null
+        patrolDispatch?.close()
+        patrolDispatch = null
         patrolState = PatrolState()
         lastRobotAction = null
         onPatrolStateChanged(patrolState)
@@ -1219,7 +1244,15 @@ class AgentTestRunner(
                 )
                 val event = payload["type"]?.jsonPrimitive?.contentOrNull
                 val route = manualMessageSession
-                if (event in setOf("dog_action_failed", "dog_motion_failed", "command_rejected",
+                if (patrolDispatch?.receive(groupId, senderAgentId, payload) == true) {
+                    // The dispatch coroutine evaluates the correlated business acknowledgement.
+                    // Never turn a duplicate/rejected reply into a generic success banner.
+                    onLog(LabLogLevel.INFO, "PATROL ACK", "task_id=${patrolDispatch?.taskId} event=$event")
+                } else if (event in setOf("patrol_accepted", "patrol_rejected", "patrol_confirmation_required") ||
+                    (payload["command"]?.jsonPrimitive?.contentOrNull == "patrol_forward" &&
+                        event in setOf("dog_motion_completed", "dog_motion_failed"))) {
+                    onLog(LabLogLevel.WARNING, "PATROL ACK", "忽略不属于当前任务的回执")
+                } else if (event in setOf("dog_action_failed", "dog_motion_failed", "command_rejected",
                         "command_confirmation_required", "dog_action_completed", "dog_motion_completed") &&
                     route?.groupId == groupId && route.targetAgentId == senderAgentId) {
                     val failed = event in setOf("dog_action_failed", "dog_motion_failed", "command_rejected")

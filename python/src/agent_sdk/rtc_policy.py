@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import time
 from types import MethodType
@@ -21,8 +22,8 @@ LOGGER = logging.getLogger(__name__)
 CONSENT_RESPONSE_TIMEOUT = 15.0
 CONSENT_INTERVAL = 5.0
 CONSENT_EXPIRY = 30.0
-VIDEO_BITRATE_BPS = 250_000
-VIDEO_WIRE_BITRATE_BPS = 1_000_000
+VIDEO_BITRATE_BPS = 0
+VIDEO_WIRE_BITRATE_BPS = 0
 
 
 class _ConsentTransaction(stun.Transaction):
@@ -239,8 +240,17 @@ class _BoundedEncoder:
 
 
 def limit_sender_bitrate(sender: Any, maximum: int = VIDEO_BITRATE_BPS,
-                         *, wire_bitrate: int = VIDEO_WIRE_BITRATE_BPS) -> None:
+                         *, wire_bitrate: int | None = None) -> None:
     """Enforce the encoder cap even when receiver REMB asks for more bandwidth."""
+    if wire_bitrate is None:
+        wire_bitrate = int(os.getenv("AGENT_VIDEO_WIRE_BITRATE_BPS", str(VIDEO_WIRE_BITRATE_BPS)))
+    if wire_bitrate < 0:
+        raise ValueError("AGENT_VIDEO_WIRE_BITRATE_BPS must be non-negative")
+    if maximum == 0:
+        if wire_bitrate:
+            pace_video_transport(sender.transport, wire_bitrate)
+        LOGGER.info("rtc_native_encoder custom_encoder_cap=off custom_pacing_bps=%s", wire_bitrate)
+        return
     if maximum < 250_000:
         raise ValueError("aiortc video requires at least 250000 bits/s")
     if getattr(sender, "_video_bitrate_limit", None) == maximum:
@@ -260,7 +270,8 @@ def limit_sender_bitrate(sender: Any, maximum: int = VIDEO_BITRATE_BPS,
 
     sender._next_encoded_frame = MethodType(next_frame, sender)
     sender._video_bitrate_limit = maximum
-    pace_video_transport(sender.transport, wire_bitrate)
+    if wire_bitrate:
+        pace_video_transport(sender.transport, wire_bitrate)
     LOGGER.info("rtc_encoder_bitrate_limit bits_per_second=%s", maximum)
 
 

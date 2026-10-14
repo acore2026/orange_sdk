@@ -576,9 +576,10 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         // initialize then performs a synchronous JNI CONNECT-IP handshake. Keep the complete
         // sequence off the main thread so a slow or unreachable MASQUE endpoint cannot freeze
         // the glasses UI.
+        val sharedVideoContext = videoEglBase?.eglBaseContext
         runnerJob = lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val sdkValue = AgentSdk.create(service)
+                val sdkValue = AgentSdk.create(service, sharedVideoEglContext = sharedVideoContext)
                 val flow = AgentTestRunner(
                     sdk = sdkValue,
                     config = config,

@@ -51,3 +51,7 @@ wsl -d Ubuntu --cd /home/huawei/orange python3 sdk/tools/set_core_address.py gla
 - `/home/aicor/compute_network/sandbox-demo/start_dog_services.sh`：加载同一环境文件，兼容原入口使用 `runuser` 的情况。
 
 修改配置前保留 `.before-core-时间戳` 备份，并检查 shell 语法。机器狗启动脚本必须来自当前源码版本；工具只更新环境配置，不修改启动脚本源码，也不会创建额外后台服务。眼镜设置保存在应用 SharedPreferences，更新安装保留，卸载清数据后恢复编译默认值。
+
+## 离线视频质量基线
+
+见 [VIDEO_BENCHMARK.md](VIDEO_BENCHMARK.md)，工具 `video_benchmark.py` 和候选档 `video-profiles.json`。无需机器狗或眼镜，编码参数与发包预算分开比较。

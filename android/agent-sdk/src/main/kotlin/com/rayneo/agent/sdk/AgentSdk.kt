@@ -3847,6 +3847,8 @@ class AgentSdk internal constructor(
             vpnService: AgentVpnService,
             peerMessenger: PeerMessenger = OkHttpPeerMessenger(),
             localServerFactory: () -> LocalServer = { TcpJsonLocalServer() },
+            // Caller owns the root and must release it only after SDK close completes.
+            sharedVideoEglContext: org.webrtc.EglBase.Context? = null,
         ): AgentSdk {
             val security = vpnService.resources.openRawResource(
                 R.raw.core_network_public_key
@@ -3871,7 +3873,7 @@ class AgentSdk internal constructor(
                 agentStateStore = FileAgentStateStore(
                     File(vpnService.noBackupFilesDir, "agent-sdk/agents")
                 ),
-                mediaOffloadAdapter = AndroidWebRtcMediaAdapter(vpnService),
+                mediaOffloadAdapter = AndroidWebRtcMediaAdapter(vpnService, sharedVideoEglContext),
                 peerMessenger = peerMessenger,
                 localServerFactory = localServerFactory,
             )

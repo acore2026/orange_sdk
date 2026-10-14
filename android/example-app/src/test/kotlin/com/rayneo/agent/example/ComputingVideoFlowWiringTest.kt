@@ -42,7 +42,7 @@ class ComputingVideoFlowWiringTest {
         val runner = runnerSource()
 
         assertTrue(generic.contains("AgentSdk.create(service)"))
-        assertTrue(rayneo.contains("AgentSdk.create(service)"))
+        assertTrue(rayneo.contains("AgentSdk.create(service, sharedVideoEglContext = sharedVideoContext)"))
         assertFalse(generic.contains("mediaOffloadAdapter"))
         assertFalse(rayneo.contains("mediaOffloadAdapter"))
         assertTrue(runner.contains("sdk.releaseComputingSession("))

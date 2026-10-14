@@ -43,9 +43,12 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /** Android WebRTC implementation used internally by AgentSdk media APIs. */
-internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter {
+internal class AndroidWebRtcMediaAdapter(
+    context: Context,
+    private val sharedVideoEglContext: EglBase.Context? = null,
+) : MediaOffloadAdapter {
     private val appContext = context.applicationContext
-    private val eglDelegate = lazy(LazyThreadSafetyMode.SYNCHRONIZED) { EglBase.create() }
+    private val eglDelegate = lazy(LazyThreadSafetyMode.SYNCHRONIZED) { EglBase.create(sharedVideoEglContext) }
     private val egl: EglBase by eglDelegate
     private val peers = CopyOnWriteArraySet<PeerConnection>()
     private val closed = AtomicBoolean(false)
@@ -78,9 +81,11 @@ internal class AndroidWebRtcMediaAdapter(context: Context) : MediaOffloadAdapter
             .setVideoEncoderFactory(
                 DefaultVideoEncoderFactory(egl.eglBaseContext, true, true),
             )
-            // Byte-buffer decoder output can be consumed by an App renderer without
-            // requiring the App to share the SDK's private EGL context.
-            .setVideoDecoderFactory(DefaultVideoDecoderFactory(null))
+            // Texture output is safe only when the App renderer shares this EGL group.
+            // Keep byte-buffer compatibility for callers without a shared context.
+            .setVideoDecoderFactory(DefaultVideoDecoderFactory(
+                if (sharedVideoEglContext != null) egl.eglBaseContext else null,
+            ))
             .createPeerConnectionFactory()
     }
 

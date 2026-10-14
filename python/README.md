@@ -1277,3 +1277,7 @@ ss -lunp | grep <MASQUE端口>
 python -m pip install -e '.[test]'
 pytest -q
 ```
+
+视频发包限速可通过 `AGENT_VIDEO_WIRE_BITRATE_BPS` 配置（默认 0，关闭自定义限速）；上传 API 的 `bitrate_kbps` 仍控制编码码率。这两个参数独立，配置仅对新建发送流生效。离线质量对比与候选配置见 `../tools/VIDEO_BENCHMARK.md`。
+
+当前正式默认：Python 上传 bitrate_kbps=0，不安装应用编码限幅、不写 SDP b=AS；两段 pacing 默认 0，不安装自定义发包限速。保留 WebRTC 拥塞控制和编码器固有边界。无需演示时调参；部署时若已有正数环境覆盖，须清理或设为 0。

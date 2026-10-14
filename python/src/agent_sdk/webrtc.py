@@ -425,7 +425,7 @@ class AiortcMediaOffloadAdapter:
             from aiortc import RTCSessionDescription
 
             offer = RTCSessionDescription(
-                sdp=_set_video_bandwidth(offer.sdp, bitrate_kbps), type="offer"
+                sdp=_set_video_bandwidth(offer.sdp, bitrate_kbps) if bitrate_kbps else offer.sdp, type="offer"
             )
             await pc.setLocalDescription(offer)
             local = pc.localDescription

@@ -1,0 +1,44 @@
+{
+  "application": "Candidate profiles only; apply to environment of new service processes, not to running peers",
+  "baseline": {
+    "dog": {
+      "DOG_AGENT_VIDEO_BITRATE_KBPS": "250",
+      "AGENT_VIDEO_WIRE_BITRATE_BPS": "1000000"
+    },
+    "sandbox": {
+      "VIDEO_BITRATE_BPS": "250000",
+      "VIDEO_WIRE_BITRATE_BPS": "1000000"
+    }
+  },
+  "quality_500": {
+    "dog": {
+      "DOG_AGENT_VIDEO_BITRATE_KBPS": "500",
+      "AGENT_VIDEO_WIRE_BITRATE_BPS": "2000000"
+    },
+    "sandbox": {
+      "VIDEO_BITRATE_BPS": "500000",
+      "VIDEO_WIRE_BITRATE_BPS": "2000000"
+    }
+  },
+  "quality_750": {
+    "dog": {
+      "DOG_AGENT_VIDEO_BITRATE_KBPS": "750",
+      "AGENT_VIDEO_WIRE_BITRATE_BPS": "3000000"
+    },
+    "sandbox": {
+      "VIDEO_BITRATE_BPS": "750000",
+      "VIDEO_WIRE_BITRATE_BPS": "3000000"
+    }
+  },
+  "default": "native",
+  "native": {
+    "dog": {
+      "DOG_AGENT_VIDEO_BITRATE_KBPS": "0",
+      "AGENT_VIDEO_WIRE_BITRATE_BPS": "0"
+    },
+    "sandbox": {
+      "VIDEO_BITRATE_BPS": "0",
+      "VIDEO_WIRE_BITRATE_BPS": "0"
+    }
+  }
+}
