@@ -43,6 +43,8 @@ class GroupConfigSnapshot:
     notification_timestamp: datetime
     members_by_agent_id: Mapping[str, GroupMemberInfo]
     generation: int = 0
+    group_version: int = 0
+    business_content: str = ""
 
     @classmethod
     def immutable(
@@ -53,6 +55,8 @@ class GroupConfigSnapshot:
         notification_timestamp: datetime,
         members: dict[str, GroupMemberInfo],
         generation: int = 0,
+        group_version: int = 0,
+        business_content: str = "",
     ) -> "GroupConfigSnapshot":
         return cls(
             group_id=group_id,
@@ -60,6 +64,8 @@ class GroupConfigSnapshot:
             notification_timestamp=notification_timestamp,
             members_by_agent_id=MappingProxyType(dict(members)),
             generation=generation,
+            group_version=group_version,
+            business_content=business_content,
         )
 
 

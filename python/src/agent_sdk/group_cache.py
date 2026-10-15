@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from datetime import datetime, timezone
 from ipaddress import ip_address
@@ -86,6 +87,7 @@ class GroupMemberCache:
     def __init__(self, route_manager: GroupRouteManager) -> None:
         self._route_manager = route_manager
         self._snapshots: dict[str, GroupConfigSnapshot] = {}
+        self._invalidated: set[str] = set()
         self._lock = asyncio.Lock()
 
     @staticmethod
@@ -126,6 +128,10 @@ class GroupMemberCache:
             )
 
         group_id = _require_string(payload.get("group_id"), "group_id")
+        group_version = payload.get("group_version")
+        if type(group_version) is not int or not 1 <= group_version <= 2**64 - 1:
+            raise AgentSdkError(ErrorCode.GROUP_CONFIG_INVALID,
+                                "group_version must be a positive uint64", field="group_version")
         target_agent_id = payload.get("target_agent_id")
         if target_agent_id is not None and _require_string(
             target_agent_id, "target_agent_id"
@@ -231,29 +237,34 @@ class GroupMemberCache:
             version=version,
             notification_timestamp=timestamp,
             members=members,
+            group_version=group_version,
+            business_content=json.dumps(
+                {key: value for key, value in payload.items()
+                 if key not in {"timestamp", "proof", "target_agent_id"}},
+                sort_keys=True, separators=(",", ":"), ensure_ascii=False),
         )
 
     async def commit(
         self, candidate: GroupConfigSnapshot, *, local_agent_id: str
     ) -> bool:
         async with self._lock:
+            if candidate.group_id in self._invalidated:
+                raise AgentSdkError(ErrorCode.GROUP_NOT_ACTIVE, "group has been invalidated")
             current = self._snapshots.get(candidate.group_id)
             if current is not None:
-                if candidate.notification_timestamp < current.notification_timestamp:
+                if candidate.group_version < current.group_version:
                     raise AgentSdkError(
                         ErrorCode.GROUP_CONFIG_STALE,
                         "group config is older than the committed snapshot",
                     )
-                if candidate.notification_timestamp == current.notification_timestamp:
+                if candidate.group_version == current.group_version:
                     if (
-                        candidate.version == current.version
-                        and dict(candidate.members_by_agent_id)
-                        == dict(current.members_by_agent_id)
+                        candidate.business_content == current.business_content
                     ):
                         return False
                     raise AgentSdkError(
                         ErrorCode.GROUP_CONFIG_STALE,
-                        "group config conflicts with the committed snapshot at the same timestamp",
+                        "group config conflicts with the committed snapshot at the same group_version",
                     )
             generation = 1 if current is None else current.generation + 1
             committed = GroupConfigSnapshot.immutable(
@@ -262,6 +273,8 @@ class GroupMemberCache:
                 notification_timestamp=candidate.notification_timestamp,
                 members=dict(candidate.members_by_agent_id),
                 generation=generation,
+                group_version=candidate.group_version,
+                business_content=candidate.business_content,
             )
             peers = {
                 member.agent_ip
@@ -296,6 +309,28 @@ class GroupMemberCache:
         async with self._lock:
             await self._route_manager.replace_group_peers(group_id, set())
             self._snapshots.pop(group_id, None)
+
+    async def invalidate(self, payload: Mapping[str, Any], *, local_agent_id: str) -> str:
+        if (payload.get("notification_type") != "acf_group_invalidated"
+                or payload.get("target_agent_id") != local_agent_id
+                or "members" in payload
+                or payload.get("reason") not in {"configuration_failed", "network_outcome_unknown",
+                                                "member_binding_invalidated", "cleanup_started"}):
+            raise AgentSdkError(ErrorCode.GROUP_CONFIG_INVALID, "invalid group invalidation notification")
+        version = _require_string(payload.get("version"), "version")
+        if SEMANTIC_VERSION.fullmatch(version) is None or not version.startswith("1."):
+            raise AgentSdkError(ErrorCode.GROUP_CONFIG_VERSION_UNSUPPORTED, "unsupported invalidation format")
+        _parse_timestamp(payload.get("timestamp"))
+        revision = payload.get("group_version")
+        if type(revision) is not int or not 1 <= revision <= 2**64 - 1:
+            raise AgentSdkError(ErrorCode.GROUP_CONFIG_INVALID, "group_version must be a positive uint64")
+        group_id = _require_string(payload.get("group_id"), "group_id")
+        async with self._lock:
+            # Mark first: a route removal failure must never authorize the old group.
+            self._invalidated.add(group_id)
+            self._snapshots.pop(group_id, None)
+            await self._route_manager.replace_group_peers(group_id, set())
+        return group_id
 
     async def close(self) -> None:
         async with self._lock:

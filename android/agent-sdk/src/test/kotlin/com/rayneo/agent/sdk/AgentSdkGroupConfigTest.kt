@@ -215,7 +215,7 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
-    fun `newer identical group config commits and notifies listener`() = runTest {
+    fun `newer timestamp same group version acknowledges without side effects`() = runTest {
         initializeSdk()
         var listenerCalls = 0
         sdk.registerNetworkMessageListener(NetworkMessageListener { _, _ ->
@@ -230,9 +230,9 @@ class AgentSdkGroupConfigTest {
         )
 
         assertEquals(NetworkMessageAction.ACK, action)
-        assertEquals(2, listenerCalls)
-        assertEquals(2, tunnel.replacements.size)
-        assertEquals(2L, sdk.getGroupSnapshot("g1")!!.generation)
+        assertEquals(1, listenerCalls)
+        assertEquals(1, tunnel.replacements.size)
+        assertEquals(1L, sdk.getGroupSnapshot("g1")!!.generation)
     }
 
     @Test
@@ -1672,14 +1672,37 @@ class AgentSdkGroupConfigTest {
         put("cause", "released")
     }
 
+    @Test
+    fun `dynamic configuration version and invalidation reject late snapshots`() = runTest {
+        initializeSdk()
+        val original = groupConfig()
+        runtime.deliverGroupConfig(original)
+        runtime.deliverGroupConfig(groupConfig(peerIp = "8.8.8.9", groupVersion = 2))
+        assertEquals(2uL, sdk.getGroupSnapshot("g1")!!.groupVersion)
+        assertTrue(runCatching { runtime.deliverGroupConfig(original) }.isFailure)
+        val invalidation = buildJsonObject {
+            original.filterKeys { it != "members" }.forEach { (key, value) -> put(key, value) }
+            put("notification_type", "acf_group_invalidated")
+            put("target_agent_id", LOCAL_ID)
+            put("group_version", 2)
+            put("reason", "configuration_failed")
+        }
+        assertEquals(NetworkMessageAction.ACK, runtime.deliverGroupConfig(invalidation))
+        assertEquals(null, sdk.getGroupSnapshot("g1"))
+        assertEquals(NetworkMessageAction.ACK, runtime.deliverGroupConfig(invalidation))
+        assertTrue(runCatching { runtime.deliverGroupConfig(groupConfig(groupVersion = 3)) }.isFailure)
+    }
+
     private fun groupConfig(
         peerPort: String = "4001",
         includeSecondPeer: Boolean = false,
         timestamp: Instant = Instant.now(),
         peerIp: String = "8.8.8.8",
         peerSupi: String? = "imsi-001010000000002",
+        groupVersion: Long = 1,
     ): JsonObject = buildJsonObject {
         put("notification_type", "acf_group_config")
+        put("group_version", groupVersion)
         put("version", "1.0.0")
         put("timestamp", timestamp.toString())
         put("group_id", "g1")

@@ -24,6 +24,7 @@ data class GroupConfigWire(
     val timestamp: String,
     @SerialName("target_agent_id") val targetAgentId: String? = null,
     @SerialName("group_id") val groupId: String,
+    @SerialName("group_version") val groupVersion: ULong,
     val members: Map<String, GroupMemberWire>,
     val proof: JsonObject,
 )
@@ -48,6 +49,8 @@ data class GroupConfigSnapshot(
     val notificationTimestamp: Instant,
     val membersByAgentId: Map<String, GroupMemberInfo>,
     val generation: Long,
+    val groupVersion: ULong = 0u,
+    val businessContent: JsonObject = JsonObject(emptyMap()),
 )
 
 data class SdkInitResult(

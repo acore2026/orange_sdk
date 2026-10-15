@@ -407,6 +407,12 @@ class AgentSdk internal constructor(
             ErrorCode.SDK_NOT_INITIALIZED,
             "Group cache is unavailable",
         )
+        if (payload["notification_type"]?.jsonPrimitive?.contentOrNull == "acf_group_invalidated") {
+            val groupId = cache.invalidate(payload, localProfile.agentId)
+            synchronized(groups) { groups[groupId]?.status = "INACTIVE" }
+            try { networkListener?.onNetworkMessage(NetworkMessageType.GROUP_CONFIG, payload) } catch (_: Exception) { }
+            return NetworkMessageAction.ACK
+        }
         val candidate = cache.buildCandidate(
             payload,
             localAgentId = localProfile.agentId,
@@ -1009,7 +1015,7 @@ class AgentSdk internal constructor(
             put("agent_id", agentId)
             put("target_agents", buildJsonArray { targetAgentIds.forEach { add(JsonPrimitive(it)) } })
             put("group_config", buildJsonObject {
-                put("group_name", groupName)
+                put("group_name", groupName.trim())
                 put("scope", scope)
                 put("max_members", maxMembers)
                 put("dnn", dnn)

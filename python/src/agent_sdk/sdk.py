@@ -887,6 +887,17 @@ class AgentSdk:
             return NetworkMessageAction.REJECT
         assert self._groups is not None and self._config is not None
         await self._proof_verifier.verify_group_config(payload)
+        if payload.get("notification_type") == "acf_group_invalidated":
+            group_id = await self._groups.invalidate(payload, local_agent_id=self._profile.agent_id)
+            info = self._group_info.get(group_id)
+            if info is not None:
+                info.status = "INACTIVE"
+            if self._network_listener is not None:
+                try:
+                    await self._network_listener.on_network_message(NetworkMessageType.GROUP_CONFIG, payload)
+                except Exception:
+                    self._log(logging.ERROR, "listener_error", exc_info=True, group_id=group_id)
+            return NetworkMessageAction.ACK
         candidate = self._groups.build_candidate(
             payload,
             local_agent_id=self._profile.agent_id,
@@ -1569,7 +1580,7 @@ class AgentSdk:
                 "agent_id": agent_id,
                 "target_agents": list(target_agent_ids),
                 "group_config": {
-                    "group_name": group_name,
+                    "group_name": group_name.strip(),
                     "scope": scope,
                     "max_members": max_members,
                     "dnn": dnn,

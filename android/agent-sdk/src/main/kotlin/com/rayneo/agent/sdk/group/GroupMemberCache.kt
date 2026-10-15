@@ -11,6 +11,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import java.net.InetAddress
 import java.net.URI
 import java.time.Instant
@@ -22,6 +24,7 @@ class GroupMemberCache(
 ) {
     private val mutex = Mutex()
     private val snapshots = mutableMapOf<String, GroupConfigSnapshot>()
+    private val invalidated = mutableSetOf<String>()
 
     fun buildCandidate(
         payload: JsonObject,
@@ -81,6 +84,9 @@ class GroupMemberCache(
                 ErrorCode.GROUP_CONFIG_INVALID,
                 "group_id and members are required",
             )
+        }
+        if (wire.groupVersion == 0uL) {
+            throw AgentSdkException(ErrorCode.GROUP_CONFIG_INVALID, "group_version must be positive", "group_version")
         }
         if (wire.targetAgentId != null && wire.targetAgentId != localAgentId) {
             throw AgentSdkException(
@@ -160,6 +166,8 @@ class GroupMemberCache(
             notificationTimestamp = timestamp,
             membersByAgentId = Collections.unmodifiableMap(LinkedHashMap(byId)),
             generation = 0,
+            groupVersion = wire.groupVersion,
+            businessContent = JsonObject(payload.filterKeys { it !in setOf("timestamp", "proof", "target_agent_id") }),
         )
     }
 
@@ -167,24 +175,26 @@ class GroupMemberCache(
         candidate: GroupConfigSnapshot,
         localAgentId: String,
     ): Boolean = mutex.withLock {
+        if (candidate.groupId in invalidated) {
+            throw AgentSdkException(ErrorCode.GROUP_NOT_ACTIVE, "Group has been invalidated")
+        }
         val current = snapshots[candidate.groupId]
         if (current != null) {
-            if (candidate.notificationTimestamp.isBefore(current.notificationTimestamp)) {
+            if (candidate.groupVersion < current.groupVersion) {
                 throw AgentSdkException(
                     ErrorCode.GROUP_CONFIG_STALE,
                     "Group config is older than the committed snapshot",
                 )
             }
-            if (candidate.notificationTimestamp == current.notificationTimestamp) {
+            if (candidate.groupVersion == current.groupVersion) {
                 if (
-                    candidate.version == current.version &&
-                    candidate.membersByAgentId == current.membersByAgentId
+                    candidate.businessContent == current.businessContent
                 ) {
                     return@withLock false
                 }
                 throw AgentSdkException(
                     ErrorCode.GROUP_CONFIG_STALE,
-                    "Group config conflicts with the committed snapshot at the same timestamp",
+                    "Group config conflicts with the committed snapshot at the same group_version",
                 )
             }
         }
@@ -212,6 +222,29 @@ class GroupMemberCache(
 
     suspend fun snapshot(groupId: String): GroupConfigSnapshot? = mutex.withLock {
         snapshots[groupId]
+    }
+
+    suspend fun invalidate(payload: JsonObject, localAgentId: String): String {
+        fun text(key: String): String? = payload[key]?.jsonPrimitive?.contentOrNull
+        val groupId = text("group_id")
+        val version = text("version") ?: ""
+        if (text("notification_type") != "acf_group_invalidated" ||
+            text("target_agent_id") != localAgentId || groupId.isNullOrBlank() ||
+            "members" in payload || !SEMANTIC_VERSION.matches(version) || !version.startsWith("1.") ||
+            text("group_version")?.toULongOrNull()?.let { it > 0uL } != true ||
+            text("reason") !in setOf("configuration_failed", "network_outcome_unknown", "member_binding_invalidated", "cleanup_started")
+        ) {
+            throw AgentSdkException(ErrorCode.GROUP_CONFIG_INVALID, "Invalid group invalidation notification")
+        }
+        try { Instant.parse(text("timestamp")) } catch (error: Exception) {
+            throw AgentSdkException(ErrorCode.GROUP_CONFIG_INVALID, "Invalid invalidation timestamp", cause = error)
+        }
+        mutex.withLock {
+            invalidated.add(groupId)
+            snapshots.remove(groupId)
+            tunnelController.replaceGroupPeers(groupId, emptySet())
+        }
+        return groupId
     }
 
     suspend fun close() = mutex.withLock {

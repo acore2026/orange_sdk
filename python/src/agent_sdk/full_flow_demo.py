@@ -132,6 +132,7 @@ class DemoRuntime:
             49,
             {
                 "notification_type": "acf_group_config",
+                "group_version": 1,
                 "version": "1.0.0",
                 "timestamp": _now(),
                 "group_id": "g-demo",

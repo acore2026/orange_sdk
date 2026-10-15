@@ -54,7 +54,7 @@ async def test_identical_group_config_replay_acks_without_side_effects(sdk_fixtu
     assert backend.operations == operations
 
 
-async def test_newer_identical_group_config_commits_and_notifies(sdk_fixture):
+async def test_newer_timestamp_same_version_acks_without_side_effects(sdk_fixture):
     sdk = sdk_fixture["sdk"]
     runtime = sdk_fixture["runtime"]
     backend = sdk_fixture["backend"]
@@ -71,8 +71,8 @@ async def test_newer_identical_group_config_commits_and_notifies(sdk_fixture):
     snapshot = await sdk.get_group_snapshot("g1")
     assert action is NetworkMessageAction.ACK
     assert snapshot is not None
-    assert snapshot.generation == 2
-    assert len(listener.messages) == 2
+    assert snapshot.generation == 1
+    assert len(listener.messages) == 1
     assert backend.operations == operations
 
 
@@ -227,6 +227,57 @@ async def test_group_config_requires_semantic_version(sdk_fixture):
         await runtime.deliver_group_config(payload)
 
     assert exc.value.code is ErrorCode.GROUP_CONFIG_INVALID
+
+
+async def test_dynamic_version_replaces_members_and_rejects_late_configuration(sdk_fixture):
+    runtime = sdk_fixture["runtime"]
+    sdk = sdk_fixture["sdk"]
+    original = group_payload()
+    await runtime.deliver_group_config(original)
+    updated = group_payload(peer_ip="8.8.8.9")
+    updated["group_version"] = 2
+    assert await runtime.deliver_group_config(updated) is NetworkMessageAction.ACK
+    snapshot = await sdk.get_group_snapshot("g1")
+    assert snapshot.group_version == 2
+    assert snapshot.members_by_agent_id[PEER_ID].agent_ip == "8.8.8.9"
+    with pytest.raises(AgentSdkError) as exc:
+        await runtime.deliver_group_config(original)
+    assert exc.value.code is ErrorCode.GROUP_CONFIG_STALE
+
+
+async def test_invalidation_removes_only_own_routes_and_tombstones_group(sdk_fixture):
+    runtime = sdk_fixture["runtime"]
+    sdk = sdk_fixture["sdk"]
+    backend = sdk_fixture["backend"]
+    original = group_payload()
+    await runtime.deliver_group_config(original)
+    other = group_payload()
+    other["group_id"] = "other"
+    await runtime.deliver_group_config(other)
+    invalidation = {key: value for key, value in original.items() if key != "members"}
+    invalidation.update(notification_type="acf_group_invalidated",
+                        target_agent_id="did:example:agent-a", reason="configuration_failed")
+    assert await runtime.deliver_group_config(invalidation) is NetworkMessageAction.ACK
+    assert await sdk.get_group_snapshot("g1") is None
+    assert await sdk.get_group_snapshot("other") is not None
+    assert "8.8.8.8/32" in backend.routes
+    assert await runtime.deliver_group_config(invalidation) is NetworkMessageAction.ACK
+    with pytest.raises(AgentSdkError) as exc:
+        await runtime.deliver_group_config(original)
+    assert exc.value.code is ErrorCode.GROUP_NOT_ACTIVE
+
+
+async def test_invalidation_wrong_target_keeps_configuration(sdk_fixture):
+    runtime = sdk_fixture["runtime"]
+    sdk = sdk_fixture["sdk"]
+    original = group_payload()
+    await runtime.deliver_group_config(original)
+    invalidation = {key: value for key, value in original.items() if key != "members"}
+    invalidation.update(notification_type="acf_group_invalidated",
+                        target_agent_id=PEER_ID, reason="configuration_failed")
+    with pytest.raises(AgentSdkError):
+        await runtime.deliver_group_config(invalidation)
+    assert await sdk.get_group_snapshot("g1") is not None
 
 
 async def test_send_message_uses_only_cached_tcp_endpoint(sdk_fixture):
