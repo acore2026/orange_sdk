@@ -417,6 +417,7 @@ def group_payload(
     timestamp = timestamp or datetime.now(timezone.utc)
     return {
         "notification_type": "acf_group_config",
+        "group_version": 1,
         "version": "1.0.0",
         "timestamp": timestamp.isoformat().replace("+00:00", "Z"),
         "group_id": "g1",

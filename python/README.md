@@ -2,7 +2,7 @@
 
 `agent-connect-sdk` 为 Linux 端 Agent 提供统一的控制面和数据面能力：应用只需要调用 SDK 函数，不需要感知对端 IP、TCP 端口、TUN 路由或 MASQUE 封装细节。
 
-SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_group_config` 后，会自动缓存 `group_id + agent_id -> agent_ip + service_endpoints + skills`，并自动维护对端 `/32` 或 `/128` 主机路由。相同时间戳且规范化配置相同的重复通知会直接 ACK，不重复写路由或通知应用；时间戳更新的通知正常提交并通知应用。应用发送时提供群组、目标 Agent、消息类型、任务 ID 和业务 JSON，不传 URL、IP、端口或路由。
+SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_group_config` 后，会自动缓存 `group_id + agent_id -> agent_ip + service_endpoints + skills`，并自动维护对端 `/32` 或 `/128` 主机路由。组配置必须包含正 uint64 整数 group_version。版本相同且规范化业务配置相同的重复通知不重复写路由；若上次应用回调失败，则重试回调成功后才 ACK。更高版本正常提交并通知应用，更低版本或同版本不同内容被拒绝；仅更新时间戳不构成新版本。应用发送时提供群组、目标 Agent、消息类型、任务 ID 和业务 JSON，不传 URL、IP、端口或路由。
 
 ## 1. 交付物和运行要求
 
@@ -1281,3 +1281,26 @@ pytest -q
 视频发包限速可通过 `AGENT_VIDEO_WIRE_BITRATE_BPS` 配置（默认 0，关闭自定义限速）；上传 API 的 `bitrate_kbps` 仍控制编码码率。这两个参数独立，配置仅对新建发送流生效。离线质量对比与候选配置见 `../tools/VIDEO_BENCHMARK.md`。
 
 当前正式默认：Python 上传 bitrate_kbps=0，不安装应用编码限幅、不写 SDP b=AS；两段 pacing 默认 0，不安装自定义发包限速。保留 WebRTC 拥塞控制和编码器固有边界。无需演示时调参；部署时若已有正数环境覆盖，须清理或设为 0。
+
+
+## 群组 HTTP 集成与失效处理（Python）
+
+应用可通过 register_group_message_listener(listener) 注册实现
+async def on_group_envelope(self, envelope) 的 GroupEnvelopeListener。
+SDK 会等待回调完成才确认本条 A2A 消息。完整信封包含 message_id、
+group_id、src_agent_id、dst_agent_id、type、task_id、timestamp、payload。
+应用可在此回调内等待业务 HTTP POST；非成功响应应抛出异常，避免提前确认。
+失败消息移出去重缓存，允许对端重新投递；SDK 不因此自动发起重试。
+未实现完整信封回调的旧监听器仍使用 on_group_message；两者都有时优先完整信封回调。
+
+网侧 acf_group_invalidated 通知会清理相应快照和路由，阻止旧组重新生效；
+低于当前版本的失效通知被拒绝。组配置应用回调抛出异常会传播给网络处理链路，
+已提交的快照不会回滚，相同配置重发时会重新执行失败的回调。
+
+部署方明确确认 ACF 实例重启后，可调用 await sdk.discard_groups()：
+清理本地所有组配置与路由、停用已知群组，保留数字身份和 Card 状态。
+此接口不调用网络删除接口，也不自动重新建组；旧组 ID 在当前 SDK 会话中保持停用，
+应用需重新发现并建立新组。不要仅因一次超时调用它。
+
+以上变更要求核心网提供 group_version，不兼容缺少该字段的旧组配置；
+Android 实现不在此次 Python 集成变更范围内。

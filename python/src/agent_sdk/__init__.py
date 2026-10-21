@@ -3,6 +3,7 @@ from importlib.metadata import PackageNotFoundError, version
 from .errors import AgentSdkError, ErrorCode
 from .agent_state import AgentLifecycleState
 from .contracts import (
+    GroupEnvelopeListener,
     RemoteVideoStream,
     RuntimeHttpResponse,
     VideoUploadHandle,
@@ -75,6 +76,7 @@ __all__ = [
     "DiscoveredAgent",
     "ErrorCode",
     "GroupConfigSnapshot",
+    "GroupEnvelopeListener",
     "GroupInfo",
     "GroupMemberInfo",
     "MessageReceipt",

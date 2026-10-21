@@ -101,3 +101,47 @@ async def test_a2a_delivery_rejects_legacy_proof_field(sdk_fixture):
 
     assert caught.value.code is ErrorCode.INVALID_ARGUMENT
     assert caught.value.field == "proof"
+
+
+async def test_full_envelope_callback_waits_and_failed_delivery_can_retry(sdk_fixture):
+    import asyncio
+
+    class EnvelopeListener:
+        def __init__(self):
+            self.received = []
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.fail = True
+
+        async def on_group_envelope(self, envelope):
+            self.received.append(envelope)
+            self.started.set()
+            await self.release.wait()
+            if self.fail:
+                raise RuntimeError("business HTTP failed")
+
+    sdk = sdk_fixture["sdk"]
+    server = sdk_fixture["server"]
+    runtime = sdk_fixture["runtime"]
+    sdk.register_network_message_listener(AckNetworkListener())
+    listener = EnvelopeListener()
+    sdk.register_group_message_listener(listener)
+    await runtime.deliver_group_config(group_payload())
+    message = {
+        "message_id": "m-envelope", "group_id": "g1", "src_agent_id": PEER_ID,
+        "dst_agent_id": "did:example:agent-a", "type": "EMERGENCY_STATUS",
+        "task_id": "ambulance-1", "timestamp": "2026-08-21T09:00:00Z",
+        "payload": {"status": "REQUESTED"},
+    }
+    pending = asyncio.create_task(server.a2a(message))
+    await listener.started.wait()
+    assert not pending.done()
+    listener.release.set()
+    with pytest.raises(RuntimeError, match="business HTTP failed"):
+        await pending
+    assert listener.received == [message]
+    listener.fail = False
+    await server.a2a(message)
+    assert listener.received == [message, message]
+    await server.a2a(message)
+    assert listener.received == [message, message]

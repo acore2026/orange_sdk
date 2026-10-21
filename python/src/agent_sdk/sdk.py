@@ -27,6 +27,7 @@ from .contracts import (
     ConnectIpTransport,
     ControlRequestAuthenticator,
     GroupMessageListener,
+    GroupEnvelopeListener,
     LocalServer,
     MediaOffloadAdapter,
     MessageSignatureVerifier,
@@ -404,7 +405,7 @@ class AgentSdk:
         self._groups: GroupMemberCache | None = None
         self._pump_task: asyncio.Task[None] | None = None
         self._network_listener: NetworkMessageListener | None = None
-        self._group_listener: GroupMessageListener | None = None
+        self._group_listener: GroupMessageListener | GroupEnvelopeListener | None = None
         self._profile: AgentProfile | None = None
         self._agent_lifecycle_state = AgentLifecycleState.NO_IDENTITY
         self._identity_application_context: IdentityApplicationContext | None = None
@@ -427,6 +428,7 @@ class AgentSdk:
         self._identity_removal_in_progress = False
         self._computing_requests_in_flight: set[str] = set()
         self._computing_closed_session_ids: set[str] = set()
+        self._pending_group_callbacks: set[str] = set()
         self._received_a2a_message_ids: dict[str, None] = {}
         self._received_a2a_lock = asyncio.Lock()
 
@@ -812,7 +814,7 @@ class AgentSdk:
 
     @logged_sync
     def register_group_message_listener(
-        self, listener: GroupMessageListener
+        self, listener: GroupMessageListener | GroupEnvelopeListener
     ) -> Callable[[], None]:
         self._group_listener = listener
 
@@ -887,6 +889,18 @@ class AgentSdk:
             return NetworkMessageAction.REJECT
         assert self._groups is not None and self._config is not None
         await self._proof_verifier.verify_group_config(payload)
+        if payload.get("notification_type") == "acf_group_invalidated":
+            group_id = await self._groups.invalidate(payload, local_agent_id=self._profile.agent_id)
+            info = self._group_info.get(group_id)
+            if info is not None:
+                info.status = "INACTIVE"
+            if self._network_listener is not None:
+                try:
+                    await self._network_listener.on_network_message(NetworkMessageType.GROUP_CONFIG, payload)
+                except Exception:
+                    self._log(logging.ERROR, "listener_error", exc_info=True, group_id=group_id)
+                    raise
+            return NetworkMessageAction.ACK
         candidate = self._groups.build_candidate(
             payload,
             local_agent_id=self._profile.agent_id,
@@ -897,7 +911,9 @@ class AgentSdk:
         changed = await self._groups.commit(
             candidate, local_agent_id=self._profile.agent_id
         )
-        if not changed:
+        if changed:
+            self._pending_group_callbacks.add(candidate.group_id)
+        if not changed and candidate.group_id not in self._pending_group_callbacks:
             self._log(
                 logging.INFO,
                 "group_config_replay_acknowledged",
@@ -924,6 +940,8 @@ class AgentSdk:
                     message_type=NetworkMessageType.GROUP_CONFIG,
                     group_id=candidate.group_id,
                 )
+                raise
+        self._pending_group_callbacks.discard(candidate.group_id)
         return NetworkMessageAction.ACK
 
     async def _handle_a2a_message(self, payload: Mapping[str, Any]) -> None:
@@ -991,9 +1009,13 @@ class AgentSdk:
                 return
             self._received_a2a_message_ids[message_id] = None
             try:
-                await self._group_listener.on_group_message(
-                    group_id, sender_id, user_payload
-                )
+                envelope_callback = getattr(self._group_listener, "on_group_envelope", None)
+                if envelope_callback is not None:
+                    await envelope_callback(dict(payload))
+                else:
+                    await self._group_listener.on_group_message(
+                        group_id, sender_id, user_payload
+                    )
             except BaseException:
                 self._received_a2a_message_ids.pop(message_id, None)
                 raise
@@ -1569,7 +1591,7 @@ class AgentSdk:
                 "agent_id": agent_id,
                 "target_agents": list(target_agent_ids),
                 "group_config": {
-                    "group_name": group_name,
+                    "group_name": group_name.strip(),
                     "scope": scope,
                     "max_members": max_members,
                     "dnn": dnn,
@@ -4041,6 +4063,18 @@ class AgentSdk:
         if self._groups is None:
             return None
         return await self._groups.snapshot(group_id)
+
+    async def discard_groups(self) -> None:
+        """Retire local group IDs after an externally confirmed ACF restart.
+
+        Identity/Card state is preserved. Old IDs remain blocked for this SDK session.
+        """
+        self._require_ready()
+        assert self._groups is not None
+        await self._groups.discard_all()
+        self._pending_group_callbacks.clear()
+        for info in self._group_info.values():
+            info.status = "INACTIVE"
 
     async def close(self) -> None:
         started = time.perf_counter()

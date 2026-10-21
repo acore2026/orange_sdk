@@ -132,6 +132,12 @@ class GroupMessageListener(Protocol):
     ) -> None: ...
 
 
+class GroupEnvelopeListener(Protocol):
+    """Optional full-wire A2A callback, preferred over the legacy payload callback."""
+
+    async def on_group_envelope(self, envelope: Mapping[str, Any]) -> None: ...
+
+
 class VideoUploadHandle(Protocol):
     track_id: str
     state: str
