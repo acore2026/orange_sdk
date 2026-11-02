@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <application android:name=".RayNeoApplication" android:label="RayNeo Patrol" tools:replace="android:label">
+    <application android:name=".RayNeoApplication" android:label="${rayneoAppLabel}" tools:replace="android:label">
         <receiver android:name=".DemoConfigReceiver" android:exported="true" android:permission="android.permission.DUMP" />
 
         <meta-data

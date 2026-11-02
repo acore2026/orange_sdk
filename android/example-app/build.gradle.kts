@@ -3,6 +3,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val warnDemoSideBySide = providers.gradleProperty("warnDemoSideBySide").orNull == "true"
+
 android {
     namespace = "com.rayneo.agent.example"
     compileSdk = 34
@@ -11,8 +13,8 @@ android {
         applicationId = "com.rayneo.agent.example"
         minSdk = 26
         targetSdk = 34
-        versionCode = 57
-        versionName = "0.2.55"
+        versionCode = 61
+        versionName = "0.2.59-warn"
     }
 
     flavorDimensions += "deployment"
@@ -23,7 +25,8 @@ android {
         }
         create("rayneo") {
             dimension = "deployment"
-            applicationIdSuffix = ".rayneo"
+            applicationIdSuffix = if (warnDemoSideBySide) ".rayneo.warn" else ".rayneo"
+            manifestPlaceholders["rayneoAppLabel"] = if (warnDemoSideBySide) "RayNeo Warn" else "RayNeo Patrol"
             versionNameSuffix = "-rayneo"
             resValue("string", "app_name", "雷鸟巡检")
         }

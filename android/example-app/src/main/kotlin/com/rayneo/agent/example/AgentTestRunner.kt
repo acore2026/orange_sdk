@@ -603,6 +603,7 @@ class AgentTestRunner(
         val route = checkNotNull(manualMessageSession) { "Secure Domain 尚未就绪" }
         val area = patrolState.request?.zoneId ?: recognizedArea ?: "A区域"
         val (wireAction, spokenText, risk) = when (action) {
+            RobotAction.WARN -> Triple("warn", "语音警告", "low")
             RobotAction.FORWARD -> Triple("forward", "前进", "medium")
             RobotAction.BACKWARD -> Triple("back", "后退", "medium")
             RobotAction.LEFT -> Triple("left", "左转", "medium")
@@ -641,7 +642,7 @@ class AgentTestRunner(
             RobotAction.FRONT_POUNCE ->
                 PatrolAction.FrontPounce(area, patrolState.alerts.lastOrNull()?.id, spokenText)
             RobotAction.FORWARD, RobotAction.BACKWARD, RobotAction.LEFT, RobotAction.RIGHT,
-            RobotAction.STOP, RobotAction.WAVE -> null
+            RobotAction.STOP, RobotAction.WAVE, RobotAction.WARN -> null
         }
         patrolState = patrolState.copy(
             phase = if (patrolAction == null) {

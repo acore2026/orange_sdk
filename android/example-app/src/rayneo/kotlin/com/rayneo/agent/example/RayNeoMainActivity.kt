@@ -245,7 +245,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         if (command !in setOf("CONFIG_CORE", "CONFIG_SANDBOX", "DEREGISTER_GLASSES", "VIDEO_SHOW", "VIDEO_HIDE") && sdkFeatureState?.agentReady != true) return "ERR NOT_READY"
         if (command == "PATROL" && (messageSession != null || patrolState.phase !in setOf(PatrolPhase.IDLE, PatrolPhase.LISTENING, PatrolPhase.COMPLETED, PatrolPhase.ABORTED))) return "ERR INVALID_PHASE"
         if (command == "CONFIRM" && patrolState.phase != PatrolPhase.DISPATCHING) return "ERR NO_CANDIDATE"
-        if (command in setOf("DETER", "EXPEL", "CONFIRM_EXPEL", "RTC_RECONNECT", "FORWARD", "BACK", "LEFT", "RIGHT", "STOP") && messageSession == null) return "ERR NO_GROUP"
+        if (command in setOf("WARN", "DETER", "EXPEL", "CONFIRM_EXPEL", "RTC_RECONNECT", "FORWARD", "BACK", "LEFT", "RIGHT", "STOP") && messageSession == null) return "ERR NO_GROUP"
         if (command == "VOICE_STOP" && voiceRecordingMode == null) return "ERR NOT_RECORDING"
         if (command == "CONFIRM_EXPEL" && (!runtimeExpelPending || android.os.SystemClock.elapsedRealtime() > runtimeExpelExpiresAt)) {
             setRuntimeExpelPending(false, "expired")
@@ -318,6 +318,10 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                                 }
                                 remoteSubtitle = command.lowercase()
                                 active.sendRobotAction(action)
+                            }
+                            "WARN" -> {
+                                remoteSubtitle = "Warning"
+                                active.sendRobotAction(RobotAction.WARN)
                             }
                             "DETER" -> {
                                 remoteSubtitle = "Deter the suspect"
@@ -788,6 +792,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             try {
                 val receipt = withContext(Dispatchers.IO) { activeRunner.sendRobotAction(action) }
                 val label = when (action) {
+                    RobotAction.WARN -> "Warning（语音警告）"
                     RobotAction.FORWARD -> "前进"
                     RobotAction.BACKWARD -> "后退"
                     RobotAction.LEFT -> "左转"
@@ -1312,7 +1317,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         val prompt = when {
             runtimeExpelPending -> "Try saying: Confirm, or cancel."
             patrolState.phase == PatrolPhase.DISPATCHING -> "Try saying: Confirm, or cancel."
-            sdkFeatureState?.processedVideoState != null -> "Try saying: Deter the suspect."
+            sdkFeatureState?.processedVideoState != null -> "Try saying: Warning."
             else -> "Try saying: Send the robot dog to patrol."
         }
         mBindingPair.updateView {

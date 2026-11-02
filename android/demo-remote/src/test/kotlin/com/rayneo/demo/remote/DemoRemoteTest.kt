@@ -9,6 +9,10 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 class DemoRemoteTest {
+    @Test fun warningIsIndependentFromExpel() {
+        assertTrue(DemoRemote.commands.containsAll(listOf("WARN", "EXPEL", "CONFIRM_EXPEL")))
+        assertFalse(DemoRemote.commands.contains("WARNING"))
+    }
     @Test fun validateHostAndPreserveRolePortSeparation() {
         assertEquals("core.example.org",DemoRemote.coreHost(" Core.Example.org "))
         assertEquals("101.245.78.174",DemoRemote.coreHost("101.245.78.174"))

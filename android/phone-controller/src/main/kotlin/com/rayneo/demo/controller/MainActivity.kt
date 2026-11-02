@@ -157,6 +157,9 @@ class MainActivity : Activity() {
             action("EXPEL", tr("发起驱逐", "Request expel"))
             action("CONFIRM_EXPEL", tr("确认驱逐", "Confirm expel"))
         }
+        row {
+            action("WARN", tr("语音警告 · Warning", "Play Warning"))
+        }
         section(tr("语音与视频", "Voice & video"))
         row {
             action("VOICE_START", tr("开始录音", "Record"))

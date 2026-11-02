@@ -59,6 +59,7 @@ enum class PatrolActionType { SCRAPE, FRONT_POUNCE }
 
 /** Stable action names shared by the voice UI and the robot A2A transport. */
 enum class RobotAction {
+    WARN,
     WAVE,
     FORWARD,
     BACKWARD,
