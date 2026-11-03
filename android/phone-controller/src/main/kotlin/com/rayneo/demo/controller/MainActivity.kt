@@ -135,6 +135,8 @@ class MainActivity : Activity() {
 
         body = workflow
         label(tr("遥控", "Remote control"), 22)
+        action("RESET", tr("重置巡检 · Reset", "Reset patrol"))
+        label(tr("结束当前巡检并自动重连，保留眼镜身份；完成后重新发现机器狗。", "End patrol and reconnect with saved identity; then find the dog again."), 12, "#8297AB")
         area = input(tr("巡逻区域", "Patrol area"), prefs.getString("area", "A区域")!!)
         section(tr("巡逻", "Patrol"))
         row {
@@ -371,6 +373,7 @@ class MainActivity : Activity() {
                         if(sandbox.text.isBlank()) sandbox.setText(snapshot.optString("saved_sandbox_host"))
                     } else {
                         operationResult(command).text=when {
+                            raw.startsWith("OK") && command=="RESET" -> tr("已接收，眼镜正在重置并重新连接…", "Accepted; resetting and reconnecting glasses…")
                             raw.startsWith("OK") && command=="CONFIG_CORE" -> tr("眼镜核心网已保存：", "Glasses core saved: ")+request.optString("host")+tr(" · 重启生效", " · restart to apply")
                             raw.startsWith("OK") && command=="CONFIG_SANDBOX" -> tr("Sandbox 已保存，重启眼镜生效", "Sandbox saved; restart glasses")
                             raw.startsWith("OK") && command=="DEREGISTER_GLASSES" -> tr("已接收，正在去注册…", "Accepted; deregistering…")
@@ -395,6 +398,7 @@ class MainActivity : Activity() {
         val phase=snapshot.optString("phase")
         controls.forEach { (command,view) ->
             view.isEnabled=when(command) {
+                "RESET" -> idle && snapshot.optBoolean("reset_available")
                 "DEREGISTER_GLASSES" -> !inFlight
                 "PATROL" -> idle && snapshot.optBoolean("ready") && !snapshot.optBoolean("connected") && phase in setOf("IDLE","LISTENING","COMPLETED","ABORTED")
                 "CONFIRM" -> idle && phase=="DISPATCHING"

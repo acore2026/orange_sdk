@@ -1,5 +1,15 @@
 # 巡检演示手机兜底遥控
 
+## 1.2.3：保留身份的巡检 Reset（2026-11-03）
+
+配套眼镜版本 `0.2.61-warn-patrol-reset-rayneo`（RayNeo Warn）。遥控页新增“重置巡检 · Reset”：发送 `RESET`，眼镜释放当前算力/视频会话，清理巡检状态并使用已保存身份自动重连。完成后重新点击“发现机器狗”和“确认派遣”，无需退出 App。远程 Reset 不调用身份清除、身份注销或狗端运动接口，与眼镜本地身份 Reset 分开。
+
+状态查询新增 `reset_available`，`busy` 包含重置、退出和视频启动状态；忙碌或录音时禁用 Reset，未就绪时仍可尝试恢复。沿用请求 ID 去重；重连失败会报告失败，允许再次 Reset。
+
+构建与协议测试：`./gradlew -PwarnDemoSideBySide=true :demo-remote:test :example-app:assembleRayneoDebug :phone-controller:assembleDebug`。两端 APK 已覆盖安装，通过真实眼镜接口确认接收 Reset 并自动尝试重连。验证时核心网未启动，`GET /v1/ue/info failed`，活动巡检会话释放和恢复就绪尚待联调验收。
+
+旧版眼镜 `0.2.60-warn-reset` / 手机 `1.2.2-warn-reset` 会清除本地身份，已被此修正版替代，不应再部署。
+
 ## 1.1.2：独立 Sandbox 地址（2026-10-12）
 
 配置页新增 Sandbox IP/域名，独立于核心网地址。保存至眼镜后重启眼镜 App 生效，保留数字身份。需要配套眼镜 0.2.48；旧眼镜会返回 UNKNOWN_COMMAND。

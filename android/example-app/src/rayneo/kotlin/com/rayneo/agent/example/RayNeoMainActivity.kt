@@ -223,7 +223,8 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             put("identity_result", identityResult)
             put("phase", patrolState.phase.name)
             put("recording", voiceRecordingMode != null)
-            put("busy", remoteBusy || voiceActionRunning || patrolActionRunning)
+            put("busy", remoteBusy || resetInProgress || stopInProgress || computeStarting || voiceActionRunning || patrolActionRunning)
+            put("reset_available", !resetInProgress && !stopInProgress)
             put("ready", sdkFeatureState?.agentReady == true)
             put("connected", messageSession != null)
             put("video", sdkFeatureState?.processedVideoState != null)
@@ -242,7 +243,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         remoteRequests[id]?.let { return if (it.first == fingerprint) it.second else "ERR REQUEST_ID_CONFLICT" }
         if (remoteBusy || resetInProgress || stopInProgress || computeStarting || voiceActionRunning || patrolActionRunning) return "ERR BUSY"
         if (voiceRecordingMode != null && command != "VOICE_STOP") return "ERR RECORDING"
-        if (command !in setOf("CONFIG_CORE", "CONFIG_SANDBOX", "DEREGISTER_GLASSES", "VIDEO_SHOW", "VIDEO_HIDE") && sdkFeatureState?.agentReady != true) return "ERR NOT_READY"
+        if (command !in setOf("RESET", "CONFIG_CORE", "CONFIG_SANDBOX", "DEREGISTER_GLASSES", "VIDEO_SHOW", "VIDEO_HIDE") && sdkFeatureState?.agentReady != true) return "ERR NOT_READY"
         if (command == "PATROL" && (messageSession != null || patrolState.phase !in setOf(PatrolPhase.IDLE, PatrolPhase.LISTENING, PatrolPhase.COMPLETED, PatrolPhase.ABORTED))) return "ERR INVALID_PHASE"
         if (command == "CONFIRM" && patrolState.phase != PatrolPhase.DISPATCHING) return "ERR NO_CANDIDATE"
         if (command in setOf("WARN", "DETER", "EXPEL", "CONFIRM_EXPEL", "RTC_RECONNECT", "FORWARD", "BACK", "LEFT", "RIGHT", "STOP") && messageSession == null) return "ERR NO_GROUP"
@@ -271,6 +272,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 DemoSettings.saveSandbox(this, coreHost!!)
                 remoteResult = "Sandbox saved; restart glasses app to apply"
             }
+            "RESET" -> resetPatrolFromPhone()
             "DEREGISTER_GLASSES" -> deregisterFromPhone(id)
             "VIDEO_SHOW", "VIDEO_HIDE" -> {
                 videoHidden = command == "VIDEO_HIDE"
@@ -1155,6 +1157,56 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                         R.drawable.rayneo_action_secondary
                     },
                 )
+            }
+        }
+    }
+
+    /** Restart the patrol connection while preserving the persisted Agent identity/card. */
+    private fun resetPatrolFromPhone() {
+        resetInProgress = true
+        remoteResult = "Reset: ending patrol session"
+        setRuntimeExpelPending(false, "patrol reset")
+        voiceRecorder.cancel()
+        voiceRecordingMode = null
+        pendingVoicePermissionMode = null
+        lifecycleScope.launch {
+            try {
+                runnerJob?.cancelAndJoin()
+                if (runner?.isInitialized() == true) {
+                    check(kotlinx.coroutines.withTimeoutOrNull(35_000) {
+                        runner?.stopComputingSession()
+                        true
+                    } == true) { "Session release timed out; retry Reset" }
+                }
+                // closeResources() closes connections/media but does not reset or deregister identity.
+                closeResources()
+                patrolState = PatrolState()
+                remoteSubtitle = null
+                displayNotice = ""
+                videoStarved = false
+                videoPreviewHasFrame = false
+                computeAvailable = false
+                computeStarting = false
+                renderPatrolHud()
+                remoteResult = "Reset: reconnecting with saved identity"
+                val completion = kotlinx.coroutines.CompletableDeferred<Unit>()
+                identityRecovery = completion
+                beginConnection()
+                check(kotlinx.coroutines.withTimeoutOrNull(90_000) { completion.await(); true } == true) {
+                    "Reconnection timed out; retry Reset"
+                }
+                remoteResult = "Reset completed: ready to find dog (identity preserved)"
+                appendLog(LabLogLevel.SUCCESS, "PATROL RESET", remoteResult)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                remoteResult = "Patrol reset incomplete: ${error.message}; identity preserved"
+                appendLog(LabLogLevel.ERROR, "PATROL RESET", remoteResult)
+                setStatus("巡检重置未完成", "${error.message}；本地身份保留，可再次 Reset")
+            } finally {
+                identityRecovery = null
+                resetInProgress = false
+                refreshVoiceActions()
             }
         }
     }

@@ -1,3 +1,9 @@
+# 2026-11-03 — 手机远程重置巡检并保留眼镜身份
+
+- 手机 1.2.3 增加巡检 Reset 按钮，共享协议增加 RESET；眼镜 0.2.61 释放算力/视频会话、清理巡检状态并复用持久化身份重连，恢复后可重新发现机器狗。
+- 远程 Reset 独立于本地身份 Reset，不清除 Profile/Card、不注销身份、不发送运动指令；沿用请求 ID 去重并补充状态查询和忙状态保护。
+- 验证：共享协议测试及两端 Debug APK 构建通过，git diff --check 通过，两台真机覆盖安装成功；真实眼镜已接收 Reset 并尝试重连。核心网未启动导致 GET /v1/ue/info failed，完整巡检恢复尚未验收。
+
 # 0.17.11 (2026-10-13)
 
 - Package camera lifetime fixes, optional group configuration, 20-second negotiation waits, and 1 Mbps video pacing.

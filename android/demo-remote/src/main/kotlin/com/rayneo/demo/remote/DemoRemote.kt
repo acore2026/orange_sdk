@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 object DemoRemote {
     const val PORT = 8791
     const val MAX_LINE = 8192
-    val commands = setOf("STATUS", "PATROL", "CONFIRM", "CANCEL", "WARN", "DETER", "EXPEL", "DEREGISTER_GLASSES",
+    val commands = setOf("STATUS", "RESET", "PATROL", "CONFIRM", "CANCEL", "WARN", "DETER", "EXPEL", "DEREGISTER_GLASSES",
         "CONFIRM_EXPEL", "VOICE_START", "VOICE_STOP", "RTC_RECONNECT", "VIDEO_SHOW", "VIDEO_HIDE", "CONFIG_CORE", "CONFIG_SANDBOX", "FORWARD", "BACK", "LEFT", "RIGHT", "STOP")
     fun coreHost(raw: String): String {
         val host = raw.trim().lowercase()
