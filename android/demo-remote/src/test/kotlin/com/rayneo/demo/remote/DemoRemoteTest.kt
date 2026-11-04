@@ -90,4 +90,30 @@ class DemoRemoteTest {
         assertTrue(DemoRemote.commands.containsAll(listOf("FORWARD", "BACK", "LEFT", "RIGHT", "STOP")))
     }
 
+    @Test fun studioResetPostsCheckpoint1AndReportsFailureWithoutRetry() {
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        val requests = java.util.concurrent.CopyOnWriteArrayList<String>()
+        var responseCode = 200
+        server.createContext("/") { exchange ->
+            requests.add(exchange.requestMethod + " " + exchange.requestURI + " " + exchange.requestBody.bufferedReader().readText())
+            val body = "studio-response".toByteArray()
+            exchange.sendResponseHeaders(responseCode, body.size.toLong())
+            exchange.responseBody.use { it.write(body) }
+        }
+        server.start()
+        try {
+            val endpoint = "127.0.0.1:${server.address.port}"
+            assertEquals("studio-response", DemoRemote.resetStudio(endpoint))
+            responseCode = 503
+            val error = runCatching { DemoRemote.resetStudio(endpoint) }.exceptionOrNull()
+            assertTrue(error?.message.orEmpty().contains("503"))
+            assertEquals(listOf(
+                "POST /api/showcase/acn-workspace/control {\"action\":\"reset_checkpoint1\"}",
+                "POST /api/showcase/acn-workspace/control {\"action\":\"reset_checkpoint1\"}"
+            ), requests)
+            assertTrue(runCatching { DemoRemote.resetStudio("http://bad/path") }.isFailure)
+            assertEquals(2, requests.size)
+        } finally { server.stop(0) }
+    }
+
 }

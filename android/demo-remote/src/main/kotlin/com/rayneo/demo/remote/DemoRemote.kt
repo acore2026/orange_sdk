@@ -56,6 +56,30 @@ object DemoRemote {
         readLine(socket.getInputStream())
     }
 
+    /** Re-arm the shared presentation at the end of step 2, waiting for the dog. */
+    fun resetStudio(endpoint: String): String {
+        val address = endpoint(endpoint)
+        val port = if (URI("tcp://${endpoint.trim()}").port == -1) 7865 else address.port
+        val connection = URI("http://${address.hostString}:$port/api/showcase/acn-workspace/control")
+            .toURL().openConnection() as HttpURLConnection
+        return try {
+            connection.connectTimeout = 1500
+            connection.readTimeout = 1500
+            connection.instanceFollowRedirects = false
+            connection.requestMethod = "POST"
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.outputStream.use {
+                it.write("{\"action\":\"reset_checkpoint1\"}".toByteArray(Charsets.UTF_8))
+            }
+            val code = connection.responseCode
+            val body = (if (code in 200..299) connection.inputStream else connection.errorStream)
+                ?.bufferedReader()?.use { it.readText() }.orEmpty()
+            check(code in 200..299) { "Studio HTTP $code: $body" }
+            body
+        } finally { connection.disconnect() }
+    }
+
     fun dogAdmin(endpoint: String, host: String? = null): String {
         val address = endpoint(endpoint)
         val port = if (URI("tcp://${endpoint.trim()}").port == -1) 8081 else address.port

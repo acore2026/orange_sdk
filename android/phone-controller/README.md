@@ -1,5 +1,17 @@
 # 巡检演示手机兜底遥控
 
+## 1.2.5：纠正检查点顺序（2026-11-04）
+
+本版本替代 1.2.4：眼镜接受 Reset 后发送 `reset_checkpoint1`，前端停在第 2 步结束的 checkpoint 1，三个检查点全部重新锁定。狗站立前放行 checkpoint 1；视频 WebRTC 连接成功后放行 checkpoint 2；warning 前放行 checkpoint 3。配置页 Studio 默认 `192.168.1.13:7865`。Reset 保留眼镜身份，Studio 请求失败单独提示。手机尚未连接安装，APK 为 orange/apk/phone-controller-1.2.5-studio-reset.apk。
+
+## 1.2.4：Reset 联动 Studio（2026-11-04）
+
+配置页新增 Studio IP:端口，默认 `192.168.1.13:7865`。眼镜接受 `RESET` 后，手机向 Studio 的 `/api/showcase/acn-workspace/control` 发送 `{"action":"reset_checkpoint2"}`。演示停在第 4 步结束（checkpoint 2），保留 checkpoint 1 放行状态，重新锁定 checkpoint 2、3；下一次由狗站立前及 warning 前分别放行。Studio 通过 SSE 更新所有打开的演示页面。
+
+眼镜仍异步结束会话、保留身份并重连；Studio 回退不代表眼镜重连成功。眼镜拒绝或通信结果未知时不发送 Studio 请求。Studio 失败会单独提示，不影响已接受的眼镜 Reset，不自动重试。需要手机能访问 Studio HTTP 端口，并配套支持此 action 的 Studio 后端；眼镜沿用 0.2.61-warn-patrol-reset-rayneo。
+
+验证：共享模块 7 项单测、手机 Release 编译与 lint 通过；Studio 检查点回退、旧 run_id 拒绝、后续放行及 HTTP/SSE 验证通过。APK：`/home/huawei/orange/apk/phone-controller-1.2.4-studio-reset.apk`；本轮未连接手机，尚未安装或验证手机端实际链路。
+
 ## 1.2.3：保留身份的巡检 Reset（2026-11-03）
 
 配套眼镜版本 `0.2.61-warn-patrol-reset-rayneo`（RayNeo Warn）。遥控页新增“重置巡检 · Reset”：发送 `RESET`，眼镜释放当前算力/视频会话，清理巡检状态并使用已保存身份自动重连。完成后重新点击“发现机器狗”和“确认派遣”，无需退出 App。远程 Reset 不调用身份清除、身份注销或狗端运动接口，与眼镜本地身份 Reset 分开。

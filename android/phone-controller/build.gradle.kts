@@ -9,8 +9,8 @@ android {
         applicationId = "com.rayneo.demo.controller"
         minSdk = 26
         targetSdk = 34
-        versionCode = 9
-        versionName = "1.2.3-warn-patrol-reset"
+        versionCode = 11
+        versionName = "1.2.5-studio-reset"
     }
     buildTypes { getByName("release") { signingConfig = signingConfigs.getByName("debug") } }
     compileOptions {

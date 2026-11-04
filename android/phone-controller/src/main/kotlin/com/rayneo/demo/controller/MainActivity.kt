@@ -32,6 +32,8 @@ class MainActivity : Activity() {
     private lateinit var glassesCoreResult: TextView
     private lateinit var dogCoreResult: TextView
     private lateinit var sandboxResult: TextView
+    private lateinit var studioEndpoint: EditText
+    private lateinit var studioResult: TextView
     private var glassesIdentityId = ""
     private var dogConnectedHost = ""
     private var dogAdminBusy = false
@@ -129,6 +131,8 @@ class MainActivity : Activity() {
         sandbox = input(tr("Sandbox IP 或域名", "Sandbox IP or hostname"), prefs.getString("sandbox", "192.168.2.150")!!)
         button(tr("更新眼镜 Sandbox", "Update glasses Sandbox")) { send("CONFIG_SANDBOX") }
         sandboxResult = label(tr("Sandbox：尚无操作", "Sandbox: no operation"), 13, "#B5C7D4")
+        studioEndpoint = input(tr("Studio IP:端口", "Studio IP:port"), prefs.getString("studio", "192.168.1.13:7865")!!)
+        studioResult = label(tr("Studio：Reset 时回到 checkpoint 1", "Studio: Reset returns to checkpoint 1"), 13, "#B5C7D4")
         button("English / 中文") {
             saveInputs(); english = !english; prefs.edit().putBoolean("english", english).apply(); buildUi()
         }
@@ -136,7 +140,7 @@ class MainActivity : Activity() {
         body = workflow
         label(tr("遥控", "Remote control"), 22)
         action("RESET", tr("重置巡检 · Reset", "Reset patrol"))
-        label(tr("结束当前巡检并自动重连，保留眼镜身份；完成后重新发现机器狗。", "End patrol and reconnect with saved identity; then find the dog again."), 12, "#8297AB")
+        label(tr("结束巡检并重连，保留身份；演示回到 checkpoint 1，等待再次派遣。", "End patrol and reconnect with saved identity; return presentation to checkpoint 1."), 12, "#8297AB")
         area = input(tr("巡逻区域", "Patrol area"), prefs.getString("area", "A区域")!!)
         section(tr("巡逻", "Patrol"))
         row {
@@ -279,6 +283,7 @@ class MainActivity : Activity() {
         prefs.edit().putString("endpoint",endpoint.text.toString().trim())
             .putString("area",area.text.toString()).putString("core",core.text.toString())
             .putString("sandbox", sandbox.text.toString().trim())
+            .putString("studio", studioEndpoint.text.toString().trim())
             .putString("dog_endpoint", dogEndpoint.text.toString().trim())
             .apply()
     }
@@ -352,11 +357,30 @@ class MainActivity : Activity() {
         if (command == "DEREGISTER_GLASSES") glassesIdentityId = request.getString("request_id")
         if (command != "STATUS") operationResult(command).text = tr("处理中…", "Processing…")
         else glassesConnection.text = tr("正在连接眼镜…", "Connecting glasses…")
+        val studioHost = studioEndpoint.text.toString().trim()
         saveInputs(); inFlight=true; updateControls()
         io.execute {
             val response=runCatching { DemoRemote.exchange(host,wire) }
+            // Only a positively acknowledged RESET may change the presentation.
+            // Keep its result separate from the glasses' asynchronous reset status.
+            val studioResponse = if (command == "RESET" && response.getOrNull()?.startsWith("OK") == true) {
+                runCatching {
+                    val state = JSONObject(DemoRemote.resetStudio(studioHost))
+                    check(state.optString("status") == "waiting" && state.optInt("waiting_checkpoint") == 1 &&
+                        state.optInt("step") == 2 && state.optInt("released_checkpoints") == 0) {
+                        "Studio did not confirm checkpoint 1"
+                    }
+                }
+            } else null
             main.post {
                 if(isDestroyed) return@post
+                studioResponse?.onSuccess {
+                    studioResult.text = tr("Studio：已回到 checkpoint 1，等待机器狗站立", "Studio: checkpoint 1, waiting for dog stand-up")
+                    Toast.makeText(this, studioResult.text, Toast.LENGTH_SHORT).show()
+                }?.onFailure {
+                    studioResult.text = tr("Studio 重置失败：", "Studio reset failed: ") + it.message
+                    Toast.makeText(this, studioResult.text, Toast.LENGTH_LONG).show()
+                }
                 inFlight=false
                 if(host!=endpoint.text.toString().trim()) { connected=false; updateControls(); return@post }
                 response.onSuccess { raw ->
