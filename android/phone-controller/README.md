@@ -2,7 +2,7 @@
 
 ## 1.2.5：纠正检查点顺序（2026-11-04）
 
-本版本替代 1.2.4：眼镜接受 Reset 后发送 `reset_checkpoint1`，前端停在第 2 步结束的 checkpoint 1，三个检查点全部重新锁定。狗站立前放行 checkpoint 1；视频 WebRTC 连接成功后放行 checkpoint 2；warning 前放行 checkpoint 3。配置页 Studio 默认 `192.168.1.13:7865`。Reset 保留眼镜身份，Studio 请求失败单独提示。手机尚未连接安装，APK 为 orange/apk/phone-controller-1.2.5-studio-reset.apk。
+本版本替代 1.2.4：眼镜接受 Reset 后发送 `reset_checkpoint1`，前端停在第 2 步结束的 checkpoint 1，三个检查点全部重新锁定。狗站立前放行 checkpoint 1；视频 WebRTC 连接成功后放行 checkpoint 2；warning 前放行 checkpoint 3。配置页 Studio 默认 `192.168.1.13:7865`。Reset 保留眼镜身份，Studio 请求失败单独提示。1.2.5 已完成 Release 构建；截至 2026-11-05，确认的新手机安装版本仍为 1.2.3，1.2.5 的真机安装及 Studio 联动尚未确认。APK 为 `orange/apk/phone-controller-1.2.5-studio-reset.apk`。
 
 ## 1.2.4：Reset 联动 Studio（2026-11-04）
 

@@ -4,6 +4,13 @@
 - 沿用 Sandbox 已有 patrol 意图和 discovery TASK/skills 映射；未指定区域时眼镜默认 A区域，识别后仍需确认派遣。
 - 验证：APK 构建通过并覆盖安装；运行中的 ASR 接口对英文合成音频“Patrol”返回 text=patrol、intent.type=TASK、required_skills=[patrol,camera]。尚未进行眼镜麦克风现场实说验收。
 
+# 2026-11-04 — 手机巡检 Reset 联动 Studio 检查点
+
+- 手机控制器 1.2.5 在眼镜接受保留身份的巡检 Reset 后，向 Studio 请求 `reset_checkpoint1`，将演示退回可重新开始的检查点；三个检查点重新锁定，狗站立前、视频 WebRTC 连接后、Warning 前按步骤放行。
+- Studio 地址可配置，默认 `192.168.1.13:7865`。Studio 回退与眼镜会话释放/身份重连分别处理；Studio 失败单独报告，不撤销已接受的眼镜 Reset，也不自动重试。
+- 配套 Dog Agent 0.8 米巡检入口及 checkpoint 1/2/3 联动见 dog 仓库 `93ed1e7`。手机 1.2.5 Studio 联动与实际狗动作仍需现场验收。
+- GitHub Release 未创建；源码已推送到 `Release2.0`，APK 仍为本地构建交付物。
+
 # 2026-11-03 — 手机远程重置巡检并保留眼镜身份
 
 - 手机 1.2.3 增加巡检 Reset 按钮，共享协议增加 RESET；眼镜 0.2.61 释放算力/视频会话、清理巡检状态并复用持久化身份重连，恢复后可重新发现机器狗。
