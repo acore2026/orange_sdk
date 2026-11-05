@@ -1,3 +1,9 @@
+# 2026-11-05 — 简化巡检语音提示
+
+- 眼镜初始布局及运行期提示统一改为 “Try saying: Patrol.”，版本升级至 0.2.62-warn-patrol。
+- 沿用 Sandbox 已有 patrol 意图和 discovery TASK/skills 映射；未指定区域时眼镜默认 A区域，识别后仍需确认派遣。
+- 验证：APK 构建通过并覆盖安装；运行中的 ASR 接口对英文合成音频“Patrol”返回 text=patrol、intent.type=TASK、required_skills=[patrol,camera]。尚未进行眼镜麦克风现场实说验收。
+
 # 2026-11-03 — 手机远程重置巡检并保留眼镜身份
 
 - 手机 1.2.3 增加巡检 Reset 按钮，共享协议增加 RESET；眼镜 0.2.61 释放算力/视频会话、清理巡检状态并复用持久化身份重连，恢复后可重新发现机器狗。

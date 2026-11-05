@@ -1370,7 +1370,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             runtimeExpelPending -> "Try saying: Confirm, or cancel."
             patrolState.phase == PatrolPhase.DISPATCHING -> "Try saying: Confirm, or cancel."
             sdkFeatureState?.processedVideoState != null -> "Try saying: Warning."
-            else -> "Try saying: Send the robot dog to patrol."
+            else -> "Try saying: Patrol."
         }
         mBindingPair.updateView {
             expelWarning.visibility = if (runtimeExpelPending) View.VISIBLE else View.GONE
