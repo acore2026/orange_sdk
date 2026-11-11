@@ -241,71 +241,65 @@ class AgentTestRunner(
         )
         onResetAvailability(true)
 
-        var lifecycleState = sdk.agentLifecycleState
+        val activeProfile = retryableStep("IDENTITY", "校验身份并发布能力") {
+            prepareIdentity()
+        }
+        if (config.role == TestRole.A) runAgentA(activeProfile) else runAgentB()
+    }
+
+    /** Explicit preparation may reuse a live SDK; it never creates a group or dispatches. */
+    suspend fun preparePatrolIdentity() = operationMutex.withLock {
+        ensureResetNotRequested()
+        check(manualMessageSession == null && activeComputeSessionId == null) { "End the current patrol before preparing identity" }
+        prepareIdentity()
+    }
+
+    private suspend fun prepareIdentity(): AgentProfile {
         var profile = sdk.localProfile
-        onLog(
-            LabLogLevel.INFO,
-            "AGENT STATE",
-            "恢复状态=$lifecycleState，agent_id=${profile?.agentId ?: "<无>"}",
-        )
-        if (lifecycleState == AgentLifecycleState.NO_IDENTITY) {
-            profile = retryableStep("H-ID", "状态1：申请 Agent 数字身份") {
-                sdk.applyIdentity(
-                    owner = config.owner,
-                    name = config.agentName,
-                    description = "Android ${config.role.name} MASQUE integration test",
-                    metadata = buildJsonObject {
-                        put("region", "CN")
-                        put("os", "Android")
-                        put("version", "0.2.42")
-                    },
-                )
+        var ability = profile?.let {
+            try {
+                sdk.getNetworkAbility(it.agentId)
+            } catch (error: com.rayneo.agent.sdk.AgentSdkException) {
+                if (error.code != com.rayneo.agent.sdk.ErrorCode.RUNTIME_REJECTED ||
+                    error.runtimeCode !in setOf("AGENT_INVALID", "AGENT_NOT_FOUND")) throw error
+                check(sdk.resetAgent().success) { "Could not clear invalid local identity" }
+                onLog(LabLogLevel.WARNING, "H-ID", "核心网已明确拒绝旧身份，重新申请")
+                profile = null
+                null
             }
-            lifecycleState = AgentLifecycleState.IDENTITY_READY
-            onLog(LabLogLevel.SUCCESS, "H-ID", "agent_id=${profile.agentId}")
+        }
+        if (profile == null) {
+            profile = sdk.applyIdentity(
+                owner = config.owner,
+                name = config.agentName,
+                description = "Android ${config.role.name} MASQUE integration test",
+                metadata = buildJsonObject {
+                    put("region", "CN")
+                    put("os", "Android")
+                    put("version", "0.2.42")
+                },
+            )
         } else {
             onLog(LabLogLevel.SUCCESS, "H-ID", "复用已保存身份 agent_id=${profile?.agentId}")
         }
         val activeProfile = checkNotNull(profile) { "Persisted Agent state has no profile" }
         localAgentId = activeProfile.agentId
-
-        if (lifecycleState == AgentLifecycleState.IDENTITY_READY) {
-            val networkAbility = retryableStep(
-                "H-NETWORK-ABILITY",
-                "状态2：获取运营商网络能力",
-            ) { sdk.getNetworkAbility(activeProfile.agentId) }
-            onLog(
-                LabLogLevel.SUCCESS,
-                "H-NETWORK-ABILITY",
-                "network_abilities=${networkAbility.abilities.ifEmpty { listOf("<未声明>") }}",
+        if (sdk.agentLifecycleState != AgentLifecycleState.CARD_PUBLISHED) {
+            val networkAbility = ability ?: sdk.getNetworkAbility(activeProfile.agentId)
+            sdk.registerCapabilities(
+                agentId = activeProfile.agentId,
+                priority = 1,
+                credentials = listOf(networkAbility.abilityVc),
+                capabilities = advertisedCapabilities().toList(),
+                agentName = activeProfile.agentName,
             )
-            retryableStep("H-PROFILE", "状态2：发布 Agent Card") {
-                sdk.registerCapabilities(
-                    agentId = activeProfile.agentId,
-                    priority = 1,
-                    credentials = listOf(networkAbility.abilityVc),
-                    capabilities = advertisedCapabilities().toList(),
-                    agentName = activeProfile.agentName,
-                )
-            }
-            onLog(
-                LabLogLevel.SUCCESS,
-                "TRUSTED ACCESS",
-                "数字身份已认证；通信授权由 Runtime 分配；capabilities=" +
-                    advertisedCapabilities().ifEmpty { listOf("<network-only>") },
-            )
-            onLog(
-                LabLogLevel.SUCCESS,
-                "H-PROFILE",
-                if (config.role == TestRole.B) {
-                    "已发布 skill=${advertisedCapabilities().joinToString()}，等待 Agent A 发现"
-                } else "Agent A Profile 已发布",
-            )
+            onLog(LabLogLevel.SUCCESS, "H-PROFILE", "身份已就绪，能力已发布")
         } else {
             onLog(LabLogLevel.SUCCESS, "H-PROFILE", "Agent Card 已发布，跳过重复 registerCapabilities")
         }
+        check(sdk.agentLifecycleState == AgentLifecycleState.CARD_PUBLISHED) { "Agent capability publication is incomplete" }
         emitFeatureState()
-        if (config.role == TestRole.A) runAgentA(activeProfile) else runAgentB()
+        return activeProfile
     }
 
     fun featureState(): SdkFeatureState = SdkFeatureState(

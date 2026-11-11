@@ -9,6 +9,10 @@ internal object DemoSettings {
     private fun prefs(context: Context) = context.getSharedPreferences("demo_connection", Context.MODE_PRIVATE)
     fun coreHost(context: Context): String = prefs(context).getString("core_host", RayNeoX3ProDeployment.SERVER_IP)!!
     fun sandboxHost(context: Context): String = prefs(context).getString("sandbox_host", RayNeoX3ProDeployment.SANDBOX_HOST)!!
+    fun identityPaused(context: Context): Boolean = prefs(context).getBoolean("identity_paused", false)
+    fun saveIdentityPaused(context: Context, paused: Boolean) {
+        check(prefs(context).edit().putBoolean("identity_paused", paused).commit()) { "Could not persist identity state" }
+    }
     fun saveSandbox(context: Context, host: String) {
         check(prefs(context).edit().putString("sandbox_host", DemoRemote.coreHost(host)).commit()) { "Could not persist sandbox host" }
     }

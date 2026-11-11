@@ -39,4 +39,5 @@ class AgentSdkException(
     val field: String? = null,
     val retryable: Boolean = false,
     cause: Throwable? = null,
+    val runtimeCode: String? = null,
 ) : RuntimeException(message, cause)

@@ -350,7 +350,12 @@ class MainActivity : Activity() {
         val host=endpoint.text.toString().trim()
         val request=JSONObject().put("command",command).put("request_id",UUID.randomUUID().toString())
             .put("language",if(english) "en" else "zh")
-        if(command=="PATROL") request.put("area",area.text.toString())
+        if(command=="PATROL") {
+            val dog = dogEndpoint.text.toString().trim()
+            try { DemoRemote.endpoint(dog) }
+            catch (e: Exception) { result.text=tr("请先填写机器狗地址", "Enter the dog address first"); return }
+            request.put("area",area.text.toString()).put("dog_endpoint",dog)
+        }
         if(command=="CONFIG_CORE") request.put("host",core.text.toString().trim())
         if(command=="CONFIG_SANDBOX") request.put("host",sandbox.text.toString())
         val wire=try { DemoRemote.endpoint(host); DemoRemote.envelope(request.toString()) }
@@ -435,7 +440,7 @@ class MainActivity : Activity() {
             view.isEnabled=when(command) {
                 "RESET" -> idle && snapshot.optBoolean("reset_available")
                 "DEREGISTER_GLASSES" -> !inFlight
-                "PATROL" -> idle && snapshot.optBoolean("ready") && !snapshot.optBoolean("connected") && phase in setOf("IDLE","LISTENING","COMPLETED","ABORTED")
+                "PATROL" -> idle && !snapshot.optBoolean("connected") && phase in setOf("IDLE","LISTENING","COMPLETED","ABORTED")
                 "CONFIRM" -> idle && phase=="DISPATCHING"
                 "CANCEL" -> idle && (phase=="DISPATCHING" || snapshot.optBoolean("pending_expel"))
                 "CONFIRM_EXPEL" -> idle && snapshot.optBoolean("pending_expel")

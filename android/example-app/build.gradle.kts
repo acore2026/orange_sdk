@@ -13,8 +13,8 @@ android {
         applicationId = "com.rayneo.agent.example"
         minSdk = 26
         targetSdk = 34
-        versionCode = 64
-        versionName = "0.2.62-warn-patrol"
+        versionCode = 65
+        versionName = "0.2.63-patrol-prepare"
     }
 
     flavorDimensions += "deployment"

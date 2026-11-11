@@ -684,9 +684,11 @@ class OkHttpRuntimeTransport(
     override suspend fun request(method: String, path: String, body: JsonObject): JsonObject {
         val response = requestWithStatus(method, path, body)
         if (response.statusCode !in 200..299) {
+            val runtimeCode = response.body.string("code")
             throw AgentSdkException(
                 ErrorCode.RUNTIME_REJECTED,
-                "Runtime returned HTTP ${response.statusCode}",
+                "Runtime returned HTTP ${response.statusCode}" + (runtimeCode?.let { ": $it" } ?: ""),
+                runtimeCode = runtimeCode,
             )
         }
         return response.body

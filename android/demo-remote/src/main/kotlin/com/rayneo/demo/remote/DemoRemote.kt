@@ -108,14 +108,15 @@ object DemoRemote {
     }
 
     /** POST once; subsequent requests only retrieve this operation's result. */
-    fun dogIdentity(endpoint: String, requestId: String, submit: Boolean): String {
+    fun dogIdentity(endpoint: String, requestId: String, submit: Boolean, operation: String = "deregister"): String {
+        require(operation in setOf("deregister", "prepare"))
         require(requestId.matches(Regex("[a-zA-Z0-9_-]{8,80}")))
         val uri = URI("http://${endpoint.trim()}")
         require(uri.userInfo == null && uri.path.orEmpty().isEmpty() && uri.query == null && uri.fragment == null && uri.host != null)
         val host = coreHost(uri.host)
         val port = if (uri.port == -1) 8081 else uri.port
         require(port in 1..65535)
-        val path = if (submit) "/identity/deregister" else "/identity/status?request_id=$requestId"
+        val path = if (submit) "/identity/$operation" else "/identity/status?request_id=$requestId"
         val connection = URI("http://$host:$port$path").toURL().openConnection() as HttpURLConnection
         return try {
             connection.connectTimeout = 4000

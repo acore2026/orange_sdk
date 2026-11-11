@@ -196,7 +196,14 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             "正在申请安全网络权限并恢复数字身份",
         )
         setPrimaryAction(PrimaryMode.BUSY, "正在连接…")
-        window.decorView.post { beginConnection() }
+        if (DemoSettings.identityPaused(this)) {
+            identityState = "NO_IDENTITY"
+            remoteResult = "Identity deregistered; click Patrol on phone to prepare both devices"
+            setStatus("身份已注销", "点击手机 Patrol 准备两端身份和能力")
+            setPrimaryAction(PrimaryMode.RETRY, "Reconnect")
+        } else {
+            window.decorView.post { beginConnection() }
+        }
         remoteServer = DemoRemoteServer(::handleRemoteLine) { error ->
             Log.w(APP_LOG_TAG, "PHONE REMOTE: ${error.message}")
         }.also { it.start() }
@@ -243,7 +250,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         remoteRequests[id]?.let { return if (it.first == fingerprint) it.second else "ERR REQUEST_ID_CONFLICT" }
         if (remoteBusy || resetInProgress || stopInProgress || computeStarting || voiceActionRunning || patrolActionRunning) return "ERR BUSY"
         if (voiceRecordingMode != null && command != "VOICE_STOP") return "ERR RECORDING"
-        if (command !in setOf("RESET", "CONFIG_CORE", "CONFIG_SANDBOX", "DEREGISTER_GLASSES", "VIDEO_SHOW", "VIDEO_HIDE") && sdkFeatureState?.agentReady != true) return "ERR NOT_READY"
+        if (command !in setOf("PATROL", "RESET", "CONFIG_CORE", "CONFIG_SANDBOX", "DEREGISTER_GLASSES", "VIDEO_SHOW", "VIDEO_HIDE") && sdkFeatureState?.agentReady != true) return "ERR NOT_READY"
         if (command == "PATROL" && (messageSession != null || patrolState.phase !in setOf(PatrolPhase.IDLE, PatrolPhase.LISTENING, PatrolPhase.COMPLETED, PatrolPhase.ABORTED))) return "ERR INVALID_PHASE"
         if (command == "CONFIRM" && patrolState.phase != PatrolPhase.DISPATCHING) return "ERR NO_CANDIDATE"
         if (command in setOf("WARN", "DETER", "EXPEL", "CONFIRM_EXPEL", "RTC_RECONNECT", "FORWARD", "BACK", "LEFT", "RIGHT", "STOP") && messageSession == null) return "ERR NO_GROUP"
@@ -257,6 +264,11 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             ?: return "ERR INVALID_HOST" else null
         val area = request.optString("area", "A区域").trim()
         if (command == "PATROL" && area.length !in 1..80) return "ERR INVALID_AREA"
+        val dogEndpoint = if (command == "PATROL") {
+            request.optString("dog_endpoint").trim().also {
+                if (runCatching { DemoRemote.endpoint(it) }.isFailure) return "ERR INVALID_DOG_ENDPOINT"
+            }
+        } else ""
         val response = "OK ACCEPTED $id"
         // Retain for this Activity's entire lifetime. At the limit require restart, never evict IDs.
         if (remoteRequests.size >= 4096) return "ERR REQUEST_LIMIT_RESTART_APP"
@@ -272,6 +284,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 DemoSettings.saveSandbox(this, coreHost!!)
                 remoteResult = "Sandbox saved; restart glasses app to apply"
             }
+            "PATROL" -> startPreparedPatrol(dogEndpoint, area)
             "RESET" -> resetPatrolFromPhone()
             "DEREGISTER_GLASSES" -> deregisterFromPhone(id)
             "VIDEO_SHOW", "VIDEO_HIDE" -> {
@@ -298,10 +311,6 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                 lifecycleScope.launch {
                     try {
                         when (command) {
-                            "PATROL" -> {
-                                remoteSubtitle = "Send the robot dog to patrol $area"
-                                active.startManualPatrol(area, remoteEnglish)
-                            }
                             "CONFIRM" -> {
                                 remoteSubtitle = "Confirm dispatch"
                                 active.confirmInteractivePatrol()
@@ -342,7 +351,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                         remoteResult = "Completed: $command"
                     } catch (error: CancellationException) { throw error }
                     catch (error: Exception) {
-                        remoteResult = "Failed: $command"
+                        remoteResult = "Failed: $command: ${error.message ?: error::class.java.simpleName}"
                         appendLog(LabLogLevel.ERROR, "PHONE REMOTE", remoteResult)
                         displayNotice = "Command incomplete · Check phone"
                     } finally {
@@ -354,6 +363,83 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
             }
         }
         return response
+    }
+
+    /** Patrol prepares both participants, then discovers only. Confirm dispatches separately. */
+    private fun startPreparedPatrol(dogEndpoint: String, area: String) {
+        remoteBusy = true
+        displayNotice = "Preparing robot dog"
+        remoteResult = "Patrol: preparing dog identity and capabilities"
+        refreshVoiceActions()
+        lifecycleScope.launch {
+            try {
+                kotlinx.coroutines.withTimeout(185_000) {
+                    val id = java.util.UUID.randomUUID().toString()
+                    var result = withContext(Dispatchers.IO) {
+                        JSONObject(DemoRemote.dogIdentity(dogEndpoint, id, true, "prepare"))
+                    }
+                    while (result.optString("state") == "RUNNING") {
+                        kotlinx.coroutines.delay(500)
+                        result = withContext(Dispatchers.IO) {
+                            JSONObject(DemoRemote.dogIdentity(dogEndpoint, id, false, "prepare"))
+                        }
+                    }
+                    check(result.optBoolean("ok") && result.optString("state") == "READY") {
+                        "Dog preparation failed: ${result.optString("message", result.toString())}"
+                    }
+                }
+                remoteResult = "Patrol: preparing glasses identity and capabilities"
+                displayNotice = "Preparing glasses"
+                renderPatrolHud()
+                if (sdkFeatureState?.agentReady != true || runner == null) {
+                    closeResources()
+                    val completion = kotlinx.coroutines.CompletableDeferred<Unit>()
+                    identityRecovery = completion
+                    beginConnection()
+                    try {
+                        kotlinx.coroutines.withTimeout(90_000) { completion.await() }
+                    } catch (error: Exception) {
+                        closeResources()
+                        throw error
+                    } finally {
+                        identityRecovery = null
+                    }
+                } else {
+                    try {
+                        kotlinx.coroutines.withTimeout(90_000) {
+                            withContext(Dispatchers.IO) { runner!!.preparePatrolIdentity() }
+                        }
+                    } catch (error: Exception) {
+                        closeResources()
+                        throw error
+                    }
+                }
+                identityState = "READY"
+                identityResult = "Glasses identity validated and capabilities published"
+                remoteResult = "Patrol: discovering robot dog"
+                displayNotice = "Finding robot dog"
+                remoteSubtitle = "Send the robot dog to patrol $area"
+                kotlinx.coroutines.withTimeout(60_000) { runner!!.startManualPatrol(area, remoteEnglish) }
+                remoteResult = "Patrol ready: confirm to dispatch"
+                displayNotice = ""
+            } catch (error: kotlinx.coroutines.TimeoutCancellationException) {
+                remoteResult = "Failed: $remoteResult: timed out; retry Patrol"
+                displayNotice = "Preparation timed out · Check phone"
+                patrolState = PatrolState(phase = PatrolPhase.ABORTED)
+                appendLog(LabLogLevel.ERROR, "PATROL PREPARE", remoteResult)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                remoteResult = "Failed: $remoteResult: ${error.message ?: error::class.java.simpleName}"
+                displayNotice = "Preparation incomplete · Check phone"
+                patrolState = PatrolState(phase = PatrolPhase.ABORTED)
+                appendLog(LabLogLevel.ERROR, "PATROL PREPARE", remoteResult)
+            } finally {
+                remoteBusy = false
+                renderPatrolHud()
+                refreshVoiceActions()
+            }
+        }
     }
 
     private fun renderDeployment() {
@@ -493,7 +579,9 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
                     true
                 }
                 check(finished == true) { "Deregistration timed out" }
+                DemoSettings.saveIdentityPaused(this@RayNeoMainActivity, true)
                 closeResources()
+                patrolState = PatrolState()
                 identityState = "NO_IDENTITY"
                 identityResult = "Glasses identity deregistered"
                 setPrimaryAction(PrimaryMode.RETRY, "Reconnect")
@@ -670,6 +758,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
         if (state.agentReady) identityRecovery?.complete(Unit)
         runOnUiThread {
             sdkFeatureState = state
+            if (state.agentReady && DemoSettings.identityPaused(this)) DemoSettings.saveIdentityPaused(this, false)
             patrolState = stateToPatrolState(state, patrolState)
             renderPatrolHud()
             refreshVoiceActions()
@@ -731,6 +820,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private fun confirmPatrolCandidate() {
+        if (remoteBusy) return
         val activeRunner = runner ?: return
         val retryVideo = patrolState.phase == PatrolPhase.INSPECTING && patrolState.failureReason != null
         if (patrolActionRunning || (patrolState.phase != PatrolPhase.DISPATCHING && !retryVideo)) return
@@ -758,6 +848,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     }
 
     private fun rejectPatrolCandidate() {
+        if (remoteBusy) return
         val activeRunner = runner ?: return
         if (patrolActionRunning) return
         patrolActionRunning = true
@@ -898,6 +989,7 @@ class RayNeoMainActivity : BaseMirrorActivity<ActivityRayneoMainBinding>() {
     } ?: "等待巡逻指令"
 
     private fun toggleVoiceRecording(mode: VoiceMode) {
+        if (remoteBusy) return
         if (voiceRecordingMode == mode && voiceRecorder.isRecording) {
             stopAndSubmitVoice(mode)
             return
