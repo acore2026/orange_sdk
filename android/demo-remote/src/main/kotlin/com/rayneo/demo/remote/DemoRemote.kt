@@ -56,7 +56,10 @@ object DemoRemote {
         readLine(socket.getInputStream())
     }
 
-    /** Re-arm the shared presentation at the end of step 2, waiting for the dog. */
+    /** Studio is hosted alongside the core, on its own HTTP port. */
+    fun studioEndpointForCore(raw: String): String = "${coreHost(raw)}:7865"
+
+    /** Restart the shared presentation idle and request the default browser view. */
     fun resetStudio(endpoint: String): String {
         val address = endpoint(endpoint)
         val port = if (URI("tcp://${endpoint.trim()}").port == -1) 7865 else address.port
@@ -70,7 +73,7 @@ object DemoRemote {
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/json")
             connection.outputStream.use {
-                it.write("{\"action\":\"reset_checkpoint1\"}".toByteArray(Charsets.UTF_8))
+                it.write("{\"action\":\"reset_idle\"}".toByteArray(Charsets.UTF_8))
             }
             val code = connection.responseCode
             val body = (if (code in 200..299) connection.inputStream else connection.errorStream)

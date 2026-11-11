@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
+import androidx.core.widget.doAfterTextChanged
 import android.view.View
 import android.view.WindowManager
 import android.widget.*
@@ -32,7 +33,7 @@ class MainActivity : Activity() {
     private lateinit var glassesCoreResult: TextView
     private lateinit var dogCoreResult: TextView
     private lateinit var sandboxResult: TextView
-    private lateinit var studioEndpoint: EditText
+    private lateinit var studioEndpoint: TextView
     private lateinit var studioResult: TextView
     private var glassesIdentityId = ""
     private var dogConnectedHost = ""
@@ -131,8 +132,15 @@ class MainActivity : Activity() {
         sandbox = input(tr("Sandbox IP 或域名", "Sandbox IP or hostname"), prefs.getString("sandbox", "192.168.2.150")!!)
         button(tr("更新眼镜 Sandbox", "Update glasses Sandbox")) { send("CONFIG_SANDBOX") }
         sandboxResult = label(tr("Sandbox：尚无操作", "Sandbox: no operation"), 13, "#B5C7D4")
-        studioEndpoint = input(tr("Studio IP:端口", "Studio IP:port"), prefs.getString("studio", "192.168.1.13:7865")!!)
-        studioResult = label(tr("Studio：Reset 时回到 checkpoint 1", "Studio: Reset returns to checkpoint 1"), 13, "#B5C7D4")
+        studioEndpoint = label("", 13, "#B5C7D4")
+        fun refreshStudioEndpoint() {
+            studioEndpoint.text = runCatching { DemoRemote.studioEndpointForCore(core.text.toString()) }
+                .fold({ tr("Studio（跟随核心网）：", "Studio (same host as core): ") + it },
+                    { tr("Studio：请先填写有效的核心网地址", "Studio: enter a valid core address first") })
+        }
+        core.doAfterTextChanged { refreshStudioEndpoint() }
+        refreshStudioEndpoint()
+        studioResult = label(tr("Studio：Reset 时重置演示并恢复默认视角", "Studio: Reset restarts presentation and restores default view"), 13, "#B5C7D4")
         button("English / 中文") {
             saveInputs(); english = !english; prefs.edit().putBoolean("english", english).apply(); buildUi()
         }
@@ -140,7 +148,7 @@ class MainActivity : Activity() {
         body = workflow
         label(tr("遥控", "Remote control"), 22)
         action("RESET", tr("重置巡检 · Reset", "Reset patrol"))
-        label(tr("结束巡检并重连，保留身份；演示回到 checkpoint 1，等待再次派遣。", "End patrol and reconnect with saved identity; return presentation to checkpoint 1."), 12, "#8297AB")
+        label(tr("结束巡检并重连，保留身份；演示回到起点并恢复默认视角，等待播放。", "End patrol and reconnect with saved identity; return presentation to the beginning and restore default view, ready to play."), 12, "#8297AB")
         area = input(tr("巡逻区域", "Patrol area"), prefs.getString("area", "A区域")!!)
         section(tr("巡逻", "Patrol"))
         row {
@@ -283,7 +291,7 @@ class MainActivity : Activity() {
         prefs.edit().putString("endpoint",endpoint.text.toString().trim())
             .putString("area",area.text.toString()).putString("core",core.text.toString())
             .putString("sandbox", sandbox.text.toString().trim())
-            .putString("studio", studioEndpoint.text.toString().trim())
+            .remove("studio")
             .putString("dog_endpoint", dogEndpoint.text.toString().trim())
             .apply()
     }
@@ -357,7 +365,7 @@ class MainActivity : Activity() {
         if (command == "DEREGISTER_GLASSES") glassesIdentityId = request.getString("request_id")
         if (command != "STATUS") operationResult(command).text = tr("处理中…", "Processing…")
         else glassesConnection.text = tr("正在连接眼镜…", "Connecting glasses…")
-        val studioHost = studioEndpoint.text.toString().trim()
+        val studioCoreHost = core.text.toString().trim()
         saveInputs(); inFlight=true; updateControls()
         io.execute {
             val response=runCatching { DemoRemote.exchange(host,wire) }
@@ -365,17 +373,20 @@ class MainActivity : Activity() {
             // Keep its result separate from the glasses' asynchronous reset status.
             val studioResponse = if (command == "RESET" && response.getOrNull()?.startsWith("OK") == true) {
                 runCatching {
-                    val state = JSONObject(DemoRemote.resetStudio(studioHost))
-                    check(state.optString("status") == "waiting" && state.optInt("waiting_checkpoint") == 1 &&
-                        state.optInt("step") == 2 && state.optInt("released_checkpoints") == 0) {
-                        "Studio did not confirm checkpoint 1"
+                    val state = JSONObject(DemoRemote.resetStudio(DemoRemote.studioEndpointForCore(studioCoreHost)))
+                    check(state.optString("scenario") == "acn-campus" && state.optString("run_id").isNotBlank() &&
+                        state.optString("status") == "ready" && state.optInt("waiting_checkpoint", -1) == 0 &&
+                        state.optInt("released_checkpoints", -1) == 0 && state.optDouble("elapsed_ms") == 0.0 &&
+                        state.optDouble("wire_elapsed_ms") == 0.0 &&
+                        state.optString("view_reset_id") == state.optString("run_id")) {
+                        "Studio did not confirm presentation and view reset; check Studio version"
                     }
                 }
             } else null
             main.post {
                 if(isDestroyed) return@post
                 studioResponse?.onSuccess {
-                    studioResult.text = tr("Studio：已回到 checkpoint 1，等待机器狗站立", "Studio: checkpoint 1, waiting for dog stand-up")
+                    studioResult.text = tr("Studio：演示已重置，已通知页面恢复默认视角，等待播放", "Studio: presentation reset; default view requested; ready to play")
                     Toast.makeText(this, studioResult.text, Toast.LENGTH_SHORT).show()
                 }?.onFailure {
                     studioResult.text = tr("Studio 重置失败：", "Studio reset failed: ") + it.message
