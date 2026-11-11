@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# Use a Windows Python executable, not WSL Python, to use Windows networking.
+WINDOWS_PYTHON=${WINDOWS_PYTHON:-python.exe}
+if ! command -v "$WINDOWS_PYTHON" >/dev/null 2>&1; then
+  echo 'Set WINDOWS_PYTHON to the WSL path of a Windows python.exe installation.' >&2
+  exit 2
+fi
+exec "$WINDOWS_PYTHON" -u "$(wslpath -w "$SCRIPT_DIR/windows_tcp.py")" "$@"
