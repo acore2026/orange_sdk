@@ -83,6 +83,7 @@ def main():
                         'post-install failure automatic rollback','Agent dry run without device commands'],
               'hardware_acceptance':'Pending on the destination Nano; no robot audio upload, playback, motion, camera or core-network integration executed',
               'previous_patch_rollback_then_new_install':'passed' if 'PREVIOUS_PATCH_ROLLBACK_TO_NEW_BASE_PASS' in log else 'not tested',
+              'migration_releases':re.findall(r'^MIGRATION_RELEASE_PASSED (.+)$',log,re.M),
               'tested_files':inputs['files'],
               'input_snapshot_sha256':sha(a.validation_inputs),
               'validation_log_sha256':sha(a.validation_log)}
@@ -107,7 +108,7 @@ Jetson 设备树型号和 systemctl 的停止状态由测试夹具模拟，其�
 `harness/` 是构建机验证过程存档，路径指向构建机的原始镜像和工作目录；不要在机器狗上执行这些脚本。
 新狗只需按包根目录 README.md 操作。测试代码分别位于 installer-tests、overlay-tests、sdk-tests；应用测试随 payload 安装。
 '''.replace('@TEST_SUMMARY@','控制端 %s 项、Agent %s 项、安装器 %s 项、现场 Studio 增量 %s 项、已安装 SDK 自适应策略 %s 项，共 %s 项通过。' % (*counts,sum(counts)))
-        .replace('@MIGRATION_RESULT@','- 20261110 旧补丁安装 → 拒绝直接叠加新版 → 用旧包回滚 → 新版安装的迁移顺序通过。' if 'PREVIOUS_PATCH_ROLLBACK_TO_NEW_BASE_PASS' in log else ''))
+        .replace('@MIGRATION_RESULT@','- 旧补丁安装 → 拒绝直接叠加新版 → 用旧包回滚 → 新版安装的迁移顺序通过；具体旧版本见 results.json 的 migration_releases。' if 'PREVIOUS_PATCH_ROLLBACK_TO_NEW_BASE_PASS' in log else ''))
     source=bundle/'sources/release-tools';source.mkdir(exist_ok=True)
     for name in ('build_patch.py','finalize_patch.py'):
         shutil.copy2(Path(__file__).parent/name,source/name)

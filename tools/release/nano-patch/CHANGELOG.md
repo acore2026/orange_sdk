@@ -1,16 +1,25 @@
 # 20261013 基线 → @RELEASE_DATE@ 累计差异
 
-## 2026-11-12 源码整理与后续重建
+## 20261112 发布包来源与实机核查
+
+以下“本包”指已归档的 20261112 发布包；人工核查文件不由 build_patch.py 自动生成，
+后续重建须记录自己的来源和验收结果。
 
 当前 dog `orange_dog/a2c35bc`、dog-ctrl `orange_dog/866bdd2` 已包含此前 Studio/Warning 增量，
-狗实机与本地分别核对 26/22 个跟踪文件一致。新增 dog Patrol 身份准备配套手机 1.2.7、眼镜 0.2.63。
+本轮通过 SSH 实读，狗实机与本地分别核对 26/22 个跟踪文件一致，两个仓库工作区干净。新增 dog Patrol 身份准备配套手机 1.2.7、眼镜 0.2.63。
 构建器默认只收集干净 HEAD 的普通文件；未跟踪文件不入包，现场覆盖必须显式注明来源。
 SDK wheel 模块须与所选 SDK HEAD 一致，最终归档须绑定验收前输入快照。
 
 以下表格与现场差异均是**历史 20261111 包**的来源记录，不能用来声称当前源码仍未提交，
 也不能当作最新 a2c35bc/866bdd2 重建包的验证结果。重建包以自身 manifest、overlay diff 和新 validation 为准。
-历史 live-audit.json、previous-patch-to-live.patch 由当时人工取证产生，构建脚本不自动生成这些额外证据。
+本包的 `live-audit.json` 是本轮实读核查结果；`sources/previous-patch-to-current.patch` 列出相对 20261111 的代码变化。
 Studio 属于 Free6GC 主仓库，Sandbox 不提供 Studio 检查点。
+
+本包增加 `/identity/prepare`、能力发布校验、注销暂停持久化及错误分类处理；设备调用链与最新已提交源码一致。
+Python SDK 运行模块没有新增变化，复用经 HEAD 模块校验的 `0.17.11+orange.20261110` wheel。
+现役外层启动脚本是薄包装；仓库内启动脚本与旧 Nano 根启动脚本完全相同，本包保留旧 Nano 布局及配置。
+现役 SDK 的版本元数据/`__init__` 回退值仍与打包 wheel 不同，业务模块相同；语音脚本、正式 WAV 和 162 个导航源码文件无新增变化。
+现役音频环境路径、已上传 UUID、网络配置和 Agent 身份属于设备数据，不复制到新狗。
 
 ## 历史发布差异
 

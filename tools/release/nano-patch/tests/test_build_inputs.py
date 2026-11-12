@@ -116,6 +116,12 @@ class BuildInputsTests(unittest.TestCase):
             finalize_patch.check_validation_inputs(bundle, harness, snapshot, marker)
 
     def test_finalize_cli_seals_fixture_with_bound_evidence(self):
+        self.check_finalize_migrations([])
+
+    def test_finalize_cli_records_both_migration_releases(self):
+        self.check_finalize_migrations(['orange-nano-patch-20261110', 'orange-nano-patch-20261111'])
+
+    def check_finalize_migrations(self, releases):
         # Synthetic log exercises archive wiring; it is not hardware evidence.
         bundle, harness, snapshot, _ = self.evidence_fixture()
         snapshot.unlink()
@@ -128,10 +134,12 @@ class BuildInputsTests(unittest.TestCase):
         marker = subprocess.check_output(args + ['--snapshot-validation'], text=True)
         log = self.root / 'validation.log'
         log.write_text(marker + ''.join('Ran %s tests in 0.1s\n\nOK\n' % n for n in (49, 51, 10, 3, 3))
+                       + ''.join('MIGRATION_RELEASE_PASSED ' + release + '\n' for release in releases)
                        + 'AUTOMATIC_FAILURE_ROLLBACK_PASS\nARM64_OFFLINE_PATCH_VALIDATION_PASSED\n')
         subprocess.run(args + ['--validation-log', str(log)], check=True, capture_output=True)
         results = json.loads((bundle / 'validation/results.json').read_text())
         self.assertEqual(results['input_snapshot_sha256'], finalize_patch.sha(snapshot))
+        self.assertEqual(results['migration_releases'], releases)
         self.assertEqual(results['tested_files']['update.py'], finalize_patch.sha(bundle / 'update.py'))
         checks = json.loads((bundle / 'checksums.json').read_text())
         self.assertTrue(all(finalize_patch.sha(bundle / name) == digest for name, digest in checks.items()))
