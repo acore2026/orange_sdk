@@ -69,8 +69,8 @@ def select_live_dog(committed, live, reason):
 
 def verify_sdk_wheel(repo, wheel):
     head = git(repo, 'rev-parse', 'HEAD')
-    paths = git(repo, 'ls-tree', '-r', '--name-only', head, '--', 'python/src/agent_sdk').splitlines()
-    expected = {p.removeprefix('python/src/'): subprocess.check_output(
+    paths = git(repo, 'ls-tree', '-r', '--name-only', head, '--', 'sdks/python/src/agent_sdk').splitlines()
+    expected = {p.removeprefix('sdks/python/src/'): subprocess.check_output(
         ['git', '-C', str(repo), 'show', head+':'+p]) for p in paths}
     with zipfile.ZipFile(wheel) as archive:
         actual = {p: archive.read(p) for p in archive.namelist()
@@ -144,7 +144,7 @@ def build(a, release, voice, snapshots, repos, live, overlay, sdk_head):
         path.chmod(mode)
         files.append({'path':dest,'before':hashlib.sha256(old[dest]).hexdigest() if dest in old else None,'after':sha(path),'mode':mode})
     sdkrepo=a.orange_root/'sdk'
-    repos['sdk']={'head':sdk_head,'branch':git(sdkrepo,'branch','--show-current'),'python_changes':git(sdkrepo,'diff','--stat','bed37bce',sdk_head,'--','python')}
+    repos['sdk']={'head':sdk_head,'branch':git(sdkrepo,'branch','--show-current'),'python_changes':git(sdkrepo,'diff','--stat','bed37bce',sdk_head,'--','sdks/python')}
     (out/'wheelhouse').mkdir()
     shutil.copy2(a.sdk_wheel,out/'wheelhouse'/a.sdk_wheel.name)
     (out/'voice-wheelhouse').mkdir()
@@ -152,8 +152,10 @@ def build(a, release, voice, snapshots, repos, live, overlay, sdk_head):
     def wheel_hashes(raw):
         with zipfile.ZipFile(io.BytesIO(raw)) as z:
             return {n:hashlib.sha256(z.read(n)).hexdigest() for n in z.namelist() if n.startswith('agent_sdk/') and not n.endswith('/')}
-    # Preserve Python SDK source and its tests so the packaged wheel is reviewable.
-    raw=subprocess.check_output(['git','-C',str(sdkrepo),'archive',sdk_head,'python'])
+    # Include relocated examples, application and contract sources used by SDK tests.
+    raw=subprocess.check_output(['git','-C',str(sdkrepo),'archive',sdk_head,
+                                 'sdks/python','examples/python','apps/dog-patrol',
+                                 'integration-tests'])
     (out/'sources').mkdir()
     committed_dog=snapshots['dog']['orange_dog.py'].read_text()
     (out/'sources/live-dog-overlay.patch').write_text(''.join(difflib.unified_diff(
@@ -163,7 +165,7 @@ def build(a, release, voice, snapshots, repos, live, overlay, sdk_head):
         for m in t:
             if m.isfile():
                 target=out/'sources/sdk'/m.name;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(t.extractfile(m).read())
-    cfg=out/'sources/sdk/python/setup.cfg'
+    cfg=out/'sources/sdk/sdks/python/setup.cfg'
     cfg.write_text(cfg.read_text().replace('version = 0.17.11','version = 0.17.11+orange.20261110'))
     # Base package may have extra files compared with git; do not infer deletions.
     manifest={'format':1,'release':release,'base_release':BASE_RELEASE,'base_archive_sha256':BASE_DIGEST,

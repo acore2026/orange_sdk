@@ -20,9 +20,10 @@ from pathlib import Path
 
 
 HERE = Path(__file__).resolve().parent
-WORKSPACE = HERE.parents[2]
+SDK_ROOT = HERE.parents[1]
+WORKSPACE = SDK_ROOT.parent
 REPOSITORIES = {
-    "sdk": WORKSPACE / "sdk",
+    "sdk": SDK_ROOT,
     "dog": WORKSPACE / "compute_backend/dog",
     "dog-ctrl": WORKSPACE / "compute_backend/dog-ctrl",
     "nav": WORKSPACE / "compute_backend/nav",
@@ -58,7 +59,7 @@ def build(output: Path, *, wheel: Path, rayneo_apk: Path | None, phone_apk: Path
         dirty = run("git", "status", "--porcelain", "--untracked-files=all", cwd=repo).decode().splitlines()
         # The SDK checkout also contains unrelated sandbox packaging edits;
         # they are intentionally outside this release and untouched here.
-        relevant = [line for line in dirty if name != "sdk" or not line[3:].startswith("mock-video-server/")]
+        relevant = [line for line in dirty if name != "sdk" or not line[3:].startswith("mock-service/mock-sandbox/")]
         if relevant:
             raise SystemExit(f"Uncommitted release changes in {repo}: {relevant[:8]}")
         commits[name] = run("git", "rev-parse", "HEAD", cwd=repo).decode().strip()

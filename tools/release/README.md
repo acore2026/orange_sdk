@@ -19,9 +19,9 @@ Build after all four repositories are committed and tested:
 ```bash
 cd /home/huawei/orange/sdk
 python3 tools/release/build_demo_bundle.py /home/huawei/orange/releases/orange-demo.tar.gz \
-  --wheel python/dist/agent_connect_sdk-0.17.11-py3-none-any.whl \
-  --rayneo-apk android/example-app/build/outputs/apk/rayneo/debug/example-app-rayneo-debug.apk \
-  --phone-apk android/phone-controller/build/outputs/apk/debug/phone-controller-debug.apk
+  --wheel sdks/python/dist/agent_connect_sdk-0.17.11-py3-none-any.whl \
+  --rayneo-apk apps/rayneo-patrol/build/outputs/apk/rayneo/debug/example-app-rayneo-debug.apk \
+  --phone-apk apps/phone-controller/build/outputs/apk/debug/phone-controller-debug.apk
 ```
 
 If GitHub is intermittently unavailable, download the pinned Unitree source
@@ -38,7 +38,7 @@ installed `dog/start_dog_services.sh`. Review `core.env.example`,
 `dog-init.service.example`, `dog_init.json.example` and
 `video-diagnostics.conf` for the new machine. `ros-logging.conf` sets a
 writable ROS log directory for nav within the original `dog-init.service`.
-The archived `watch.py` is the
+The archived `tools/diagnostics/watch.py` is the
 current video-capture diagnostic source. Do not copy another robot's
 `/root/.local/state/agent-sdk` identity or private keys.
 

@@ -1,4 +1,12 @@
-# 本机更换演示核心网地址
+# 工程与运维工具
+
+- `device/`：设备核心网地址配置、WSL/Windows TCP 中转及其测试。
+- `diagnostics/`：视频编码性能基准、进程诊断和视频参数档。
+- `release/`：源码交付包、Nano 离线安装、累积补丁、验证和回滚。
+
+模块自身的构建、启动和烟测脚本留在模块目录；工具归属规则见 [代码组织规范](../docs/architecture/REPOSITORY_LAYOUT.md)。
+
+## 本机更换演示核心网地址
 
 本工具在当前 Windows 主机的 Ubuntu WSL 环境执行。眼镜通过 USB ADB 配置，机器狗通过本机 Windows SSH 访问。填入新的 IPv4 地址或域名，不带协议或端口。
 
@@ -9,13 +17,13 @@
 眼镜：保存配置并重启眼镜应用，立即按新地址初始化；会中断当前眼镜会话，不会派遣机器狗。
 
 ```powershell
-wsl -d Ubuntu --cd /home/huawei/orange python3 sdk/tools/set_core_address.py glasses --host 101.245.78.174
+wsl -d Ubuntu --cd /home/huawei/orange python3 sdk/tools/device/set_core_address.py glasses --host 101.245.78.174
 ```
 
 机器狗：通过当前手机转发入口保存配置，下一次原服务/Agent 启动生效。
 
 ```powershell
-wsl -d Ubuntu --cd /home/huawei/orange python3 sdk/tools/set_core_address.py dog --host 101.245.78.174 --ssh-host 192.168.137.14
+wsl -d Ubuntu --cd /home/huawei/orange python3 sdk/tools/device/set_core_address.py dog --host 101.245.78.174 --ssh-host 192.168.137.14
 ```
 
 机器狗命令可能依次提示 SSH 密码及 sudo 密码，请在本机终端输入现有凭据。默认 SSH 用户 `unitree`、端口 `40032`。`--ssh-host` 是连接机器狗的入口地址，不是核心网地址；手机转发入口变化时单独修改。
@@ -36,10 +44,10 @@ wsl -d Ubuntu --cd /home/huawei/orange python3 sdk/tools/set_core_address.py dog
 
 ```powershell
 # 查询眼镜地址和 Wi-Fi IP，不写配置
-wsl -d Ubuntu --cd /home/huawei/orange python3 sdk/tools/set_core_address.py glasses
+wsl -d Ubuntu --cd /home/huawei/orange python3 sdk/tools/device/set_core_address.py glasses
 
 # 眼镜只保存，暂不重启
-wsl -d Ubuntu --cd /home/huawei/orange python3 sdk/tools/set_core_address.py glasses --host 101.245.78.174 --no-restart
+wsl -d Ubuntu --cd /home/huawei/orange python3 sdk/tools/device/set_core_address.py glasses --host 101.245.78.174 --no-restart
 ```
 
 可通过 `--serial` / `--adb` 指定眼镜及 ADB；通过 `--ssh-host` / `--ssh-port` / `--ssh-user` / `--ssh` 指定机器狗连接。Linux/WSL 当前目录为 `/home/huawei/orange` 时，可省略 `wsl -d Ubuntu --cd /home/huawei/orange` 前缀。
@@ -54,9 +62,9 @@ wsl -d Ubuntu --cd /home/huawei/orange python3 sdk/tools/set_core_address.py gla
 
 ## 离线视频质量基线
 
-见 [VIDEO_BENCHMARK.md](VIDEO_BENCHMARK.md)，工具 `video_benchmark.py` 和候选档 `video-profiles.json`。无需机器狗或眼镜，编码参数与发包预算分开比较。
+见 [VIDEO_BENCHMARK.md](diagnostics/VIDEO_BENCHMARK.md)，工具 `diagnostics/video_benchmark.py` 和候选档 `diagnostics/video-profiles.json`。无需机器狗或眼镜，编码参数与发包预算分开比较。
 
 ## WSL 通过 Windows 网络栈访问机器狗
 
-见 [dog-access](dog-access/README.md)。中转目标由 SSH `%h/%p` 传入，支持覆盖
+见 [dog-access](device/dog-access/README.md)。中转目标由 SSH `%h/%p` 传入，支持覆盖
 HostName/端口；Windows Python 路径通过 `WINDOWS_PYTHON` 配置，不包含现场凭据。

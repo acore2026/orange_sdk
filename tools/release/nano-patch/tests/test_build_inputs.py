@@ -68,7 +68,7 @@ class BuildInputsTests(unittest.TestCase):
         self.assertTrue(record['matches_repository_head'])
 
     def test_sdk_wheel_must_match_committed_modules(self):
-        src = self.repo / 'python/src/agent_sdk'
+        src = self.repo / 'sdks/python/src/agent_sdk'
         src.mkdir(parents=True)
         (src / '__init__.py').write_text('VERSION = "fixture"\n')
         self.git('add', '.')

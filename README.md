@@ -1,25 +1,60 @@
 # Orange Agent SDK
 
-本仓库包含 Linux/Python SDK 和 Android/RayNeoOS SDK。
+本仓库包含 Linux/Python SDK、Android/RayNeoOS SDK，以及机器狗、眼镜和手机正式应用。
+
+## 代码导航
+
+| 目录 | 职责 |
+| --- | --- |
+| `apps/` | 机器狗巡检、RayNeo 眼镜巡检、手机遥控与设备管理 |
+| `sdks/` | 对外发布的 Python wheel 和 Android AAR |
+| `libs/` | 内部复用的遥控与设备管理通信库 |
+| `examples/` | Python 和 Android SDK 接入示例 |
+| `mock-service/` | 模拟服务及周边配套，当前包含 Mock Sandbox |
+| `integration-tests/` | 跨模块协议、链路和流程验证 |
+| `tools/` | 发布交付、设备配置和诊断工具 |
+| `docs/` | 架构、协议、部署说明与资料 |
+
+新增代码前请阅读下方[开发与代码归属](#开发与代码归属)，详细目录、业务边界、脚本位置和旧路径迁移表见 [代码组织与功能归属](docs/architecture/REPOSITORY_LAYOUT.md)。
+
+目录迁移保留既有接口、包名、版本和 Gradle 项目 ID；历史 CHANGELOG 中的路径代表当时状态。
+
+## 开发与代码归属
+
+- 正式设备业务放在 `apps/`；通用接入 API 放在 `sdks/`；内部复用通信放在 `libs/`。
+- SDK 用法放在 `examples/`；模拟服务及周边配套放在 `mock-service/`。
+- 单元测试随模块放置；跨组件协议与业务验证放在 `integration-tests/`。
+- 构建和启动脚本随模块放置；跨模块发布、设备维护和诊断放在 `tools/`。
+- 模块用法维护在模块 README；项目级架构、协议和部署说明维护在 `docs/`。
+
+目录调整时同步检查 Gradle project/source set、Python 导入和测试数据路径、Docker 构建上下文、发布源码清单、脚本相对路径及 Markdown 链接。
+
+Android/JVM 从仓库根目录使用 `./gradlew`。为兼容现有产物，项目 ID 仍为 `:agent-sdk`、`:example-app`、`:demo-remote`、`:phone-controller`；实际目录由根 `settings.gradle.kts` 映射。
+
+Python 安装使用 `python3 -m pip install -e './sdks/python[test]'`。运行仓库完整测试前，还需安装 Mock Sandbox 依赖：`python3 -m pip install -r mock-service/mock-sandbox/requirements.txt`，然后在根目录执行 `python3 -m pytest -q`。完整测试建议 Python 3.11+；外部 Studio overlay 和真实设备测试按模块说明单独执行。
+
+## SDK 使用入口
+
+SDK 的系统边界、模块职责、4+1 视图、核心流程、接口消息和部署约束见 [Orange Agent SDK 设计文档](<docs/architecture/Orange Agent SDK 设计文档.md>)。
 
 当前 Linux/Python 版本可以构建为 `agent-connect-sdk` wheel。客户安装 wheel 后即可导入 `agent_sdk`，端侧通过 TUN + MASQUE CONNECT-IP 接入外部 AgentRuntime/MASQUE 服务。发送消息时应用提供 `group_id`、`target_agent_id`、消息类型、任务 ID 和消息体；IP、端口和路由始终由 SDK 缓存解析。仓库只交付端侧 Client，不包含 MASQUE Server、UERANSIM 适配器或服务器启动命令。
 
 完整的 wheel 构建、客户安装、端侧 MASQUE 参数、全流程调用示例、函数清单和故障排查见：
 
-- [Linux/Python 客户使用指南](python/README.md)
-- [离线全流程示例](python/examples/full_flow_demo.py)
-- [真实 Linux 全接口调用示例](python/examples/linux_agent.py)
-- [按回车逐接口调用的 Linux 交互示例](python/examples/interactive_linux_agent.py)
-- [Agent A：建组、申请算力会话并验证处理视频](python/examples/agent_a_test.py)
-- [Agent B：发布能力、接受建组并上传本地测试视频](python/examples/agent_b_test.py)
-- [机器狗巡检 Agent：身份注册、巡逻、视觉卸载和 Unitree 动作](python/examples/dog_patrol_agent.md)
-- [ARM64 A/B 全公开接口测试镜像](python/docker/arm64/README.md)
-- [A/B 双实例 MASQUE 消息联调脚本](python/examples/masque_two_instance_test.py)
-- [Android/RayNeoOS 使用说明](android/README.md)
-- [N6 / DN Compute Sandbox Mock 镜像](mock-video-server/README.md)
-- [雷鸟 X3 Pro Agent App 安装说明](雷鸟眼镜App安装说明.md)
-- [Android A/B 双向手动消息联调 App](android/example-app/src/main/kotlin/com/rayneo/agent/example/MainActivity.kt)
-- [Proof 生成与校验说明](Agent-SDK-Proof生成与校验说明.md)
+- [Linux/Python 客户使用指南](sdks/python/README.md)
+- [离线全流程示例](examples/python/full_flow_demo.py)
+- [真实 Linux 全接口调用示例](examples/python/linux_agent.py)
+- [按回车逐接口调用的 Linux 交互示例](examples/python/interactive_linux_agent.py)
+- [Agent A：建组、申请算力会话并验证处理视频](examples/python/agent_a_test.py)
+- [Agent B：发布能力、接受建组并上传本地测试视频](examples/python/agent_b_test.py)
+- [机器狗巡检 Agent：身份注册、巡逻、视觉卸载和 Unitree 动作](apps/dog-patrol/README.md)
+- [ARM64 A/B 全公开接口测试镜像](examples/python/docker/arm64/README.md)
+- [A/B 双实例 MASQUE 消息联调脚本](integration-tests/scenarios/masque_two_instance_test.py)
+- [Android/RayNeoOS 使用说明](sdks/android/README.md)
+- [N6 / DN Compute Sandbox Mock 镜像](mock-service/mock-sandbox/README.md)
+- [雷鸟 X3 Pro Agent App 安装说明](docs/deployment/雷鸟眼镜App安装说明.md)
+- [Android A/B 双向手动消息联调 App](examples/android/src/main/kotlin/com/rayneo/agent/example/MainActivity.kt)
+- [Proof 生成与校验说明](docs/protocols/Agent-SDK-Proof生成与校验说明.md)
 
 当前封闭内测构建保留 MASQUE TLS 1.3 加密，但关闭服务端证书链和名称校验；
 连接时会记录明确的安全警告。SDK 首次启动仍会在端侧私有目录生成并复用
@@ -100,8 +135,8 @@ A2A 消息使用
 
 这两个接口独立于 `init` 和发送函数；注册动作不发送 HTTP，实际 Runtime 下行
 WebSocket 与本地 `/A2A/message` 服务由初始化启动。完整签名、返回动作和注销方式见
-[Python 使用指南](python/README.md#41-创建-sdk-和注册监听器)与
-[Android 回调注册接口](android/README.md#callback-registration-apis)。
+[Python 使用指南](sdks/python/README.md#41-创建-sdk-和注册监听器)与
+[Android 回调注册接口](sdks/android/README.md#callback-registration-apis)。
 
 正式算力会话统一调用 AgentRuntime 的
 `POST /v1/computing/session-requests`。Python 接口为
@@ -126,7 +161,7 @@ SDP、Sandbox URL、`binding_ref` 或媒体连接 ID。
 快速验证 Python 实现：
 
 ```bash
-cd python
+cd sdks/python
 python3 -m pip install -r requirements.txt
 python3 -m pip install -e '.[test]'
 pytest -q

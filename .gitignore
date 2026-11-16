@@ -8,8 +8,8 @@ dist/
 logs/
 .gradle/
 **/build/
-android/local.properties
-android/example-app/src/main/res/raw/test_third_party_private_key.pem
+local.properties
+apps/rayneo-patrol/src/main/res/raw/test_third_party_private_key.pem
 *.iml
 .idea/
 
