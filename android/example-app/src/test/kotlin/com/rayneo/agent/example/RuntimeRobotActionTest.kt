@@ -18,7 +18,7 @@ class RuntimeRobotActionTest {
     @Test fun englishDirectionsUseStructuredIntent() {
         val expected = mapOf("forward" to RobotAction.FORWARD, "backward" to RobotAction.BACKWARD,
             "left" to RobotAction.LEFT, "right" to RobotAction.RIGHT, "wave" to RobotAction.WAVE, "deter" to RobotAction.SCRAPE,
-            "expel" to RobotAction.FRONT_POUNCE)
+            "expel" to RobotAction.FRONT_POUNCE, "warn" to RobotAction.WARN, "warning" to RobotAction.WARN)
         expected.forEach { (direction, action) ->
             assertEquals(action, runtimeRobotAction(expel.copy(direction = direction)))
         }

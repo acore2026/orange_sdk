@@ -6,6 +6,7 @@ import com.rayneo.agent.sdk.model.RuntimeAudioResult
 fun runtimeRobotAction(result: RuntimeAudioResult): RobotAction? {
     if (!result.matched || result.executor != "robot dog" || result.type != "movement") return null
     return when (result.direction) {
+        "warn", "warning" -> RobotAction.WARN
         "forward" -> RobotAction.FORWARD
         "backward" -> RobotAction.BACKWARD
         "left" -> RobotAction.LEFT

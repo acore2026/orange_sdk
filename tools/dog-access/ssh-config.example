@@ -1,0 +1,10 @@
+# Copy to ssh-config and replace the documentation IP and absolute script path.
+Host dog
+    HostName 192.0.2.30
+    Port 40032
+    User unitree
+    ProxyCommand /ABSOLUTE/PATH/orange_sdk/tools/dog-access/windows-tcp --host %h --port %p
+    StrictHostKeyChecking yes
+    ConnectTimeout 10
+    ServerAliveInterval 15
+    ServerAliveCountMax 3

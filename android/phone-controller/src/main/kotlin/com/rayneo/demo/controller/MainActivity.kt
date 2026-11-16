@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
+import androidx.core.widget.doAfterTextChanged
 import android.view.View
 import android.view.WindowManager
 import android.widget.*
@@ -32,6 +33,8 @@ class MainActivity : Activity() {
     private lateinit var glassesCoreResult: TextView
     private lateinit var dogCoreResult: TextView
     private lateinit var sandboxResult: TextView
+    private lateinit var studioEndpoint: TextView
+    private lateinit var studioResult: TextView
     private var glassesIdentityId = ""
     private var dogConnectedHost = ""
     private var dogAdminBusy = false
@@ -129,12 +132,23 @@ class MainActivity : Activity() {
         sandbox = input(tr("Sandbox IP 或域名", "Sandbox IP or hostname"), prefs.getString("sandbox", "192.168.2.150")!!)
         button(tr("更新眼镜 Sandbox", "Update glasses Sandbox")) { send("CONFIG_SANDBOX") }
         sandboxResult = label(tr("Sandbox：尚无操作", "Sandbox: no operation"), 13, "#B5C7D4")
+        studioEndpoint = label("", 13, "#B5C7D4")
+        fun refreshStudioEndpoint() {
+            studioEndpoint.text = runCatching { DemoRemote.studioEndpointForCore(core.text.toString()) }
+                .fold({ tr("Studio（跟随核心网）：", "Studio (same host as core): ") + it },
+                    { tr("Studio：请先填写有效的核心网地址", "Studio: enter a valid core address first") })
+        }
+        core.doAfterTextChanged { refreshStudioEndpoint() }
+        refreshStudioEndpoint()
+        studioResult = label(tr("Studio：Reset 时重置演示并恢复默认视角", "Studio: Reset restarts presentation and restores default view"), 13, "#B5C7D4")
         button("English / 中文") {
             saveInputs(); english = !english; prefs.edit().putBoolean("english", english).apply(); buildUi()
         }
 
         body = workflow
         label(tr("遥控", "Remote control"), 22)
+        action("RESET", tr("重置巡检 · Reset", "Reset patrol"))
+        label(tr("结束巡检并重连，保留身份；演示回到起点并恢复默认视角，等待播放。", "End patrol and reconnect with saved identity; return presentation to the beginning and restore default view, ready to play."), 12, "#8297AB")
         area = input(tr("巡逻区域", "Patrol area"), prefs.getString("area", "A区域")!!)
         section(tr("巡逻", "Patrol"))
         row {
@@ -156,6 +170,9 @@ class MainActivity : Activity() {
         row {
             action("EXPEL", tr("发起驱逐", "Request expel"))
             action("CONFIRM_EXPEL", tr("确认驱逐", "Confirm expel"))
+        }
+        row {
+            action("WARN", tr("语音警告 · Warning", "Play Warning"))
         }
         section(tr("语音与视频", "Voice & video"))
         row {
@@ -274,6 +291,7 @@ class MainActivity : Activity() {
         prefs.edit().putString("endpoint",endpoint.text.toString().trim())
             .putString("area",area.text.toString()).putString("core",core.text.toString())
             .putString("sandbox", sandbox.text.toString().trim())
+            .remove("studio")
             .putString("dog_endpoint", dogEndpoint.text.toString().trim())
             .apply()
     }
@@ -332,7 +350,12 @@ class MainActivity : Activity() {
         val host=endpoint.text.toString().trim()
         val request=JSONObject().put("command",command).put("request_id",UUID.randomUUID().toString())
             .put("language",if(english) "en" else "zh")
-        if(command=="PATROL") request.put("area",area.text.toString())
+        if(command=="PATROL") {
+            val dog = dogEndpoint.text.toString().trim()
+            try { DemoRemote.endpoint(dog) }
+            catch (e: Exception) { result.text=tr("请先填写机器狗地址", "Enter the dog address first"); return }
+            request.put("area",area.text.toString()).put("dog_endpoint",dog)
+        }
         if(command=="CONFIG_CORE") request.put("host",core.text.toString().trim())
         if(command=="CONFIG_SANDBOX") request.put("host",sandbox.text.toString())
         val wire=try { DemoRemote.endpoint(host); DemoRemote.envelope(request.toString()) }
@@ -347,11 +370,33 @@ class MainActivity : Activity() {
         if (command == "DEREGISTER_GLASSES") glassesIdentityId = request.getString("request_id")
         if (command != "STATUS") operationResult(command).text = tr("处理中…", "Processing…")
         else glassesConnection.text = tr("正在连接眼镜…", "Connecting glasses…")
+        val studioCoreHost = core.text.toString().trim()
         saveInputs(); inFlight=true; updateControls()
         io.execute {
             val response=runCatching { DemoRemote.exchange(host,wire) }
+            // Only a positively acknowledged RESET may change the presentation.
+            // Keep its result separate from the glasses' asynchronous reset status.
+            val studioResponse = if (command == "RESET" && response.getOrNull()?.startsWith("OK") == true) {
+                runCatching {
+                    val state = JSONObject(DemoRemote.resetStudio(DemoRemote.studioEndpointForCore(studioCoreHost)))
+                    check(state.optString("scenario") == "acn-campus" && state.optString("run_id").isNotBlank() &&
+                        state.optString("status") == "ready" && state.optInt("waiting_checkpoint", -1) == 0 &&
+                        state.optInt("released_checkpoints", -1) == 0 && state.optDouble("elapsed_ms") == 0.0 &&
+                        state.optDouble("wire_elapsed_ms") == 0.0 &&
+                        state.optString("view_reset_id") == state.optString("run_id")) {
+                        "Studio did not confirm presentation and view reset; check Studio version"
+                    }
+                }
+            } else null
             main.post {
                 if(isDestroyed) return@post
+                studioResponse?.onSuccess {
+                    studioResult.text = tr("Studio：演示已重置，已通知页面恢复默认视角，等待播放", "Studio: presentation reset; default view requested; ready to play")
+                    Toast.makeText(this, studioResult.text, Toast.LENGTH_SHORT).show()
+                }?.onFailure {
+                    studioResult.text = tr("Studio 重置失败：", "Studio reset failed: ") + it.message
+                    Toast.makeText(this, studioResult.text, Toast.LENGTH_LONG).show()
+                }
                 inFlight=false
                 if(host!=endpoint.text.toString().trim()) { connected=false; updateControls(); return@post }
                 response.onSuccess { raw ->
@@ -368,6 +413,7 @@ class MainActivity : Activity() {
                         if(sandbox.text.isBlank()) sandbox.setText(snapshot.optString("saved_sandbox_host"))
                     } else {
                         operationResult(command).text=when {
+                            raw.startsWith("OK") && command=="RESET" -> tr("已接收，眼镜正在重置并重新连接…", "Accepted; resetting and reconnecting glasses…")
                             raw.startsWith("OK") && command=="CONFIG_CORE" -> tr("眼镜核心网已保存：", "Glasses core saved: ")+request.optString("host")+tr(" · 重启生效", " · restart to apply")
                             raw.startsWith("OK") && command=="CONFIG_SANDBOX" -> tr("Sandbox 已保存，重启眼镜生效", "Sandbox saved; restart glasses")
                             raw.startsWith("OK") && command=="DEREGISTER_GLASSES" -> tr("已接收，正在去注册…", "Accepted; deregistering…")
@@ -392,8 +438,9 @@ class MainActivity : Activity() {
         val phase=snapshot.optString("phase")
         controls.forEach { (command,view) ->
             view.isEnabled=when(command) {
+                "RESET" -> idle && snapshot.optBoolean("reset_available")
                 "DEREGISTER_GLASSES" -> !inFlight
-                "PATROL" -> idle && snapshot.optBoolean("ready") && !snapshot.optBoolean("connected") && phase in setOf("IDLE","LISTENING","COMPLETED","ABORTED")
+                "PATROL" -> idle && !snapshot.optBoolean("connected") && phase in setOf("IDLE","LISTENING","COMPLETED","ABORTED")
                 "CONFIRM" -> idle && phase=="DISPATCHING"
                 "CANCEL" -> idle && (phase=="DISPATCHING" || snapshot.optBoolean("pending_expel"))
                 "CONFIRM_EXPEL" -> idle && snapshot.optBoolean("pending_expel")

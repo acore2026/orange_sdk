@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 object DemoRemote {
     const val PORT = 8791
     const val MAX_LINE = 8192
-    val commands = setOf("STATUS", "PATROL", "CONFIRM", "CANCEL", "DETER", "EXPEL", "DEREGISTER_GLASSES",
+    val commands = setOf("STATUS", "RESET", "PATROL", "CONFIRM", "CANCEL", "WARN", "DETER", "EXPEL", "DEREGISTER_GLASSES",
         "CONFIRM_EXPEL", "VOICE_START", "VOICE_STOP", "RTC_RECONNECT", "VIDEO_SHOW", "VIDEO_HIDE", "CONFIG_CORE", "CONFIG_SANDBOX", "FORWARD", "BACK", "LEFT", "RIGHT", "STOP")
     fun coreHost(raw: String): String {
         val host = raw.trim().lowercase()
@@ -56,6 +56,33 @@ object DemoRemote {
         readLine(socket.getInputStream())
     }
 
+    /** Studio is hosted alongside the core, on its own HTTP port. */
+    fun studioEndpointForCore(raw: String): String = "${coreHost(raw)}:7865"
+
+    /** Restart the shared presentation idle and request the default browser view. */
+    fun resetStudio(endpoint: String): String {
+        val address = endpoint(endpoint)
+        val port = if (URI("tcp://${endpoint.trim()}").port == -1) 7865 else address.port
+        val connection = URI("http://${address.hostString}:$port/api/showcase/acn-workspace/control")
+            .toURL().openConnection() as HttpURLConnection
+        return try {
+            connection.connectTimeout = 1500
+            connection.readTimeout = 1500
+            connection.instanceFollowRedirects = false
+            connection.requestMethod = "POST"
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.outputStream.use {
+                it.write("{\"action\":\"reset_idle\"}".toByteArray(Charsets.UTF_8))
+            }
+            val code = connection.responseCode
+            val body = (if (code in 200..299) connection.inputStream else connection.errorStream)
+                ?.bufferedReader()?.use { it.readText() }.orEmpty()
+            check(code in 200..299) { "Studio HTTP $code: $body" }
+            body
+        } finally { connection.disconnect() }
+    }
+
     fun dogAdmin(endpoint: String, host: String? = null): String {
         val address = endpoint(endpoint)
         val port = if (URI("tcp://${endpoint.trim()}").port == -1) 8081 else address.port
@@ -81,14 +108,15 @@ object DemoRemote {
     }
 
     /** POST once; subsequent requests only retrieve this operation's result. */
-    fun dogIdentity(endpoint: String, requestId: String, submit: Boolean): String {
+    fun dogIdentity(endpoint: String, requestId: String, submit: Boolean, operation: String = "deregister"): String {
+        require(operation in setOf("deregister", "prepare"))
         require(requestId.matches(Regex("[a-zA-Z0-9_-]{8,80}")))
         val uri = URI("http://${endpoint.trim()}")
         require(uri.userInfo == null && uri.path.orEmpty().isEmpty() && uri.query == null && uri.fragment == null && uri.host != null)
         val host = coreHost(uri.host)
         val port = if (uri.port == -1) 8081 else uri.port
         require(port in 1..65535)
-        val path = if (submit) "/identity/deregister" else "/identity/status?request_id=$requestId"
+        val path = if (submit) "/identity/$operation" else "/identity/status?request_id=$requestId"
         val connection = URI("http://$host:$port$path").toURL().openConnection() as HttpURLConnection
         return try {
             connection.connectTimeout = 4000

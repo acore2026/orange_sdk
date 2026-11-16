@@ -9,6 +9,17 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 class DemoRemoteTest {
+    @Test fun studioHostFollowsCoreWithoutReusingRuntimePort() {
+        assertEquals("192.168.1.13:7865", DemoRemote.studioEndpointForCore(" 192.168.1.13 "))
+        assertEquals("core.example.org:7865", DemoRemote.studioEndpointForCore("CORE.EXAMPLE.ORG"))
+        for (host in listOf("", "http://core", "core:8088", "bad/path", "999.1.1.1")) {
+            assertTrue(host, runCatching { DemoRemote.studioEndpointForCore(host) }.isFailure)
+        }
+    }
+    @Test fun warningIsIndependentFromExpel() {
+        assertTrue(DemoRemote.commands.containsAll(listOf("WARN", "EXPEL", "CONFIRM_EXPEL")))
+        assertFalse(DemoRemote.commands.contains("WARNING"))
+    }
     @Test fun validateHostAndPreserveRolePortSeparation() {
         assertEquals("core.example.org",DemoRemote.coreHost(" Core.Example.org "))
         assertEquals("101.245.78.174",DemoRemote.coreHost("101.245.78.174"))
@@ -63,6 +74,29 @@ class DemoRemoteTest {
         } finally { server.stop(0) }
     }
 
+    @Test fun dogPreparationUsesItsOwnOperationAndDoesNotRetryRejectedPost() {
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        val requests = java.util.concurrent.CopyOnWriteArrayList<String>()
+        var responseCode = 202
+        server.createContext("/identity") { exchange ->
+            requests.add(exchange.requestMethod + " " + exchange.requestURI)
+            val body = "{\"state\":\"RUNNING\"}".toByteArray()
+            exchange.sendResponseHeaders(responseCode, body.size.toLong())
+            exchange.responseBody.use { it.write(body) }
+        }
+        server.start()
+        try {
+            val endpoint = "127.0.0.1:${server.address.port}"
+            DemoRemote.dogIdentity(endpoint, "prepare-123", true, "prepare")
+            DemoRemote.dogIdentity(endpoint, "prepare-123", false, "prepare")
+            responseCode = 409
+            assertTrue(runCatching { DemoRemote.dogIdentity(endpoint, "prepare-456", true, "prepare") }.isFailure)
+            assertEquals(listOf("POST /identity/prepare", "GET /identity/status?request_id=prepare-123", "POST /identity/prepare"), requests)
+            assertTrue(runCatching { DemoRemote.dogIdentity(endpoint, "prepare-123", true, "prepare/../deregister") }.isFailure)
+            assertEquals(3, requests.size)
+        } finally { server.stop(0) }
+    }
+
     @Test fun dogAdminConnectAndSaveUseSeparateReadAndWriteRequests() {
         val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
         val requests = java.util.concurrent.CopyOnWriteArrayList<String>()
@@ -84,6 +118,32 @@ class DemoRemoteTest {
             assertEquals(2, requests.size)
         } finally { server.stop(0) }
         assertTrue(DemoRemote.commands.containsAll(listOf("FORWARD", "BACK", "LEFT", "RIGHT", "STOP")))
+    }
+
+    @Test fun studioResetPostsIdleAndReportsFailureWithoutRetry() {
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        val requests = java.util.concurrent.CopyOnWriteArrayList<String>()
+        var responseCode = 200
+        server.createContext("/") { exchange ->
+            requests.add(exchange.requestMethod + " " + exchange.requestURI + " " + exchange.requestBody.bufferedReader().readText())
+            val body = "studio-response".toByteArray()
+            exchange.sendResponseHeaders(responseCode, body.size.toLong())
+            exchange.responseBody.use { it.write(body) }
+        }
+        server.start()
+        try {
+            val endpoint = "127.0.0.1:${server.address.port}"
+            assertEquals("studio-response", DemoRemote.resetStudio(endpoint))
+            responseCode = 503
+            val error = runCatching { DemoRemote.resetStudio(endpoint) }.exceptionOrNull()
+            assertTrue(error?.message.orEmpty().contains("503"))
+            assertEquals(listOf(
+                "POST /api/showcase/acn-workspace/control {\"action\":\"reset_idle\"}",
+                "POST /api/showcase/acn-workspace/control {\"action\":\"reset_idle\"}"
+            ), requests)
+            assertTrue(runCatching { DemoRemote.resetStudio("http://bad/path") }.isFailure)
+            assertEquals(2, requests.size)
+        } finally { server.stop(0) }
     }
 
 }

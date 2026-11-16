@@ -1,4 +1,54 @@
+# 手机巡检演示遥控
+
+## 1.2.7：Patrol 身份准备（2026-11-11）
+
+当前源码 `1.2.7-patrol-prepare`（versionCode 13）。Patrol 先准备机器狗身份，再让眼镜准备身份、发布能力并发现候选；Confirm 才派遣。需配套眼镜 0.2.63 / 65 与 dog `a2c35bc` 的 `/identity/prepare`。协议与验收说明见 [Patrol 身份准备](docs/patrol-identity-preparation.md)。
+
+11 月 11 日 17:36 在 Huawei TAS-AN00（`XPL5T19B13006650`）安装 1.2.7 / 13，眼镜（`BC942497EA1C042`）安装 0.2.63 / 65（Warn 包）。已验证身份准备、候选发现，停在 “Patrol ready: confirm to dispatch”；未点 Confirm，未执行运动或视频。11 月 12 日文档整理未重新读取设备安装版本。
+本机证据目录 `/home/huawei/6gc/diagnostics/patrol-identity-prepare-20261111/` 不随 Git 分发。
+
+## 历史 1.2.6：Studio 跟随核心网，完整重置演示（2026-11-11）
+
+配置页的 Studio 地址现在由核心网 IP/域名自动生成，固定 HTTP 7865 端口；不再读取独立的旧 Studio 地址。修改核心网输入框会即时显示新的 Studio 目标。这里跟随的是手机配置值，设备核心网变更仍按原流程保存和重启。
+
+眼镜确认接收 RESET 后，手机向 `/api/showcase/acn-workspace/control` 发送 `{"action":"reset_idle"}`。要求响应为 `ready`、时间归零、检查点未放行，并带有与新 run_id 一致的 view_reset_id。Studio Live 页面通过 SSE 恢复演示起点、自动镜头和默认视角，等待下一次播放。跳过章节和速度设置保留，不再使用旧 checkpoint 1 / step 2 校验。
+
+先部署支持 view_reset_id 的 Studio 后端和前端，再安装手机 APK。手机成功提示只确认后端已接收请求，不表示浏览器已经确认渲染。眼镜 Reset 仍异步完成；Studio 请求失败单独提示且不自动重试。手机需能访问配置的核心网主机 7865 端口。
+
+### 1.2.6 历史部署与验收（2026-11-11）
+
+- 仓库 `acore2026/orange_sdk`，分支 `Release2.0`，Reset 修复已推送为 `cd53f65`。
+- 手机 `89188230` 此前经 ADB server 5038 覆盖安装 `1.2.6-studio-reset`，versionCode 为 12，保留已有配置；真实手机→眼镜→Studio→SSE/default view 链路已验证。本次文档核对时 ADB 列表为空，不能据此重新确认当前设备版本或连接状态。
+- Release 输出：`build/outputs/apk/release/phone-controller-release.apk`。已部署 APK 留档：`/home/huawei/6gc/diagnostics/app-studio-reset-20261111/phone-controller-1.2.6-studio-reset.apk`。旧 `orange/apk/` 文件或 latest 链接不代表此版本。
+- 手机配置核心网主机 `192.168.1.13` 时，Studio 目标为 `http://192.168.1.13:7865`；浏览器本机入口为 `http://localhost:7865/showcase/acn-campus?mode=live`。
+- Reset 后 Studio 视频窗口隐藏，直到演示进入视频阶段；后台视频消费者仍保留。Connecting camera 叙事卡片已删除，Waiting for camera frame 仍是真实媒体等待状态。
+- 此前验证：共享模块 8 项单测、Release 构建通过，lint 0 errors / 21 warnings；本次只更新文档，没有重装或重测设备。
+
+以下为历史版本与操作背景记录；各节的“尚未安装”、旧 APK、地址和眼镜版本仅代表当时状态，当前部署以本节为准。
+
 # 巡检演示手机兜底遥控
+
+## 1.2.5：纠正检查点顺序（2026-11-04）
+
+本版本替代 1.2.4：眼镜接受 Reset 后发送 `reset_checkpoint1`，前端停在第 2 步结束的 checkpoint 1，三个检查点全部重新锁定。狗站立前放行 checkpoint 1；视频 WebRTC 连接成功后放行 checkpoint 2；warning 前放行 checkpoint 3。配置页 Studio 默认 `192.168.1.13:7865`。Reset 保留眼镜身份，Studio 请求失败单独提示。1.2.5 已完成 Release 构建；截至 2026-11-05，确认的新手机安装版本仍为 1.2.3，1.2.5 的真机安装及 Studio 联动尚未确认。APK 为 `orange/apk/phone-controller-1.2.5-studio-reset.apk`。
+
+## 1.2.4：Reset 联动 Studio（2026-11-04）
+
+配置页新增 Studio IP:端口，默认 `192.168.1.13:7865`。眼镜接受 `RESET` 后，手机向 Studio 的 `/api/showcase/acn-workspace/control` 发送 `{"action":"reset_checkpoint2"}`。演示停在第 4 步结束（checkpoint 2），保留 checkpoint 1 放行状态，重新锁定 checkpoint 2、3；下一次由狗站立前及 warning 前分别放行。Studio 通过 SSE 更新所有打开的演示页面。
+
+眼镜仍异步结束会话、保留身份并重连；Studio 回退不代表眼镜重连成功。眼镜拒绝或通信结果未知时不发送 Studio 请求。Studio 失败会单独提示，不影响已接受的眼镜 Reset，不自动重试。需要手机能访问 Studio HTTP 端口，并配套支持此 action 的 Studio 后端；眼镜沿用 0.2.61-warn-patrol-reset-rayneo。
+
+验证：共享模块 7 项单测、手机 Release 编译与 lint 通过；Studio 检查点回退、旧 run_id 拒绝、后续放行及 HTTP/SSE 验证通过。APK：`/home/huawei/orange/apk/phone-controller-1.2.4-studio-reset.apk`；本轮未连接手机，尚未安装或验证手机端实际链路。
+
+## 1.2.3：保留身份的巡检 Reset（2026-11-03）
+
+配套眼镜版本 `0.2.61-warn-patrol-reset-rayneo`（RayNeo Warn）。遥控页新增“重置巡检 · Reset”：发送 `RESET`，眼镜释放当前算力/视频会话，清理巡检状态并使用已保存身份自动重连。完成后重新点击“发现机器狗”和“确认派遣”，无需退出 App。远程 Reset 不调用身份清除、身份注销或狗端运动接口，与眼镜本地身份 Reset 分开。
+
+状态查询新增 `reset_available`，`busy` 包含重置、退出和视频启动状态；忙碌或录音时禁用 Reset，未就绪时仍可尝试恢复。沿用请求 ID 去重；重连失败会报告失败，允许再次 Reset。
+
+构建与协议测试：`./gradlew -PwarnDemoSideBySide=true :demo-remote:test :example-app:assembleRayneoDebug :phone-controller:assembleDebug`。两端 APK 已覆盖安装，通过真实眼镜接口确认接收 Reset 并自动尝试重连。验证时核心网未启动，`GET /v1/ue/info failed`，活动巡检会话释放和恢复就绪尚待联调验收。
+
+旧版眼镜 `0.2.60-warn-reset` / 手机 `1.2.2-warn-reset` 会清除本地身份，已被此修正版替代，不应再部署。
 
 ## 1.1.2：独立 Sandbox 地址（2026-10-12）
 
@@ -28,7 +78,7 @@
 
 参考 `6g-core/RAYNEO-ctrl` 的 `IMT2030-master` 分支（commit `8e43b7a5d6b26617019dd649ff1e33fde1048b33`），沿用手机经局域网 TCP 控制眼镜的方式，为当前 SDK 巡逻流程实现独立 Android 应用。当前协议带请求 ID，需要本次配套眼镜 APK，不能直接使用旧版遥控器。
 
-## 安装与连接
+## 历史安装与连接（2026-10-12）
 
 - 手机 APK：`build/outputs/apk/release/phone-controller-release.apk`，包名 `com.rayneo.demo.controller`；Android 8.0 及以上。
 - 本机副本：`/home/huawei/orange/apk/phone-controller-1.1.2-sandbox-config.apk`。
@@ -85,7 +135,7 @@ ANDROID_HOME=/home/huawei/android-sdk ./gradlew :demo-remote:test :example-app:t
 
 2026-10-10 最终复核：Windows 本机通过真实局域网 `192.168.137.225:8791` 查询成功，眼镜返回 `phase=LISTENING, ready=true`；眼镜 Runtime 和 downlink WebSocket 初始化成功。机器狗 `dog-init` PID 2469、Agent PID 3486 保持原进程。共享协议 3 项、眼镜应用 37 项、Python 配置工具 3 项测试通过。
 
-本轮只有眼镜通过 USB 连接，手机 APK 尚未在真实手机安装；手机界面、手机到眼镜的局域网链路，以及机器狗 8081 管理端点仍需现场验收。
+2026-10-10 当时只有眼镜通过 USB 连接，手机 APK 尚未在真实手机安装；手机界面、手机到眼镜的局域网链路，以及机器狗 8081 管理端点仍需现场验收。
 
 ## 1.1.3（2026-10-13）
 

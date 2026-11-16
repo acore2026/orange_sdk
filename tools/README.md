@@ -55,3 +55,8 @@ wsl -d Ubuntu --cd /home/huawei/orange python3 sdk/tools/set_core_address.py gla
 ## 离线视频质量基线
 
 见 [VIDEO_BENCHMARK.md](VIDEO_BENCHMARK.md)，工具 `video_benchmark.py` 和候选档 `video-profiles.json`。无需机器狗或眼镜，编码参数与发包预算分开比较。
+
+## WSL 通过 Windows 网络栈访问机器狗
+
+见 [dog-access](dog-access/README.md)。中转目标由 SSH `%h/%p` 传入，支持覆盖
+HostName/端口；Windows Python 路径通过 `WINDOWS_PYTHON` 配置，不包含现场凭据。

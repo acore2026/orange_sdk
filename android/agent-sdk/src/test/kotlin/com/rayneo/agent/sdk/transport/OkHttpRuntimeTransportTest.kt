@@ -32,6 +32,30 @@ import java.net.SocketException
 
 class OkHttpRuntimeTransportTest {
     @Test
+    fun `Runtime rejection preserves explicit cause without inferring it from HTTP status`() = runTest {
+        val server = MockWebServer()
+        for (code in listOf("AGENT_INVALID", "NOT_AUTHORIZED", "INTERNAL_ERROR")) {
+            server.enqueue(MockResponse().setResponseCode(403).setBody("""{"result":"failure","code":"$code"}"""))
+        }
+        server.enqueue(MockResponse().setResponseCode(503).setBody("{}"))
+        server.start()
+        val transport = OkHttpRuntimeTransport(server.hostName, server.port)
+        try {
+            for (code in listOf("AGENT_INVALID", "NOT_AUTHORIZED", "INTERNAL_ERROR", null)) {
+                val error = runCatching {
+                    transport.request("POST", "/idm/v1/network-ability", buildJsonObject { })
+                }.exceptionOrNull() as AgentSdkException
+                assertEquals(ErrorCode.RUNTIME_REJECTED, error.code)
+                assertEquals(code, error.runtimeCode)
+            }
+            assertEquals(4, server.requestCount)
+        } finally {
+            transport.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun `Sandbox transport posts standalone JSON without a UE address`() = runTest {
         val server = MockWebServer()
         server.enqueue(

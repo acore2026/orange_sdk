@@ -725,3 +725,24 @@ RayNeo flavor 现在把 Agent A 作为园区安保负责人佩戴的 AR 眼镜�
 眼镜按三者关联业务回执：消息送达不代表动作完成；重复、拒绝、未确认回执不会
 宣告新巡逻成功。起步完成需收到对应 patrol_forward 的 dog_motion_completed。
 视频连接与动作等待并行，起步失败或结果超时会明确报错，不自动重发新运动任务。
+
+## Warn demo build
+
+`warn` / `warning` runtime intents map to the independent `RobotAction.WARN` and
+A2A `command=warn`. The video prompt is “Try saying: Warning.”; `expel` keeps its
+confirmation gate and existing action.
+
+To install beside an app signed with a different key, build a separate package:
+
+```bash
+ANDROID_HOME=/home/huawei/android-sdk ./gradlew :example-app:assembleRayneoDebug -PwarnDemoSideBySide=true
+```
+
+The package is `com.rayneo.agent.example.rayneo.warn`, labeled **RayNeo Warn**.
+The standard build keeps `com.rayneo.agent.example.rayneo`. Only one app should
+run its VPN at a time. Configure the new package with `DemoConfigReceiver` before
+launching; it has separate preferences and SDK identity.
+
+The phone controller includes **语音警告 · Warning / Play Warning**, below the expel
+buttons. It sends the independent `WARN` remote command through the glasses and
+is enabled only while connected to an active robot session and not busy/recording.
