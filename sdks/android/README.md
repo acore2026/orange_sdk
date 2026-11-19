@@ -8,9 +8,11 @@ The Android library mirrors the Python SDK's group-cache and endpoint rules:
 - `AgentVpnService` creates the Agent TUN without root.
 - `acf_group_config` is decoded into an immutable snapshot keyed by
   `group_id + agent_id`.
-- An identical `acf_group_config` replay with the same timestamp is ACKed without
-  route writes, generation changes, or an application callback. A notification
-  with a newer timestamp is committed and delivered to the application normally.
+- Positive uint64 `group_version` orders configurations. Same-version semantic
+  replays ignore timestamp/proof changes and ACK without rewriting routes or
+  clearing valid L5 work; older versions and same-version content conflicts fail.
+- `acf_group_invalidated` retires the group before best-effort route cleanup.
+  A retired group ID cannot be restored during this SDK process lifetime.
 - A2A HTTP calls the cached complete `service_endpoints` URL without rewriting
   scheme, authority, port, or path; `agent_ip` is used only for the VPN route.
 - Group changes rebuild VPN routes and atomically swap the TUN fd in the native
@@ -62,6 +64,16 @@ group-configuration notifications. It allows one active listener; registering an
 before closing the existing handle returns `LISTENER_ALREADY_REGISTERED`. An invitation
 received without this listener is rejected. A valid group configuration received without
 it is still committed and ACKed, but the application is not notified.
+After a valid configuration or invalidation is committed, an application callback
+exception is logged and the SDK still ACKs; it does not roll back cache/routes.
+Identical configuration replays do not redispatch the callback, including after a
+callback exception. Coroutine cancellation still follows the SDK lifecycle.
+
+The `group_version` and invalidation rules above are the current ACN group
+contract and apply with L5 disabled as well. They align Android with Python and
+the current core network; older configurations without `group_version` are not
+accepted. L5 is optional, but this group-contract alignment is a baseline SDK
+upgrade rather than an L5-only behavior.
 
 `registerGroupMessageListener` receives peer A2A messages after the SDK validates the
 target, group membership, and message structure. If no group listener is registered, the

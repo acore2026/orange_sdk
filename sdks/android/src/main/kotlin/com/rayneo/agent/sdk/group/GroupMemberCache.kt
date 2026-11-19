@@ -10,6 +10,10 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
 import java.net.InetAddress
 import java.net.URI
@@ -22,6 +26,7 @@ class GroupMemberCache(
 ) {
     private val mutex = Mutex()
     private val snapshots = mutableMapOf<String, GroupConfigSnapshot>()
+    private val invalidated = mutableSetOf<String>()
 
     fun buildCandidate(
         payload: JsonObject,
@@ -81,6 +86,11 @@ class GroupMemberCache(
                 ErrorCode.GROUP_CONFIG_INVALID,
                 "group_id and members are required",
             )
+        }
+        val revisionText = payload["group_version"]?.jsonPrimitive
+        if (wire.groupVersion == 0uL || revisionText == null || revisionText.isString ||
+            !Regex("[1-9][0-9]*").matches(revisionText.content)) {
+            throw AgentSdkException(ErrorCode.GROUP_CONFIG_INVALID, "group_version must be a positive uint64", "group_version")
         }
         if (wire.targetAgentId != null && wire.targetAgentId != localAgentId) {
             throw AgentSdkException(
@@ -160,6 +170,8 @@ class GroupMemberCache(
             notificationTimestamp = timestamp,
             membersByAgentId = Collections.unmodifiableMap(LinkedHashMap(byId)),
             generation = 0,
+            groupVersion = wire.groupVersion,
+            businessContent = canonical(JsonObject(payload.filterKeys { it !in setOf("timestamp", "proof", "target_agent_id") })).toString(),
         )
     }
 
@@ -167,24 +179,26 @@ class GroupMemberCache(
         candidate: GroupConfigSnapshot,
         localAgentId: String,
     ): Boolean = mutex.withLock {
+        if (candidate.groupId in invalidated) {
+            throw AgentSdkException(ErrorCode.GROUP_NOT_ACTIVE, "Group has been invalidated")
+        }
         val current = snapshots[candidate.groupId]
         if (current != null) {
-            if (candidate.notificationTimestamp.isBefore(current.notificationTimestamp)) {
+            if (candidate.groupVersion < current.groupVersion) {
                 throw AgentSdkException(
                     ErrorCode.GROUP_CONFIG_STALE,
                     "Group config is older than the committed snapshot",
                 )
             }
-            if (candidate.notificationTimestamp == current.notificationTimestamp) {
+            if (candidate.groupVersion == current.groupVersion) {
                 if (
-                    candidate.version == current.version &&
-                    candidate.membersByAgentId == current.membersByAgentId
+                    candidate.businessContent == current.businessContent
                 ) {
                     return@withLock false
                 }
                 throw AgentSdkException(
                     ErrorCode.GROUP_CONFIG_STALE,
-                    "Group config conflicts with the committed snapshot at the same timestamp",
+                    "Group config conflicts with the committed snapshot at the same group_version",
                 )
             }
         }
@@ -217,6 +231,35 @@ class GroupMemberCache(
     suspend fun close() = mutex.withLock {
         snapshots.keys.toList().forEach { tunnelController.replaceGroupPeers(it, emptySet()) }
         snapshots.clear()
+    }
+
+    suspend fun invalidate(payload: JsonObject, localAgentId: String): String = mutex.withLock {
+        fun text(name: String) = payload[name]?.jsonPrimitive?.contentOrNull
+        val id = text("group_id")?.takeIf { it.isNotBlank() }
+            ?: throw AgentSdkException(ErrorCode.GROUP_CONFIG_INVALID, "group_id is required")
+        val version = text("group_version")?.toULongOrNull()
+        if (text("notification_type") != "acf_group_invalidated" || text("target_agent_id") != localAgentId ||
+            payload.containsKey("members") || text("reason") !in setOf("configuration_failed", "network_outcome_unknown", "member_binding_invalidated", "cleanup_started") ||
+            text("version")?.let { SEMANTIC_VERSION.matches(it) && it.startsWith("1.") } != true ||
+            version == null || version == 0uL || payload["group_version"]!!.jsonPrimitive.isString) {
+            throw AgentSdkException(ErrorCode.GROUP_CONFIG_INVALID, "Invalid group invalidation notification")
+        }
+        try { Instant.parse(text("timestamp")) } catch (error: Exception) {
+            throw AgentSdkException(ErrorCode.GROUP_CONFIG_INVALID, "Invalid invalidation timestamp", cause = error)
+        }
+        if (snapshots[id]?.let { version < it.groupVersion } == true) {
+            throw AgentSdkException(ErrorCode.GROUP_CONFIG_STALE, "Stale group invalidation")
+        }
+        invalidated.add(id)
+        snapshots.remove(id)
+        tunnelController.replaceGroupPeers(id, emptySet())
+        id
+    }
+
+    private fun canonical(value: JsonElement): JsonElement = when (value) {
+        is JsonObject -> JsonObject(value.toSortedMap().mapValues { canonical(it.value) })
+        is JsonArray -> JsonArray(value.map { canonical(it) })
+        else -> value
     }
 
     private fun parseServiceEndpoint(

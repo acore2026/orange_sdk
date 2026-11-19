@@ -2,6 +2,9 @@ package com.rayneo.agent.sdk
 
 import android.util.Log
 import com.rayneo.agent.sdk.group.GroupMemberCache
+import com.rayneo.agent.sdk.l5.L5Config
+import com.rayneo.agent.sdk.l5.L5Manager
+import com.rayneo.agent.sdk.l5.L5RouteController
 import com.rayneo.agent.sdk.masque.NativeMasqueTransport
 import com.rayneo.agent.sdk.masque.NativeMasqueBridge
 import com.rayneo.agent.sdk.model.AgentProfile
@@ -107,6 +110,7 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.Json
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeout
@@ -197,7 +201,7 @@ private data class PendingMediaConnection(
 )
 
 class AgentSdk internal constructor(
-    private val tunnelController: TunnelController,
+    tunnelController: TunnelController,
     private val masqueTransport: MasqueTransport,
     private val proofVerifier: ProofVerifier = DisabledProofVerifier,
     private val controlRequestAuthenticator: ControlRequestAuthenticator? = null,
@@ -214,13 +218,17 @@ class AgentSdk internal constructor(
     private val sandboxTransport: SandboxTransport = OkHttpSandboxTransport(),
     private val testCapabilityVcIssuer: TestCapabilityVcIssuer? = null,
     private val agentStateStore: AgentStateStore = InMemoryAgentStateStore(),
+    private val l5Config: L5Config? = null,
 ) {
+    private val tunnelController: TunnelController = if (l5Config == null) tunnelController else L5RouteController(tunnelController)
     private enum class State { NEW, INITIALIZING, READY, CLOSING, CLOSED }
 
     private var state = State.NEW
     private var runtime: RuntimeTransport? = null
     private var localServer: LocalServer? = null
     private var groupCache: GroupMemberCache? = null
+    private var l5: L5Manager? = null
+    private var l5Listener: ((JsonObject) -> Unit)? = null
     private var networkListener: NetworkMessageListener? = null
     private var groupListener: GroupMessageListener? = null
     private var profile: AgentProfile? = null
@@ -407,6 +415,16 @@ class AgentSdk internal constructor(
             ErrorCode.SDK_NOT_INITIALIZED,
             "Group cache is unavailable",
         )
+        if (payload["notification_type"]?.jsonPrimitive?.content == "acf_group_invalidated") {
+            val groupId = try { cache.invalidate(payload, localProfile.agentId) } finally {
+                payload["group_id"]?.jsonPrimitive?.contentOrNull?.let { id ->
+                    if (cache.snapshot(id) == null) l5?.invalidate(id)
+                }
+            }
+            synchronized(groups) { groups[groupId]?.status = "INACTIVE" }
+            notifyCommittedGroupConfig(payload)
+            return NetworkMessageAction.ACK
+        }
         val candidate = cache.buildCandidate(
             payload,
             localAgentId = localProfile.agentId,
@@ -415,6 +433,12 @@ class AgentSdk internal constructor(
             localUdpPort = localUdpPort,
         )
         val changed = cache.commit(candidate, localProfile.agentId)
+        if (l5Config != null) {
+            val manager = l5 ?: L5Manager(l5Config, localProfile.agentId, agentTunIp, tunnelController).also {
+                it.listener = l5Listener; l5 = it
+            }
+            manager.configure(candidate)
+        }
         if (!changed) {
             Log.i(
                 TAG,
@@ -428,13 +452,20 @@ class AgentSdk internal constructor(
                 GroupInfo(candidate.groupId, candidate.groupId)
             }.status = "ACTIVE"
         }
+        notifyCommittedGroupConfig(payload)
+        return NetworkMessageAction.ACK
+    }
+
+    private suspend fun notifyCommittedGroupConfig(payload: JsonObject) {
         try {
             networkListener?.onNetworkMessage(NetworkMessageType.GROUP_CONFIG, payload)
-        } catch (_: Exception) {
-            // The verified snapshot is already committed; application notification
-            // cannot roll back cache and route state.
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            // Committed cache/routes remain authoritative even if application
+            // notification fails; do not turn the N-13 ACK into a REJECT.
+            Log.w(TAG, "Group config application callback failed group_id=${payload["group_id"]}", error)
         }
-        return NetworkMessageAction.ACK
     }
 
     private suspend fun handleGroupInvitation(payload: JsonObject): NetworkMessageAction {
@@ -3326,6 +3357,23 @@ class AgentSdk internal constructor(
     fun getMasqueTransportStatistics(): MasqueTransportStatistics =
         masqueTransport.statistics()
 
+    fun registerL5Listener(listener: ((JsonObject) -> Unit)?): AutoCloseable {
+        l5Listener = listener; l5?.listener = listener
+        return AutoCloseable { if (l5Listener === listener) { l5Listener = null; l5?.listener = null } }
+    }
+    private fun requireL5(): L5Manager {
+        requireReady()
+        return l5 ?: throw AgentSdkException(ErrorCode.GROUP_NOT_ACTIVE, "L5 is disabled or no group configuration has been accepted")
+    }
+    suspend fun registerL5Track(groupId: String, name: String, contentType: String = "application/json") = requireL5().registerTrack(groupId, name, contentType)
+    suspend fun unregisterL5Track(groupId: String, name: String) = requireL5().unregisterTrack(groupId, name)
+    suspend fun subscribeL5Track(groupId: String, publisherAgentId: String, name: String) = requireL5().subscribe(groupId, publisherAgentId, name)
+    suspend fun unsubscribeL5Track(groupId: String, publisherAgentId: String, name: String) = requireL5().unsubscribe(groupId, publisherAgentId, name)
+    suspend fun publishL5Message(groupId: String, name: String, payload: JsonObject, datagram: Boolean = false) = requireL5().publish(groupId, name, payload, datagram)
+    fun getL5Catalog(groupId: String, publisherAgentId: String): JsonObject? = requireL5().catalog(groupId, publisherAgentId)
+    fun getL5State(groupId: String): List<JsonObject> = requireL5().state(groupId)
+    fun retryL5(groupId: String, direction: String? = null) = requireL5().retry(groupId, direction)
+
     suspend fun close() {
         if (state == State.CLOSED || state == State.CLOSING) return
         state = State.CLOSING
@@ -3344,6 +3392,8 @@ class AgentSdk internal constructor(
                 }
             }
         }
+        runCatching { l5?.close() }
+        l5 = null
         runCatching { groupCache?.close() }
         runCatching { masqueTransport.close() }
         runCatching { localServer?.close() }
@@ -3717,8 +3767,10 @@ class AgentSdk internal constructor(
         agentCardContext = agentCard
     }
 
-    private fun clearAgentState() {
+    private suspend fun clearAgentState() {
         agentStateStore.clear(agentRuntimeIp, agentRuntimePort)
+        l5?.close()
+        l5 = null
         profile = null
         agentLifecycleState = AgentLifecycleState.NO_IDENTITY
         identityApplicationContext = null
@@ -3849,6 +3901,7 @@ class AgentSdk internal constructor(
             localServerFactory: () -> LocalServer = { TcpJsonLocalServer() },
             // Caller owns the root and must release it only after SDK close completes.
             sharedVideoEglContext: org.webrtc.EglBase.Context? = null,
+            l5Config: L5Config? = null,
         ): AgentSdk {
             val security = vpnService.resources.openRawResource(
                 R.raw.core_network_public_key
@@ -3876,6 +3929,7 @@ class AgentSdk internal constructor(
                 mediaOffloadAdapter = AndroidWebRtcMediaAdapter(vpnService, sharedVideoEglContext),
                 peerMessenger = peerMessenger,
                 localServerFactory = localServerFactory,
+                l5Config = l5Config,
             )
         }
     }

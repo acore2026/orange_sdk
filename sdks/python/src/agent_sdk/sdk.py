@@ -23,6 +23,7 @@ from .agent_state import (
 )
 from .capability_vc import TEST_CAPABILITY_ISSUER_DID, issue_test_capability_vcs
 from .config import SdkConfig
+from .l5 import L5Config
 from .contracts import (
     ConnectIpTransport,
     ControlRequestAuthenticator,
@@ -346,6 +347,7 @@ class AgentSdk:
         _media_offload_adapter: MediaOffloadAdapter | None = None,
         _sandbox_transport: SandboxTransport | None = None,
         agent_state_directory: str | Path | None = None,
+        l5_config: L5Config | None = None,
     ) -> None:
         self._logger = logging.getLogger(f"agent_sdk.client.{id(self)}")
         self._logger.propagate = False
@@ -403,6 +405,16 @@ class AgentSdk:
         self._masque: ConnectIpTransport | None = None
         self._routes: GroupRouteManager | None = None
         self._groups: GroupMemberCache | None = None
+        self._l5_config = l5_config
+        self._l5 = None
+        self._l5_listener = None
+        self._l5_factory = None
+        if l5_config is not None:
+            try:
+                from .l5.manager import L5Manager
+            except ImportError as exc:
+                raise ValueError("L5 requires the optional moq-transport dependency; install the SDK [l5] extra") from exc
+            self._l5_factory = L5Manager
         self._pump_task: asyncio.Task[None] | None = None
         self._network_listener: NetworkMessageListener | None = None
         self._group_listener: GroupMessageListener | GroupEnvelopeListener | None = None
@@ -751,6 +763,10 @@ class AgentSdk:
             self._config.agent_runtime_port,
         )
         previous_agent_id = self._profile.agent_id if self._profile else None
+        if self._l5 is not None:
+            previous_l5, self._l5 = self._l5, None
+            previous_l5.closed = True
+            asyncio.create_task(previous_l5.close())
         self._profile = None
         self._agent_lifecycle_state = AgentLifecycleState.NO_IDENTITY
         self._identity_application_context = None
@@ -890,7 +906,12 @@ class AgentSdk:
         assert self._groups is not None and self._config is not None
         await self._proof_verifier.verify_group_config(payload)
         if payload.get("notification_type") == "acf_group_invalidated":
-            group_id = await self._groups.invalidate(payload, local_agent_id=self._profile.agent_id)
+            try:
+                group_id = await self._groups.invalidate(payload, local_agent_id=self._profile.agent_id)
+            finally:
+                invalid_id = payload.get("group_id")
+                if self._l5 is not None and isinstance(invalid_id, str) and await self._groups.snapshot(invalid_id) is None:
+                    self._l5.invalidate(invalid_id)
             info = self._group_info.get(group_id)
             if info is not None:
                 info.status = "INACTIVE"
@@ -911,6 +932,11 @@ class AgentSdk:
         changed = await self._groups.commit(
             candidate, local_agent_id=self._profile.agent_id
         )
+        if self._l5_config is not None:
+            if self._l5 is None:
+                self._l5 = self._l5_factory(self._l5_config, self._profile.agent_id,
+                    self._config.agent_tun_ip, self._routes, self._logger, self._l5_listener)
+            self._l5.configure(candidate)
         if changed:
             self._pending_group_callbacks.add(candidate.group_id)
         if not changed and candidate.group_id not in self._pending_group_callbacks:
@@ -4064,6 +4090,52 @@ class AgentSdk:
             return None
         return await self._groups.snapshot(group_id)
 
+    def register_l5_listener(self, listener: Callable[[Mapping[str, Any]], Any] | None) -> None:
+        """Receive directory, direction readiness, error and JSON message events."""
+        self._l5_listener = listener
+        if self._l5 is not None:
+            self._l5.listener = listener
+
+    def _require_l5(self):
+        self._require_ready()
+        if self._l5 is None or self._l5.closed:
+            raise AgentSdkError(ErrorCode.GROUP_NOT_ACTIVE, "L5 is disabled or no valid group configuration has been received")
+        return self._l5
+
+    async def register_l5_track(self, group_id: str, name: str, content_type: str = "application/json") -> None:
+        await self._require_l5().register_track(group_id, name, content_type)
+
+    async def unregister_l5_track(self, group_id: str, name: str) -> None:
+        await self._require_l5().unregister_track(group_id, name)
+
+    async def subscribe_l5_track(self, group_id: str, publisher_agent_id: str, name: str) -> None:
+        await self._require_l5().subscribe(group_id, publisher_agent_id, name)
+
+    async def unsubscribe_l5_track(self, group_id: str, publisher_agent_id: str, name: str) -> None:
+        await self._require_l5().unsubscribe(group_id, publisher_agent_id, name)
+
+    async def publish_l5_message(self, group_id: str, name: str, payload: Mapping[str, Any], *, datagram: bool = False) -> None:
+        """Submit one JSON Object; successful return is not a peer business ACK."""
+        await self._require_l5().publish(group_id, name, payload, datagram)
+
+    def get_l5_catalog(self, group_id: str, publisher_agent_id: str) -> Mapping[str, Any] | None:
+        import copy
+        manager = self._require_l5()
+        manager._require_group(group_id)
+        if manager.statuses.get((group_id, "subscriber", publisher_agent_id, "group_catalog")) != "READY":
+            return None
+        return copy.deepcopy(manager.catalogs.get((group_id, publisher_agent_id)))
+
+    def get_l5_state(self, group_id: str) -> list[Mapping[str, Any]]:
+        manager = self._require_l5()
+        manager._require_group(group_id)
+        return [{"direction": key[1], "member_agent_id": key[2], "track": key[3], "state": value}
+                for key, value in manager.statuses.items() if key[0] == group_id]
+
+    def retry_l5(self, group_id: str, direction: str | None = None) -> None:
+        """Explicitly start a new bounded round for failed work in this group."""
+        self._require_l5().retry(group_id, direction)
+
     async def discard_groups(self) -> None:
         """Retire local group IDs after an externally confirmed ACF restart.
 
@@ -4072,6 +4144,9 @@ class AgentSdk:
         self._require_ready()
         assert self._groups is not None
         await self._groups.discard_all()
+        if self._l5 is not None:
+            await self._l5.close()
+            self._l5 = None
         self._pending_group_callbacks.clear()
         for info in self._group_info.values():
             info.status = "INACTIVE"
@@ -4118,6 +4193,9 @@ class AgentSdk:
                     pass
             if self._groups is not None:
                 await self._groups.close()
+            if self._l5 is not None:
+                await self._l5.close()
+                self._l5 = None
             if self._routes is not None:
                 await self._routes.close()
             if self._masque is not None:

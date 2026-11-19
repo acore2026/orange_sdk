@@ -44,6 +44,7 @@ from .models import (
     Snssai,
 )
 from .sdk import AgentSdk
+from .l5 import L5Config
 
 try:
     __version__ = version("agent-connect-sdk")
@@ -52,6 +53,7 @@ except PackageNotFoundError:  # Source checkout without an installed distributio
 
 __all__ = [
     "AgentSdk",
+    "L5Config",
     "AgentSdkError",
     "AcnContext",
     "AgentProfile",

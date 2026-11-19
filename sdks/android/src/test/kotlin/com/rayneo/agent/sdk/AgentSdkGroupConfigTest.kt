@@ -215,7 +215,7 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
-    fun `newer identical group config commits and notifies listener`() = runTest {
+    fun `newer timestamp at the same group version is an idempotent replay`() = runTest {
         initializeSdk()
         var listenerCalls = 0
         sdk.registerNetworkMessageListener(NetworkMessageListener { _, _ ->
@@ -230,9 +230,9 @@ class AgentSdkGroupConfigTest {
         )
 
         assertEquals(NetworkMessageAction.ACK, action)
-        assertEquals(2, listenerCalls)
-        assertEquals(2, tunnel.replacements.size)
-        assertEquals(2L, sdk.getGroupSnapshot("g1")!!.generation)
+        assertEquals(1, listenerCalls)
+        assertEquals(1, tunnel.replacements.size)
+        assertEquals(1L, sdk.getGroupSnapshot("g1")!!.generation)
     }
 
     @Test
@@ -426,6 +426,65 @@ class AgentSdkGroupConfigTest {
         assertEquals(NetworkMessageAction.ACK, action)
         assertNotNull(sdk.getGroupSnapshot("g1"))
         assertEquals(setOf("8.8.8.8"), tunnel.groupPeers["g1"])
+    }
+
+    @Test
+    fun `listener exception still ACKs committed group and replay without redispatch`() = runTest {
+        initializeSdk()
+        var listenerCalls = 0
+        sdk.registerNetworkMessageListener(NetworkMessageListener { _, _ ->
+            listenerCalls += 1
+            throw IllegalStateException("application callback failed")
+        })
+        val payload = groupConfig()
+
+        assertEquals(NetworkMessageAction.ACK, runtime.deliverGroupConfig(payload))
+        assertEquals(NetworkMessageAction.ACK, runtime.deliverGroupConfig(payload))
+        assertEquals(1, listenerCalls)
+        assertEquals(1, tunnel.replacements.size)
+        assertEquals(1L, sdk.getGroupSnapshot("g1")!!.generation)
+        assertEquals(setOf("8.8.8.8"), tunnel.groupPeers["g1"])
+        assertEquals("ACK", runtime.deliverDownlink("ACN_AGENT_GROUPING_NOTIFICATION", payload)!!["result"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `invalidation listener exception still ACKs and retires the group`() = runTest {
+        initializeSdk()
+        runtime.deliverGroupConfig(groupConfig())
+        sdk.registerNetworkMessageListener(NetworkMessageListener { _, _ ->
+            throw IllegalStateException("application invalidation callback failed")
+        })
+        val payload = buildJsonObject {
+            put("notification_type", "acf_group_invalidated")
+            put("version", "1.0.0")
+            put("timestamp", Instant.now().toString())
+            put("target_agent_id", LOCAL_ID)
+            put("group_id", "g1")
+            put("group_version", 1)
+            put("reason", "cleanup_started")
+            put("proof", buildJsonObject { put("jws", "test") })
+        }
+
+        val response = runtime.deliverDownlink("ACN_AGENT_GROUPING_NOTIFICATION", payload)!!
+
+        assertEquals("ACK", response["result"]!!.jsonPrimitive.content)
+        assertEquals("g1", response["group_id"]!!.jsonPrimitive.content)
+        assertEquals(null, sdk.getGroupSnapshot("g1"))
+        assertFalse(tunnel.groupPeers.containsKey("g1"))
+        val error = runCatching { runtime.deliverGroupConfig(groupConfig()) }.exceptionOrNull() as AgentSdkException
+        assertEquals(ErrorCode.GROUP_NOT_ACTIVE, error.code)
+    }
+
+    @Test
+    fun `current group version contract is enforced with L5 disabled`() = runTest {
+        initializeSdk()
+        val missingVersion = JsonObject(groupConfig().filterKeys { it != "group_version" })
+        val error = runCatching { runtime.deliverGroupConfig(missingVersion) }.exceptionOrNull() as AgentSdkException
+
+        assertEquals(ErrorCode.GROUP_CONFIG_INVALID, error.code)
+        assertEquals(null, sdk.getGroupSnapshot("g1"))
+        assertTrue(tunnel.replacements.isEmpty())
+        assertEquals(NetworkMessageAction.ACK, runtime.deliverGroupConfig(groupConfig()))
     }
 
     @Test
@@ -1678,11 +1737,13 @@ class AgentSdkGroupConfigTest {
         timestamp: Instant = Instant.now(),
         peerIp: String = "8.8.8.8",
         peerSupi: String? = "imsi-001010000000002",
+        groupVersion: ULong = 1u,
     ): JsonObject = buildJsonObject {
         put("notification_type", "acf_group_config")
         put("version", "1.0.0")
         put("timestamp", timestamp.toString())
         put("group_id", "g1")
+        put("group_version", JsonPrimitive(groupVersion))
         put("members", buildJsonObject {
             put(
                 "agent1",

@@ -35,6 +35,9 @@ Python 安装使用 `python3 -m pip install -e './sdks/python[test]'`。运行�
 
 ## SDK 使用入口
 
+可选 ACN L5 群组发布订阅的配置、Python/Android API、目录及重试语义见
+[ACN L5 接入说明](docs/protocols/ACN-L5接入说明.md)。该扩展默认关闭，既有 L3 A2A 与媒体接口保持独立。
+
 SDK 的系统边界、模块职责、4+1 视图、核心流程、接口消息和部署约束见 [Orange Agent SDK 设计文档](<docs/architecture/Orange Agent SDK 设计文档.md>)。
 
 当前 Linux/Python 版本可以构建为 `agent-connect-sdk` wheel。客户安装 wheel 后即可导入 `agent_sdk`，端侧通过 TUN + MASQUE CONNECT-IP 接入外部 AgentRuntime/MASQUE 服务。发送消息时应用提供 `group_id`、`target_agent_id`、消息类型、任务 ID 和消息体；IP、端口和路由始终由 SDK 缓存解析。仓库只交付端侧 Client，不包含 MASQUE Server、UERANSIM 适配器或服务器启动命令。
