@@ -16,6 +16,7 @@ SDK 收到 AgentRuntime 通过 `ACN_AGENT_GROUPING_NOTIFICATION` 透传的 `acf_
 - `../../examples/python/interactive_linux_agent.py`：复用真实 Linux 全流程参数，每按一次回车只调用下一个 SDK 接口。
 - `../../examples/python/agent_a_test.py`：A 发现 B、建组、申请正式算力会话，并验证处理后视频首帧。
 - `../../examples/python/agent_b_test.py`：B 发布算力能力、自动接受邀请，并按 A 下发的 session ID 循环上传仓库内置测试视频。
+- `../../examples/python/agw/agw_agent_a.py`、`agw_agent_b.py`、`agw_agent_c.py`：三个真实终端使用 `AgentSdk` 的 AGW 公共接口完成注册、发现、建组、目录、多播回执及注销，见 [执行说明](../../examples/python/agw/AGW终端全流程测试.md)。需安装 `[agw]` 可选依赖。
 - `../../examples/python/assets/video-offload-test.mp4`：用于 A/B 端到端联调的 8 秒 720p H.264 合成测试片。
 - `../../integration-tests/scenarios/masque_two_instance_test.py`：在两个隔离的 Ubuntu 实例中验证 A 经 MASQUE/5GC 向 B 发送消息，B 在控制台和本地文件记录收包证据。
 - `../../examples/python/docker/arm64/`：在 x86 主机使用 Buildx 制作 `linux/arm64` 运行镜像，并提供 A/B 环境变量启动脚本；完整用法见 `../../examples/python/docker/arm64/README.md`。

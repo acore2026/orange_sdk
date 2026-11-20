@@ -1,4 +1,4 @@
-"""Group-scoped L5 work on two Agent-scoped MOQT role connections."""
+"""Group-scoped AGW work on two Agent-scoped MOQT role connections."""
 
 from __future__ import annotations
 
@@ -12,11 +12,11 @@ from typing import Any
 from moq.acn.client import AcnClient, RequestFailed
 from moq.acn.contracts import Limits, SESSION_REPLACED, full_track, catalog, encode_json
 
-from . import L5Config
+from . import AGWConfig
 
 
-class L5Manager:
-    def __init__(self, config: L5Config, agent_id: str, source_ip: str, routes, logger=None, listener=None):
+class AGWManager:
+    def __init__(self, config: AGWConfig, agent_id: str, source_ip: str, routes, logger=None, listener=None):
         self.config, self.agent_id, self.source_ip, self.routes = config, agent_id, source_ip, routes
         self.logger = logger or logging.getLogger(__name__)
         self.listener = listener
@@ -41,11 +41,11 @@ class L5Manager:
         self.statuses = {}
         self.closed = False
         self.background = set()
-        self.route_key = f"\x00acn-l5-relay:{id(self)}"
+        self.route_key = f"\x00acn-agw-relay:{id(self)}"
 
     def _emit(self, event, **details):
         payload = {"event": event, **details}
-        self.logger.info("L5 %s", payload)
+        self.logger.info("AGW %s", payload)
         if self.listener:
             try:
                 value = self.listener(payload)
@@ -53,7 +53,7 @@ class L5Manager:
                     task = asyncio.create_task(value)
                     task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
             except Exception:
-                self.logger.exception("L5 application listener failed")
+                self.logger.exception("AGW application listener failed")
 
     def configure(self, snapshot):
         current = self.groups.get(snapshot.group_id)
@@ -103,7 +103,7 @@ class L5Manager:
                 while self._valid(key[0], version):
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise TimeoutError("L5 preparation/recovery deadline exceeded")
+                        raise TimeoutError("AGW preparation/recovery deadline exceeded")
                     try:
                         result = await asyncio.wait_for(operation(key, version, deadline), remaining)
                         if self._valid(key[0], version):
@@ -156,7 +156,7 @@ class L5Manager:
                             await client.connect(min(self.config.local_timeout, end - time.monotonic()))
                             if self.closed:
                                 await client.close()
-                                raise ConnectionError("L5 manager closed")
+                                raise ConnectionError("AGW manager closed")
                             self.clients[role] = client
                             if role == "publisher":
                                 self.publish_revisions.clear()
@@ -168,7 +168,7 @@ class L5Manager:
                         except (OSError, ConnectionError, TimeoutError):
                             await client.close()
                         await asyncio.sleep(min(.5, max(0, end - time.monotonic())))
-                    raise TimeoutError("L5 role connection deadline exceeded")
+                    raise TimeoutError("AGW role connection deadline exceeded")
                 except BaseException:
                     self.role_blocked.add(role)
                     raise
@@ -328,7 +328,7 @@ class L5Manager:
         if task:
             await asyncio.shield(task)
         if key not in self.requests or self.statuses.get(key) != "READY":
-            raise RuntimeError("L5 publication unavailable; explicit retry may be required")
+            raise RuntimeError("AGW publication unavailable; explicit retry may be required")
         self._queue_catalog(group)
 
     def _queue_catalog(self, group):
@@ -370,7 +370,7 @@ class L5Manager:
         if task:
             await asyncio.shield(task)
         if key not in self.requests or self.statuses.get(key) != "READY":
-            raise RuntimeError("L5 subscription unavailable; explicit retry may be required")
+            raise RuntimeError("AGW subscription unavailable; explicit retry may be required")
 
     async def unsubscribe(self, group, publisher, name):
         key = (group, "subscriber", publisher, name)
@@ -394,7 +394,7 @@ class L5Manager:
     def retry(self, group, direction=None):
         self._require_group(group)
         if direction not in (None, "publisher", "subscriber"):
-            raise ValueError("invalid L5 direction")
+            raise ValueError("invalid AGW direction")
         for key in list(self.statuses):
             if (key[0] == group and key[2] in self.groups[group].members_by_agent_id
                     and self.statuses[key] != "READY" and (direction is None or key[1] == direction)):
@@ -403,7 +403,7 @@ class L5Manager:
 
     def _require_group(self, group):
         if self.closed or group not in self.groups:
-            raise RuntimeError("no active ACN group for L5")
+            raise RuntimeError("no active ACN group for AGW")
 
     def invalidate(self, group, release=True):
         self.groups.pop(group, None)

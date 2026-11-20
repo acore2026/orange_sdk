@@ -1,6 +1,6 @@
-package com.rayneo.agent.sdk.l5
+package com.rayneo.agent.sdk.agw
 
-data class L5Config(
+data class AGWConfig(
     val relayIpv4: String,
     val relayPort: Int = 4433,
     val recoveryTimeoutMillis: Long = 30_000,

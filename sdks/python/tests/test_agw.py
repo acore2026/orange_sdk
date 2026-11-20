@@ -1,4 +1,4 @@
-"""Optional real-QUIC L5 integration; base SDK tests do not require moq-py."""
+"""Optional real-QUIC AGW integration; base SDK tests do not require moq-py."""
 
 import asyncio
 import socket
@@ -8,8 +8,8 @@ import pytest
 
 pytest.importorskip("moq.acn")
 from moq.acn.relay import AcnRelay
-from agent_sdk.l5 import L5Config
-from agent_sdk.l5.manager import L5Manager
+from agent_sdk.agw import AGWConfig
+from agent_sdk.agw.manager import AGWManager
 from agent_sdk.models import GroupConfigSnapshot
 from agent_sdk.routes import GroupRouteManager, MemoryRouteBackend
 
@@ -18,7 +18,7 @@ async def until(predicate, timeout=3):
     deadline = asyncio.get_running_loop().time() + timeout
     while not predicate():
         if asyncio.get_running_loop().time() >= deadline:
-            raise AssertionError("L5 condition timed out")
+            raise AssertionError("AGW condition timed out")
         await asyncio.sleep(.01)
 
 
@@ -36,7 +36,7 @@ async def test_sdk_catalog_business_and_route_isolation():
         members={"A": None, "B": None}, group_version=1)
     routes = [GroupRouteManager(MemoryRouteBackend()) for _ in range(2)]
     events = []
-    managers = [L5Manager(L5Config("127.0.0.1", port), agent, "127.0.0.1", route,
+    managers = [AGWManager(AGWConfig("127.0.0.1", port), agent, "127.0.0.1", route,
                 listener=events.append) for agent, route in zip(("A", "B"), routes)]
     try:
         for manager in managers:
@@ -81,7 +81,7 @@ async def test_sdk_catalog_business_and_route_isolation():
 
 async def test_expired_work_requires_explicit_retry_and_configuration_does_not_rearm():
     routes = GroupRouteManager(MemoryRouteBackend())
-    manager = L5Manager(L5Config("127.0.0.1", 4433, recovery_timeout=.08, local_timeout=.02), "A", "127.0.0.1", routes)
+    manager = AGWManager(AGWConfig("127.0.0.1", 4433, recovery_timeout=.08, local_timeout=.02), "A", "127.0.0.1", routes)
     snapshot = GroupConfigSnapshot.immutable(group_id="g", version="1.0.0", notification_timestamp=datetime.now(timezone.utc),
         members={"A": None}, group_version=1)
     manager.configure(snapshot)

@@ -2,9 +2,9 @@ package com.rayneo.agent.sdk
 
 import android.util.Log
 import com.rayneo.agent.sdk.group.GroupMemberCache
-import com.rayneo.agent.sdk.l5.L5Config
-import com.rayneo.agent.sdk.l5.L5Manager
-import com.rayneo.agent.sdk.l5.L5RouteController
+import com.rayneo.agent.sdk.agw.AGWConfig
+import com.rayneo.agent.sdk.agw.AGWManager
+import com.rayneo.agent.sdk.agw.AGWRouteController
 import com.rayneo.agent.sdk.masque.NativeMasqueTransport
 import com.rayneo.agent.sdk.masque.NativeMasqueBridge
 import com.rayneo.agent.sdk.model.AgentProfile
@@ -218,17 +218,17 @@ class AgentSdk internal constructor(
     private val sandboxTransport: SandboxTransport = OkHttpSandboxTransport(),
     private val testCapabilityVcIssuer: TestCapabilityVcIssuer? = null,
     private val agentStateStore: AgentStateStore = InMemoryAgentStateStore(),
-    private val l5Config: L5Config? = null,
+    private val agwConfig: AGWConfig? = null,
 ) {
-    private val tunnelController: TunnelController = if (l5Config == null) tunnelController else L5RouteController(tunnelController)
+    private val tunnelController: TunnelController = if (agwConfig == null) tunnelController else AGWRouteController(tunnelController)
     private enum class State { NEW, INITIALIZING, READY, CLOSING, CLOSED }
 
     private var state = State.NEW
     private var runtime: RuntimeTransport? = null
     private var localServer: LocalServer? = null
     private var groupCache: GroupMemberCache? = null
-    private var l5: L5Manager? = null
-    private var l5Listener: ((JsonObject) -> Unit)? = null
+    private var agw: AGWManager? = null
+    private var agwListener: ((JsonObject) -> Unit)? = null
     private var networkListener: NetworkMessageListener? = null
     private var groupListener: GroupMessageListener? = null
     private var profile: AgentProfile? = null
@@ -418,7 +418,7 @@ class AgentSdk internal constructor(
         if (payload["notification_type"]?.jsonPrimitive?.content == "acf_group_invalidated") {
             val groupId = try { cache.invalidate(payload, localProfile.agentId) } finally {
                 payload["group_id"]?.jsonPrimitive?.contentOrNull?.let { id ->
-                    if (cache.snapshot(id) == null) l5?.invalidate(id)
+                    if (cache.snapshot(id) == null) agw?.invalidate(id)
                 }
             }
             synchronized(groups) { groups[groupId]?.status = "INACTIVE" }
@@ -433,9 +433,9 @@ class AgentSdk internal constructor(
             localUdpPort = localUdpPort,
         )
         val changed = cache.commit(candidate, localProfile.agentId)
-        if (l5Config != null) {
-            val manager = l5 ?: L5Manager(l5Config, localProfile.agentId, agentTunIp, tunnelController).also {
-                it.listener = l5Listener; l5 = it
+        if (agwConfig != null) {
+            val manager = agw ?: AGWManager(agwConfig, localProfile.agentId, agentTunIp, tunnelController).also {
+                it.listener = agwListener; agw = it
             }
             manager.configure(candidate)
         }
@@ -3357,22 +3357,22 @@ class AgentSdk internal constructor(
     fun getMasqueTransportStatistics(): MasqueTransportStatistics =
         masqueTransport.statistics()
 
-    fun registerL5Listener(listener: ((JsonObject) -> Unit)?): AutoCloseable {
-        l5Listener = listener; l5?.listener = listener
-        return AutoCloseable { if (l5Listener === listener) { l5Listener = null; l5?.listener = null } }
+    fun registerAGWListener(listener: ((JsonObject) -> Unit)?): AutoCloseable {
+        agwListener = listener; agw?.listener = listener
+        return AutoCloseable { if (agwListener === listener) { agwListener = null; agw?.listener = null } }
     }
-    private fun requireL5(): L5Manager {
+    private fun requireAGW(): AGWManager {
         requireReady()
-        return l5 ?: throw AgentSdkException(ErrorCode.GROUP_NOT_ACTIVE, "L5 is disabled or no group configuration has been accepted")
+        return agw ?: throw AgentSdkException(ErrorCode.GROUP_NOT_ACTIVE, "AGW is disabled or no group configuration has been accepted")
     }
-    suspend fun registerL5Track(groupId: String, name: String, contentType: String = "application/json") = requireL5().registerTrack(groupId, name, contentType)
-    suspend fun unregisterL5Track(groupId: String, name: String) = requireL5().unregisterTrack(groupId, name)
-    suspend fun subscribeL5Track(groupId: String, publisherAgentId: String, name: String) = requireL5().subscribe(groupId, publisherAgentId, name)
-    suspend fun unsubscribeL5Track(groupId: String, publisherAgentId: String, name: String) = requireL5().unsubscribe(groupId, publisherAgentId, name)
-    suspend fun publishL5Message(groupId: String, name: String, payload: JsonObject, datagram: Boolean = false) = requireL5().publish(groupId, name, payload, datagram)
-    fun getL5Catalog(groupId: String, publisherAgentId: String): JsonObject? = requireL5().catalog(groupId, publisherAgentId)
-    fun getL5State(groupId: String): List<JsonObject> = requireL5().state(groupId)
-    fun retryL5(groupId: String, direction: String? = null) = requireL5().retry(groupId, direction)
+    suspend fun registerAGWTrack(groupId: String, name: String, contentType: String = "application/json") = requireAGW().registerTrack(groupId, name, contentType)
+    suspend fun unregisterAGWTrack(groupId: String, name: String) = requireAGW().unregisterTrack(groupId, name)
+    suspend fun subscribeAGWTrack(groupId: String, publisherAgentId: String, name: String) = requireAGW().subscribe(groupId, publisherAgentId, name)
+    suspend fun unsubscribeAGWTrack(groupId: String, publisherAgentId: String, name: String) = requireAGW().unsubscribe(groupId, publisherAgentId, name)
+    suspend fun publishAGWMessage(groupId: String, name: String, payload: JsonObject, datagram: Boolean = false) = requireAGW().publish(groupId, name, payload, datagram)
+    fun getAGWCatalog(groupId: String, publisherAgentId: String): JsonObject? = requireAGW().catalog(groupId, publisherAgentId)
+    fun getAGWState(groupId: String): List<JsonObject> = requireAGW().state(groupId)
+    fun retryAGW(groupId: String, direction: String? = null) = requireAGW().retry(groupId, direction)
 
     suspend fun close() {
         if (state == State.CLOSED || state == State.CLOSING) return
@@ -3392,8 +3392,8 @@ class AgentSdk internal constructor(
                 }
             }
         }
-        runCatching { l5?.close() }
-        l5 = null
+        runCatching { agw?.close() }
+        agw = null
         runCatching { groupCache?.close() }
         runCatching { masqueTransport.close() }
         runCatching { localServer?.close() }
@@ -3769,8 +3769,8 @@ class AgentSdk internal constructor(
 
     private suspend fun clearAgentState() {
         agentStateStore.clear(agentRuntimeIp, agentRuntimePort)
-        l5?.close()
-        l5 = null
+        agw?.close()
+        agw = null
         profile = null
         agentLifecycleState = AgentLifecycleState.NO_IDENTITY
         identityApplicationContext = null
@@ -3901,7 +3901,7 @@ class AgentSdk internal constructor(
             localServerFactory: () -> LocalServer = { TcpJsonLocalServer() },
             // Caller owns the root and must release it only after SDK close completes.
             sharedVideoEglContext: org.webrtc.EglBase.Context? = null,
-            l5Config: L5Config? = null,
+            agwConfig: AGWConfig? = null,
         ): AgentSdk {
             val security = vpnService.resources.openRawResource(
                 R.raw.core_network_public_key
@@ -3929,7 +3929,7 @@ class AgentSdk internal constructor(
                 mediaOffloadAdapter = AndroidWebRtcMediaAdapter(vpnService, sharedVideoEglContext),
                 peerMessenger = peerMessenger,
                 localServerFactory = localServerFactory,
-                l5Config = l5Config,
+                agwConfig = agwConfig,
             )
         }
     }

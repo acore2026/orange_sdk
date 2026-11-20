@@ -476,7 +476,7 @@ class AgentSdkGroupConfigTest {
     }
 
     @Test
-    fun `current group version contract is enforced with L5 disabled`() = runTest {
+    fun `current group version contract is enforced with AGW disabled`() = runTest {
         initializeSdk()
         val missingVersion = JsonObject(groupConfig().filterKeys { it != "group_version" })
         val error = runCatching { runtime.deliverGroupConfig(missingVersion) }.exceptionOrNull() as AgentSdkException

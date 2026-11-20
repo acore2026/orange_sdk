@@ -1,4 +1,4 @@
-package com.rayneo.agent.sdk.l5
+package com.rayneo.agent.sdk.agw
 
 import android.util.Log
 import com.rayneo.agent.sdk.model.GroupConfigSnapshot
@@ -10,15 +10,15 @@ import kotlinx.serialization.json.*
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
-internal class L5RequestFailure(val retryInterval: Long, message: String) : Exception(message)
+internal class AGWRequestFailure(val retryInterval: Long, message: String) : Exception(message)
 
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
-class L5Manager internal constructor(
-    private val config: L5Config,
+class AGWManager internal constructor(
+    private val config: AGWConfig,
     private val agentId: String,
     private val sourceIp: String,
     private val tunnel: TunnelController,
-    private val bridge: L5Bridge = NativeL5Bridge(),
+    private val bridge: AGWBridge = NativeAGWBridge(),
 ) {
     private data class Key(val group: String, val role: String, val member: String, val name: String)
     private class Role(val handle: Long) {
@@ -51,7 +51,7 @@ class L5Manager internal constructor(
     private val statuses = ConcurrentHashMap<Key, String>()
     @Volatile private var closed = false
     @Volatile var listener: ((JsonObject) -> Unit)? = null
-    private val routeKey = "\u0000acn-l5-relay"
+    private val routeKey = "\u0000acn-agw-relay"
 
     private fun now() = System.nanoTime() / 1_000_000
     private fun emit(type: String, key: Key? = null, reason: String? = null, value: JsonObject? = null) {
@@ -66,7 +66,7 @@ class L5Manager internal constructor(
             reason?.let { put("reason", it) }
             value?.let { put(if (type == "catalog") "catalog" else "payload", it) }
         }
-        Log.i("AgentSdkL5", event.toString())
+        Log.i("AgentSdkAGW", event.toString())
         scope.launch { runCatching { listener?.invoke(event) } }
     }
 
@@ -101,7 +101,7 @@ class L5Manager internal constructor(
                             prepare(key, version, deadline)
                             if (valid(key.group, version)) { statuses[key] = "READY"; emit("ready", key) }
                             return@withTimeout
-                        } catch (error: L5RequestFailure) {
+                        } catch (error: AGWRequestFailure) {
                             if (error.retryInterval == 0L) throw error
                             delay((error.retryInterval - 1).coerceAtLeast(100).coerceAtMost(remaining(deadline)))
                         }
@@ -140,7 +140,7 @@ class L5Manager internal constructor(
                                     put("host", config.relayIpv4); put("port", config.relayPort); put("source_ip", sourceIp)
                                     put("agent_id", agentId); put("role", name)
                                 })
-                                if (closed || groups.isEmpty()) { bridge.close(handle); throw CancellationException("no active L5 group") }
+                                if (closed || groups.isEmpty()) { bridge.close(handle); throw CancellationException("no active AGW group") }
                                 val connected = Role(handle)
                                 roles[name] = connected
                                 if (name == "publisher") ownRevision.clear()
@@ -148,7 +148,7 @@ class L5Manager internal constructor(
                                 return@withTimeout connected
                             } catch (error: CancellationException) { throw error
                             } catch (error: Exception) {
-                                if (error is L5BindingException && error.code != "AGENT_NOT_REGISTERED") throw error
+                                if (error is AGWBindingException && error.code != "AGENT_NOT_REGISTERED") throw error
                                 delay(500)
                             }
                         }
@@ -248,7 +248,7 @@ class L5Manager internal constructor(
                     "accepted" -> connection.requests[id]?.complete(Unit)
                     "failed" -> {
                         val key = connection.owners.remove(id) ?: continue
-                        val failure = L5RequestFailure(event["retry_interval"]?.jsonPrimitive?.longOrNull ?: 0, event["reason"]?.jsonPrimitive?.content ?: "Track ended")
+                        val failure = AGWRequestFailure(event["retry_interval"]?.jsonPrimitive?.longOrNull ?: 0, event["reason"]?.jsonPrimitive?.content ?: "Track ended")
                         val pending = connection.requests.remove(id)
                         if (pending?.isCompleted == false) pending.completeExceptionally(failure)
                         else { requests.remove(key); statuses[key] = "UNAVAILABLE"; if (key.name == "group_catalog") catalogs.remove(key.group to key.member); emit("unavailable", key, failure.message); start(key) }
@@ -271,7 +271,7 @@ class L5Manager internal constructor(
         } finally {
             if (roles.remove(name, connection)) {
                 bridge.close(connection.handle)
-                connection.requests.values.forEach { if (!it.isCompleted) it.completeExceptionally(L5RequestFailure(501, "role disconnected")) }
+                connection.requests.values.forEach { if (!it.isCompleted) it.completeExceptionally(AGWRequestFailure(501, "role disconnected")) }
                 requests.entries.removeIf { it.value.role === connection }
                 statuses.keys.filter { it.role == name }.forEach { statuses[it] = "UNAVAILABLE" }
                 if (!closed && name !in roleBlocked) groups.keys.forEach { group ->
@@ -317,7 +317,7 @@ class L5Manager internal constructor(
         require(entries.containsKey(name) || entries.size < 64)
         entries[name] = contentType
         val key = Key(group, "publisher", agentId, name)
-        start(key)?.await(); check(statuses[key] == "READY") { "L5 publication unavailable" }
+        start(key)?.await(); check(statuses[key] == "READY") { "AGW publication unavailable" }
         queueCatalog(group)
     }
     suspend fun unregisterTrack(group: String, name: String) {
@@ -327,7 +327,7 @@ class L5Manager internal constructor(
     suspend fun subscribe(group: String, member: String, name: String) {
         requireGroup(group); require(member != agentId && member in groups.getValue(group).membersByAgentId && name.isNotEmpty() && name != "group_catalog" && name.toByteArray().size <= 128)
         val key = Key(group, "subscriber", member, name); wanted.add(key)
-        start(key)?.await(); check(statuses[key] == "READY") { "L5 subscription unavailable" }
+        start(key)?.await(); check(statuses[key] == "READY") { "AGW subscription unavailable" }
     }
     suspend fun unsubscribe(group: String, member: String, name: String) {
         val key = Key(group, "subscriber", member, name); wanted.remove(key); work.remove(key)?.cancel()
@@ -336,7 +336,7 @@ class L5Manager internal constructor(
     suspend fun publish(group: String, name: String, value: JsonObject, datagram: Boolean = false) {
         requireGroup(group); val key = Key(group, "publisher", agentId, name)
         require(name != "group_catalog" && tracks[group]?.containsKey(name) == true)
-        check(statuses[key] == "READY") { "L5 publication unavailable" }
+        check(statuses[key] == "READY") { "AGW publication unavailable" }
         send(requests.getValue(key), value, datagram)
     }
     private suspend fun send(request: Request, value: JsonObject, datagram: Boolean = false) {

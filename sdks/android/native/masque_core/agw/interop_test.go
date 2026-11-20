@@ -1,4 +1,4 @@
-package l5
+package agw
 
 import (
 	"bufio"

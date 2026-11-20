@@ -1,3 +1,18 @@
+## 2026-11-20 — MOQ 默认安装 ACN 依赖
+
+- 配套 `moq-py` 默认安装 `aioquic==1.3.0`，Python 最低版本同步为 3.10；SDK `[agw]` 依赖改为 `moq-transport==0.1.0`，不再引用 `[acn]` 安装项。
+- 更新终端用例及接入说明。SDK AGW 仍为显式开启的可选功能，普通 MOQ 和 AGW 各用原入口，安装不会启动服务。
+- 验证：MOQ/ACN 相关测试 49 项、SDK AGW 三终端用例 7 项通过；两个 wheel 构建、内容检查和安装后导入通过。全新环境的完整依赖下载未完成；本地交付物位于 `dist/agw/`，不纳入 Git。
+
+## 2026-11-20 — ACN AGW API 命名与 A/B/C 真实终端流程
+
+- 将可选 Relay 发布订阅能力从 SDK 旧 L5 命名改为 AGW：Python 使用 `AGWConfig/agw_config/*_agw_*`，Android 使用 `AGWConfig/agwConfig/*AGW*`；Python extra、实现目录、Android 包目录和专用 JNI 类也统一改名。未保留旧 `L5Config`、`l5_config` 或 `l5_*` API 兼容别名。现有 Android 设备/应用需使用重建后的 AAR。
+- 不改变 MOQT 线上格式、ACN/ACF 管理协议、Relay 地址参数语义或普通 L3 A2A 行为。核心网既有 `FREE6GC_ACF_L5_ENABLED` 等配置是网侧既有运行契约，SDK API 改名不重命名网侧配置。
+- 新增 `examples/python/agw/` 独立用例目录，包含 A/B/C 三个终端入口、共用 `AgentSdk` 流程、QUIC Relay 集成测试和执行手册。三个独立进程通过公共 API 完成身份、Profile（VC0/VC1/实验能力 VC）、技能发现、邀请/群组配置、AGW 目录同步、Track 发布订阅、多播业务回执和 Agent 注销；不依赖文件/协调服务器交换成员或群组信息。
+- 集成测试以三个真实 AgentSdk、真实 Python QUIC Relay 和 mock Runtime/TUN/MASQUE 边界验证同一流程，覆盖 A→B/C 多条消息和回执、配置失败后清理、旧 SDK 接口不存在。它不替代实际 UE/UPF/Runtime 环境验收。
+- 更新 Python、Android、SDK 根 README 及 `docs/protocols/ACN-AGW接入说明.md`。
+- 验证：Python SDK 全套 189 项通过；AGW 三终端本地 QUIC 集成 7 项通过，连同现有 A/B 示例回归共 20 项通过；Android 102 项单测及 Release AAR 构建通过；Go 原生 AGW/CONNECT-IP `-race` 和 Python Relay 互通测试通过，四种 Android ABI 原生库已重建且 Release AAR 内库与之匹配；AGW 接入文档/CLI 帮助及 `git diff --check` 通过。未执行实际 UE/UPF/Runtime 真实核心网/Android 真机验收，未部署。
+
 # 2026-11-16 — 目录重构一致性复核
 
 - 以 `c3b5117` 为基线核对原有 279 个文件，确认业务源码、资源、预置原生库和 wheel SDK 内容保持一致；按要求移除 README 中缺失验证报告的引用，不补建报告。

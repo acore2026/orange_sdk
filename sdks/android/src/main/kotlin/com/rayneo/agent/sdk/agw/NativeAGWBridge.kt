@@ -1,20 +1,20 @@
-package com.rayneo.agent.sdk.l5
+package com.rayneo.agent.sdk.agw
 
 import androidx.annotation.Keep
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 
-interface L5Bridge {
+interface AGWBridge {
     suspend fun open(configuration: JsonObject): Long
     suspend fun call(handle: Long, command: JsonObject): JsonObject
     fun close(handle: Long)
 }
 
-class L5BindingException(val code: String, message: String) : IllegalStateException(message)
+class AGWBindingException(val code: String, message: String) : IllegalStateException(message)
 
 @Keep
-class NativeL5Bridge : L5Bridge {
+class NativeAGWBridge : AGWBridge {
     companion object {
         private val loading = runCatching { System.loadLibrary("masque_core") }
     }
@@ -25,7 +25,7 @@ class NativeL5Bridge : L5Bridge {
     private fun decode(text: String): JsonObject {
         val value = Json.parseToJsonElement(text).jsonObject
         value["error"]?.let {
-            value["code"]?.let { code -> throw L5BindingException(code.jsonPrimitive.content, it.jsonPrimitive.content) }
+            value["code"]?.let { code -> throw AGWBindingException(code.jsonPrimitive.content, it.jsonPrimitive.content) }
             throw IllegalStateException(it.jsonPrimitive.content)
         }
         return value

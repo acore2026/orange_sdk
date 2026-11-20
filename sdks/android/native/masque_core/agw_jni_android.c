@@ -2,9 +2,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-extern char *L5Open(char *configuration);
-extern char *L5Call(long long handle, char *command);
-extern void L5Close(long long handle);
+extern char *AGWOpen(char *configuration);
+extern char *AGWCall(long long handle, char *command);
+extern void AGWClose(long long handle);
 
 static char *utf8_bytes(JNIEnv *env, jbyteArray value) {
     jsize size = (*env)->GetArrayLength(env, value);
@@ -23,27 +23,27 @@ static jbyteArray response_bytes(JNIEnv *env, char *result) {
 }
 
 JNIEXPORT jbyteArray JNICALL
-Java_com_rayneo_agent_sdk_l5_NativeL5Bridge_nativeOpen(JNIEnv *env, jobject bridge, jbyteArray configuration) {
+Java_com_rayneo_agent_sdk_agw_NativeAGWBridge_nativeOpen(JNIEnv *env, jobject bridge, jbyteArray configuration) {
     (void)bridge;
     char *value = utf8_bytes(env, configuration);
     if (value == NULL) return NULL;
-    char *result = L5Open((char *)value);
+    char *result = AGWOpen((char *)value);
     free(value);
     return response_bytes(env, result);
 }
 
 JNIEXPORT jbyteArray JNICALL
-Java_com_rayneo_agent_sdk_l5_NativeL5Bridge_nativeCall(JNIEnv *env, jobject bridge, jlong handle, jbyteArray command) {
+Java_com_rayneo_agent_sdk_agw_NativeAGWBridge_nativeCall(JNIEnv *env, jobject bridge, jlong handle, jbyteArray command) {
     (void)bridge;
     char *value = utf8_bytes(env, command);
     if (value == NULL) return NULL;
-    char *result = L5Call((long long)handle, (char *)value);
+    char *result = AGWCall((long long)handle, (char *)value);
     free(value);
     return response_bytes(env, result);
 }
 
 JNIEXPORT void JNICALL
-Java_com_rayneo_agent_sdk_l5_NativeL5Bridge_nativeClose(JNIEnv *env, jobject bridge, jlong handle) {
+Java_com_rayneo_agent_sdk_agw_NativeAGWBridge_nativeClose(JNIEnv *env, jobject bridge, jlong handle) {
     (void)env; (void)bridge;
-    L5Close((long long)handle);
+    AGWClose((long long)handle);
 }

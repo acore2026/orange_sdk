@@ -10,7 +10,7 @@ The Android library mirrors the Python SDK's group-cache and endpoint rules:
   `group_id + agent_id`.
 - Positive uint64 `group_version` orders configurations. Same-version semantic
   replays ignore timestamp/proof changes and ACK without rewriting routes or
-  clearing valid L5 work; older versions and same-version content conflicts fail.
+  clearing valid AGW work; older versions and same-version content conflicts fail.
 - `acf_group_invalidated` retires the group before best-effort route cleanup.
   A retired group ID cannot be restored during this SDK process lifetime.
 - A2A HTTP calls the cached complete `service_endpoints` URL without rewriting
@@ -21,6 +21,12 @@ The Android library mirrors the Python SDK's group-cache and endpoint rules:
   changes whose aggregate destination set is unchanged do not rebuild the TUN.
 - Runtime downlink uses a client WebSocket with Ping-based failure detection and bounded
   exponential reconnect; A2A uses the Agent TUN HTTP listener.
+
+Optional Relay publication/subscription uses `com.rayneo.agent.sdk.agw.AGWConfig`
+and `AgentSdk.create(..., agwConfig = ...)`. Public methods use `AGW`, such as
+`registerAGWTrack`, `subscribeAGWTrack` and `publishAGWMessage`. Previous
+L5-specific API names have been removed; rebuild the application with the matching AAR/native
+libraries. See [ACN AGW integration](../../docs/protocols/ACN-AGW接入说明.md).
 
 ## Callback registration APIs
 
@@ -70,10 +76,10 @@ Identical configuration replays do not redispatch the callback, including after 
 callback exception. Coroutine cancellation still follows the SDK lifecycle.
 
 The `group_version` and invalidation rules above are the current ACN group
-contract and apply with L5 disabled as well. They align Android with Python and
+contract and apply with AGW disabled as well. They align Android with Python and
 the current core network; older configurations without `group_version` are not
-accepted. L5 is optional, but this group-contract alignment is a baseline SDK
-upgrade rather than an L5-only behavior.
+accepted. AGW is optional, but this group-contract alignment is a baseline SDK
+upgrade rather than an AGW-only behavior.
 
 `registerGroupMessageListener` receives peer A2A messages after the SDK validates the
 target, group membership, and message structure. If no group listener is registered, the

@@ -1,5 +1,5 @@
-// Package l5 implements the ACN-only MOQT profile without modifying CONNECT-IP.
-package l5
+// Package agw implements the ACN-only MOQT profile without modifying CONNECT-IP.
+package agw
 
 import (
 	"bytes"

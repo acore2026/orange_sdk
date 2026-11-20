@@ -35,8 +35,8 @@ Python 安装使用 `python3 -m pip install -e './sdks/python[test]'`。运行�
 
 ## SDK 使用入口
 
-可选 ACN L5 群组发布订阅的配置、Python/Android API、目录及重试语义见
-[ACN L5 接入说明](docs/protocols/ACN-L5接入说明.md)。该扩展默认关闭，既有 L3 A2A 与媒体接口保持独立。
+可选 ACN AGW 群组发布订阅的配置、Python/Android API、目录及重试语义见
+[ACN AGW 接入说明](docs/protocols/ACN-AGW接入说明.md)。该扩展默认关闭，既有 L3 A2A 与媒体接口保持独立。
 
 SDK 的系统边界、模块职责、4+1 视图、核心流程、接口消息和部署约束见 [Orange Agent SDK 设计文档](<docs/architecture/Orange Agent SDK 设计文档.md>)。
 
@@ -50,6 +50,8 @@ SDK 的系统边界、模块职责、4+1 视图、核心流程、接口消息和
 - [按回车逐接口调用的 Linux 交互示例](examples/python/interactive_linux_agent.py)
 - [Agent A：建组、申请算力会话并验证处理视频](examples/python/agent_a_test.py)
 - [Agent B：发布能力、接受建组并上传本地测试视频](examples/python/agent_b_test.py)
+- [AGW A/B/C 三终端全链路测试手册](examples/python/agw/AGW终端全流程测试.md)
+- [AGW A 端真实 SDK 脚本](examples/python/agw/agw_agent_a.py)、[B 端](examples/python/agw/agw_agent_b.py)、[C 端](examples/python/agw/agw_agent_c.py)
 - [机器狗巡检 Agent：身份注册、巡逻、视觉卸载和 Unitree 动作](apps/dog-patrol/README.md)
 - [ARM64 A/B 全公开接口测试镜像](examples/python/docker/arm64/README.md)
 - [A/B 双实例 MASQUE 消息联调脚本](integration-tests/scenarios/masque_two_instance_test.py)

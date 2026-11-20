@@ -1,4 +1,4 @@
-package com.rayneo.agent.sdk.l5
+package com.rayneo.agent.sdk.agw
 
 import com.rayneo.agent.sdk.model.GroupConfigSnapshot
 import com.rayneo.agent.sdk.model.GroupMemberInfo
@@ -13,7 +13,16 @@ import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
-class L5ManagerTest {
+class AGWManagerTest {
+    @Test fun `public SDK exposes AGW names without legacy L5 names`() {
+        val methods = com.rayneo.agent.sdk.AgentSdk::class.java.methods.map { it.name }.toSet()
+        assertTrue("registerAGWTrack" in methods)
+        assertTrue("subscribeAGWTrack" in methods)
+        assertTrue("publishAGWMessage" in methods)
+        assertTrue("getAGWCatalog" in methods)
+        assertTrue(methods.none { it.contains("L5") || it.startsWith("register_l5") })
+    }
+
     private class Routes : TunnelController {
         override val tunFd = -1
         override val clientIdentityDirectory = ""
@@ -27,7 +36,7 @@ class L5ManagerTest {
         override fun setTunFdSwapper(swapper: suspend (Int) -> Unit) {}
     }
 
-    private class Bridge : L5Bridge {
+    private class Bridge : AGWBridge {
         val sequence = AtomicLong()
         val opened = ConcurrentHashMap<Long, String>()
         val events = ConcurrentHashMap<Long, Channel<JsonObject>>()
@@ -66,13 +75,13 @@ class L5ManagerTest {
         1, version)
 
     @Test fun `namespace matches Python SHA256 Base32 and full uint64`() {
-        assertEquals("kwnovuecmtkxsxjzbfyyzxifvpkjk4xij7svleho6mniriep376q", L5Manager.identifierKey("A"))
-        assertEquals("18446744073709551615", L5Manager.namespace("g", ULong.MAX_VALUE, "A")[5])
+        assertEquals("kwnovuecmtkxsxjzbfyyzxifvpkjk4xij7svleho6mniriep376q", AGWManager.identifierKey("A"))
+        assertEquals("18446744073709551615", AGWManager.namespace("g", ULong.MAX_VALUE, "A")[5])
     }
 
     @Test fun `two roles and catalog are independent of application listener`() = runBlocking {
         val bridge = Bridge(); val routes = Routes()
-        val manager = L5Manager(L5Config("127.0.0.1"), "A", "127.0.0.1", routes, bridge)
+        val manager = AGWManager(AGWConfig("127.0.0.1"), "A", "127.0.0.1", routes, bridge)
         try {
             val config = snapshot()
             manager.configure(config)
