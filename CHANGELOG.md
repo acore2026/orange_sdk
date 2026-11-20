@@ -2,7 +2,8 @@
 
 - 配套 `moq-py` 默认安装 `aioquic==1.3.0`，Python 最低版本同步为 3.10；SDK `[agw]` 依赖改为 `moq-transport==0.1.0`，不再引用 `[acn]` 安装项。
 - 更新终端用例及接入说明。SDK AGW 仍为显式开启的可选功能，普通 MOQ 和 AGW 各用原入口，安装不会启动服务。
-- 验证：MOQ/ACN 相关测试 49 项、SDK AGW 三终端用例 7 项通过；两个 wheel 构建、内容检查和安装后导入通过。全新环境的完整依赖下载未完成；本地交付物位于 `dist/agw/`，不纳入 Git。
+- 将 Python SDK 与 `moq-transport` wheel 及安装说明一并提交到 `dist/agw/`，供新终端直接安装；SDK wheel 含实验签名私钥，仅用于封闭联调，不可用于生产。
+- 验证：MOQ/ACN 相关测试 49 项、SDK AGW 三终端用例 7 项通过；两个 wheel 构建、内容检查和安装后导入通过。全新环境的完整依赖下载未完成。
 
 ## 2026-11-20 — ACN AGW API 命名与 A/B/C 真实终端流程
 
